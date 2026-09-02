@@ -17,6 +17,8 @@ public struct ConfigSnapshot: Codable, Equatable {
     public var theme: String
     public var isPro: Bool
     public var memberId: String
+    public var isUploadHeartRateEnabled: Bool
+    public var isUploadLocationEnabled: Bool
     public var configTs: TimeInterval
     
     public init(
@@ -26,6 +28,8 @@ public struct ConfigSnapshot: Codable, Equatable {
         theme: String = "Green",
         isPro: Bool = false,
         memberId: String = "",
+        isUploadHeartRateEnabled: Bool = true,
+        isUploadLocationEnabled: Bool = true,
         configTs: TimeInterval = 0
     ) {
         self.callsign = callsign
@@ -34,7 +38,28 @@ public struct ConfigSnapshot: Codable, Equatable {
         self.theme = theme
         self.isPro = isPro
         self.memberId = memberId
+        self.isUploadHeartRateEnabled = isUploadHeartRateEnabled
+        self.isUploadLocationEnabled = isUploadLocationEnabled
         self.configTs = configTs
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case callsign, roomName, pin, theme, isPro, memberId
+        case isUploadHeartRateEnabled, isUploadLocationEnabled
+        case configTs
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.callsign = try container.decodeIfPresent(String.self, forKey: .callsign) ?? ""
+        self.roomName = try container.decodeIfPresent(String.self, forKey: .roomName) ?? ""
+        self.pin = try container.decodeIfPresent(String.self, forKey: .pin) ?? ""
+        self.theme = try container.decodeIfPresent(String.self, forKey: .theme) ?? "Green"
+        self.isPro = try container.decodeIfPresent(Bool.self, forKey: .isPro) ?? false
+        self.memberId = try container.decodeIfPresent(String.self, forKey: .memberId) ?? ""
+        self.isUploadHeartRateEnabled = try container.decodeIfPresent(Bool.self, forKey: .isUploadHeartRateEnabled) ?? true
+        self.isUploadLocationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isUploadLocationEnabled) ?? true
+        self.configTs = try container.decodeIfPresent(TimeInterval.self, forKey: .configTs) ?? 0.0
     }
     
     public func isEquivalent(to other: ConfigSnapshot) -> Bool {
@@ -44,6 +69,8 @@ public struct ConfigSnapshot: Codable, Equatable {
                theme == other.theme &&
                isPro == other.isPro &&
                memberId == other.memberId &&
+               isUploadHeartRateEnabled == other.isUploadHeartRateEnabled &&
+               isUploadLocationEnabled == other.isUploadLocationEnabled &&
                configTs == other.configTs
     }
 }
@@ -107,24 +134,98 @@ public struct PlayerStateSnapshot: Codable, Equatable {
 // MARK: - Directional High-Speed Structures
 
 public struct PhoneToWatchHighSpeed: Codable, Equatable {
+    public var activeUntil: TimeInterval
     public var freshUntil: TimeInterval
     public var remotePlayerTelemetryJson: String
     
-    public init(freshUntil: TimeInterval = 0, remotePlayerTelemetryJson: String = "{}") {
+    public init(
+        activeUntil: TimeInterval = 0,
+        freshUntil: TimeInterval = 0,
+        remotePlayerTelemetryJson: String = "{}"
+    ) {
+        self.activeUntil = activeUntil
         self.freshUntil = freshUntil
         self.remotePlayerTelemetryJson = remotePlayerTelemetryJson
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case activeUntil = "active_until"
+        case freshUntil = "fresh_until"
+        case remotePlayerTelemetryJson = "remote_telemetry"
+        case legacyFreshUntil = "freshUntil"
+        case legacyRemoteTelemetryJson = "remotePlayerTelemetryJson"
+        case legacyActiveUntil = "activeUntil"
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.activeUntil = (try? container.decode(TimeInterval.self, forKey: .activeUntil)) ??
+                           (try? container.decode(TimeInterval.self, forKey: .legacyActiveUntil)) ?? 0.0
+        self.freshUntil = (try? container.decode(TimeInterval.self, forKey: .freshUntil)) ??
+                          (try? container.decode(TimeInterval.self, forKey: .legacyFreshUntil)) ?? 0.0
+        self.remotePlayerTelemetryJson = (try? container.decode(String.self, forKey: .remotePlayerTelemetryJson)) ??
+                                        (try? container.decode(String.self, forKey: .legacyRemoteTelemetryJson)) ?? "{}"
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(activeUntil, forKey: .activeUntil)
+        try container.encode(freshUntil, forKey: .freshUntil)
+        try container.encode(remotePlayerTelemetryJson, forKey: .remotePlayerTelemetryJson)
     }
 }
 
 public struct WatchToPhoneHighSpeed: Codable, Equatable {
+    public var activeUntil: TimeInterval
     public var freshUntil: TimeInterval
     public var heartRate: Double
+    public var remotePlayerTelemetryJson: String
     
-    public init(freshUntil: TimeInterval = 0, heartRate: Double = 75.0) {
+    public init(
+        activeUntil: TimeInterval = 0,
+        freshUntil: TimeInterval = 0,
+        heartRate: Double = 75.0,
+        remotePlayerTelemetryJson: String = "{}"
+    ) {
+        self.activeUntil = activeUntil
         self.freshUntil = freshUntil
         self.heartRate = heartRate
+        self.remotePlayerTelemetryJson = remotePlayerTelemetryJson
+    }
+    
+    enum CodingKeys: String, CodingKey {
+        case activeUntil = "active_until"
+        case freshUntil = "fresh_until"
+        case heartRate = "hr"
+        case remotePlayerTelemetryJson = "remote_telemetry"
+        case legacyFreshUntil = "freshUntil"
+        case legacyHeartRate = "heartRate"
+        case legacyRemoteTelemetryJson = "remotePlayerTelemetryJson"
+        case legacyActiveUntil = "activeUntil"
+    }
+    
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.activeUntil = (try? container.decode(TimeInterval.self, forKey: .activeUntil)) ??
+                           (try? container.decode(TimeInterval.self, forKey: .legacyActiveUntil)) ?? 0.0
+        self.freshUntil = (try? container.decode(TimeInterval.self, forKey: .freshUntil)) ??
+                          (try? container.decode(TimeInterval.self, forKey: .legacyFreshUntil)) ?? 0.0
+        self.heartRate = (try? container.decode(Double.self, forKey: .heartRate)) ??
+                         (try? container.decode(Double.self, forKey: .legacyHeartRate)) ?? 75.0
+        self.remotePlayerTelemetryJson = (try? container.decode(String.self, forKey: .remotePlayerTelemetryJson)) ??
+                                        (try? container.decode(String.self, forKey: .legacyRemoteTelemetryJson)) ?? "{}"
+    }
+    
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(activeUntil, forKey: .activeUntil)
+        try container.encode(freshUntil, forKey: .freshUntil)
+        try container.encode(heartRate, forKey: .heartRate)
+        try container.encode(remotePlayerTelemetryJson, forKey: .remotePlayerTelemetryJson)
     }
 }
+
+
 
 // MARK: - Directional Low-Speed Snapshots
 
@@ -204,7 +305,7 @@ public struct MergeEngine {
     /// Rules:
     /// 1. Newer *_ts wins.
     /// 2. If *_ts are equal and values are equal -> converged.
-    /// 3. If *_ts are equal and values differ -> Phone wins.
+    /// 3. If *_ts are equal and values differ -> Watch wins.
     public static func resolveWinner<T: Equatable>(
         phoneValue: T,
         phoneTs: TimeInterval,
@@ -216,8 +317,8 @@ public struct MergeEngine {
         } else if watchTs > phoneTs {
             return (watchValue, watchTs, false)
         } else {
-            // Equal timestamps: Phone wins tie-break if values differ or equal
-            return (phoneValue, phoneTs, true)
+            // Equal timestamps: Watch wins tie-break (phoneWon = false)
+            return (watchValue, watchTs, false)
         }
     }
     

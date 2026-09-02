@@ -42,7 +42,6 @@ public final class HealthKitManager: NSObject, ObservableObject {
         #else
         // Mock fallback for simulator/host tests
         DispatchQueue.main.async {
-            self.currentHeartRate = AppConstants.Health.mockRestingHeartRate
             completion(true)
         }
         #endif
@@ -66,6 +65,17 @@ public final class HealthKitManager: NSObject, ObservableObject {
             
             let startDate = Date()
             workoutSession?.startActivity(with: startDate)
+            
+            if #available(watchOS 10.0, *) {
+                workoutSession?.startMirroringToCompanionDevice { success, error in
+                    if let error = error {
+                        print("[HealthKitManager] Companion mirroring error: \(error.localizedDescription)")
+                    } else {
+                        print("[HealthKitManager] Companion mirroring active: \(success)")
+                    }
+                }
+            }
+            
             workoutBuilder?.beginCollection(withStart: startDate) { [weak self] success, error in
                 DispatchQueue.main.async {
                     self?.isSessionActive = success

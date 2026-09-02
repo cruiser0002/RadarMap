@@ -14,7 +14,7 @@ public enum TacticalIndicatorCategory: String, Codable, CaseIterable, Identifiab
         case .squadOrder:
             return "Team Orders"
         case .enemyIndicator:
-            return "Tac Indicators"
+            return "Tactical"
         case .environment:
             return "Environment"
         }
@@ -139,9 +139,73 @@ public enum TacticalIndicatorType: String, Codable, CaseIterable, Identifiable {
         default:
             if let type = TacticalIndicatorType(rawValue: raw) {
                 self = type
+            } else if let type = TacticalIndicatorType.fromCode(raw) {
+                self = type
             } else {
                 throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unknown TacticalIndicatorType: \(raw)")
             }
+        }
+    }
+    
+    /// 3-letter shorthand code for compact network payloads
+    public var code: String {
+        switch self {
+        case .watchHere: return AppConstants.Encoding.Tactical.watchHere
+        case .goHere: return AppConstants.Encoding.Tactical.goHere
+        case .attackHere: return AppConstants.Encoding.Tactical.attackHere
+        case .protectHere: return AppConstants.Encoding.Tactical.protectHere
+        case .flag: return AppConstants.Encoding.Tactical.flag
+        case .point1: return AppConstants.Encoding.Tactical.point1
+        case .point2: return AppConstants.Encoding.Tactical.point2
+        case .point3: return AppConstants.Encoding.Tactical.point3
+        case .point4: return AppConstants.Encoding.Tactical.point4
+        case .point5: return AppConstants.Encoding.Tactical.point5
+        case .point6: return AppConstants.Encoding.Tactical.point6
+        case .point7: return AppConstants.Encoding.Tactical.point7
+        case .point8: return AppConstants.Encoding.Tactical.point8
+        case .point9: return AppConstants.Encoding.Tactical.point9
+        case .point10: return AppConstants.Encoding.Tactical.point10
+        case .infantry: return AppConstants.Encoding.Tactical.infantry
+        case .vehicle: return AppConstants.Encoding.Tactical.vehicle
+        case .armor: return AppConstants.Encoding.Tactical.armor
+        case .drone: return AppConstants.Encoding.Tactical.drone
+        case .water: return AppConstants.Encoding.Tactical.water
+        case .hazard: return AppConstants.Encoding.Tactical.hazard
+        case .fire: return AppConstants.Encoding.Tactical.fire
+        case .snow: return AppConstants.Encoding.Tactical.snow
+        case .closure: return AppConstants.Encoding.Tactical.closure
+        case .emergency: return AppConstants.Encoding.Tactical.emergency
+        }
+    }
+    
+    public static func fromCode(_ code: String) -> TacticalIndicatorType? {
+        switch code {
+        case AppConstants.Encoding.Tactical.watchHere, "watchHere": return .watchHere
+        case AppConstants.Encoding.Tactical.goHere, "goHere": return .goHere
+        case AppConstants.Encoding.Tactical.attackHere, "attackHere": return .attackHere
+        case AppConstants.Encoding.Tactical.protectHere, "protectHere": return .protectHere
+        case AppConstants.Encoding.Tactical.flag, "flag": return .flag
+        case AppConstants.Encoding.Tactical.point1, "point1": return .point1
+        case AppConstants.Encoding.Tactical.point2, "point2": return .point2
+        case AppConstants.Encoding.Tactical.point3, "point3": return .point3
+        case AppConstants.Encoding.Tactical.point4, "point4": return .point4
+        case AppConstants.Encoding.Tactical.point5, "point5": return .point5
+        case AppConstants.Encoding.Tactical.point6, "point6": return .point6
+        case AppConstants.Encoding.Tactical.point7, "point7": return .point7
+        case AppConstants.Encoding.Tactical.point8, "point8": return .point8
+        case AppConstants.Encoding.Tactical.point9, "point9": return .point9
+        case AppConstants.Encoding.Tactical.point10, "point10": return .point10
+        case AppConstants.Encoding.Tactical.infantry, "infantry": return .infantry
+        case AppConstants.Encoding.Tactical.vehicle, "vehicle", "lightVehicle": return .vehicle
+        case AppConstants.Encoding.Tactical.armor, "armor", "heavyVehicle": return .armor
+        case AppConstants.Encoding.Tactical.drone, "drone": return .drone
+        case AppConstants.Encoding.Tactical.water, "water": return .water
+        case AppConstants.Encoding.Tactical.hazard, "hazard": return .hazard
+        case AppConstants.Encoding.Tactical.fire, "fire": return .fire
+        case AppConstants.Encoding.Tactical.snow, "snow": return .snow
+        case AppConstants.Encoding.Tactical.closure, "closure": return .closure
+        case AppConstants.Encoding.Tactical.emergency, "emergency": return .emergency
+        default: return nil
         }
     }
 }
@@ -193,18 +257,61 @@ public struct TacticalIndicator: Identifiable, Codable, Equatable {
         self.expiresAt = expiresAt
     }
     
-    public var firebaseValue: [String: Any] {
-        var value: [String: Any] = [
-            "type": type.rawValue,
-            "latitude": latitude,
-            "longitude": longitude,
-            "placedByMemberId": placedByMemberId,
-            "timestamp": timestamp
+    /// Compact 5-element array format: [type_code, lat, lon, ts, placedByMemberId]
+    /// (Supports 4-element legacy format [type_code, lat, lon, ts] for backward compatibility)
+    public var compactArray: [Any] {
+        return [
+            type.code,
+            latitude,
+            longitude,
+            timestamp,
+            placedByMemberId
         ]
-        if let expiresAt = expiresAt {
-            value["expiresAt"] = expiresAt
+    }
+    
+    /// Deserializes a TacticalIndicator from compact 5-element (or 4-element) array or legacy map
+    public static func parse(id: String, rawValue: Any, defaultPlacedBy: String = "") -> TacticalIndicator? {
+        if let array = rawValue as? [Any], array.count >= 4 {
+            let typeStr = String(describing: array[0])
+            guard let type = TacticalIndicatorType.fromCode(typeStr) ?? TacticalIndicatorType(rawValue: typeStr),
+                  let lat = (array[1] as? NSNumber)?.doubleValue ?? Double("\(array[1])"),
+                  let lon = (array[2] as? NSNumber)?.doubleValue ?? Double("\(array[2])"),
+                  let ts = (array[3] as? NSNumber)?.doubleValue ?? Double("\(array[3])") else {
+                return nil
+            }
+            let placedBy = array.count >= 5 ? String(describing: array[4]) : defaultPlacedBy
+            return TacticalIndicator(
+                id: id,
+                type: type,
+                coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                placedByMemberId: placedBy,
+                timestamp: ts
+            )
+        } else if let dict = rawValue as? [String: Any] {
+            let typeStr = dict["type"] as? String ?? dict["t"] as? String ?? ""
+            guard let type = TacticalIndicatorType.fromCode(typeStr) ?? TacticalIndicatorType(rawValue: typeStr),
+                  let lat = dict["latitude"] as? Double ?? dict["lat"] as? Double ?? dict["la"] as? Double,
+                  let lon = dict["longitude"] as? Double ?? dict["lon"] as? Double ?? dict["lo"] as? Double,
+                  let ts = dict["timestamp"] as? TimeInterval ?? dict["ts"] as? TimeInterval else {
+                return nil
+            }
+            let placedBy = dict["placedByMemberId"] as? String ?? dict["mid"] as? String ?? defaultPlacedBy
+            let exp = dict["expiresAt"] as? TimeInterval ?? dict["exp"] as? TimeInterval
+            return TacticalIndicator(
+                id: id,
+                type: type,
+                coordinate: CLLocationCoordinate2D(latitude: lat, longitude: lon),
+                placedByMemberId: placedBy,
+                timestamp: ts,
+                expiresAt: exp
+            )
         }
-        return value
+        return nil
+    }
+    
+    /// Compact dictionary format for backward-compatibility or direct JSON writes
+    public var firebaseValue: [Any] {
+        return compactArray
     }
     
     /// Calculates the aging desaturation progress (0.0 = fresh radar color, 1.0 = fully faded to gray)
@@ -220,3 +327,4 @@ public struct TacticalIndicator: Identifiable, Codable, Equatable {
         return grayFadeFactor(referenceDate: referenceDate) >= 1.0
     }
 }
+

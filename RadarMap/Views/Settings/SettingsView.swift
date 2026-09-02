@@ -58,6 +58,8 @@ public struct SettingsView: View {
                 
                 radarColorSection
                 
+                privacyUploadSection
+                
                 paywallSection
                 
                 hudGuideSection
@@ -351,6 +353,38 @@ public struct SettingsView: View {
                     Text(gameState.radarColorTheme.rawValue)
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(gameState.radarColorTheme.color)
+                }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var privacyUploadSection: some View {
+        Section(header: Text("Data Sharing").font(.system(size: 9))) {
+            Toggle(isOn: Binding(
+                get: { gameState.isUploadLocationEnabled },
+                set: { enabled in
+                    withAnimation {
+                        gameState.isUploadLocationEnabled = enabled
+                    }
+                }
+            )) {
+                HStack(spacing: 6) {
+                    Image(systemName: "location.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.green)
+                    Text("Upload Location")
+                        .font(.system(size: 11, weight: .semibold))
+                }
+            }
+            
+            Toggle(isOn: $gameState.isUploadHeartRateEnabled) {
+                HStack(spacing: 6) {
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 10))
+                        .foregroundColor(.red)
+                    Text("Upload HR")
+                        .font(.system(size: 11, weight: .semibold))
                 }
             }
         }

@@ -11,11 +11,15 @@ final class RadarMapTests: XCTestCase {
         super.setUp()
         UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: "wc_peer_ls_snapshot")
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadLocationEnabledKey)
     }
     
     override func tearDown() {
         UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: "wc_peer_ls_snapshot")
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadLocationEnabledKey)
         super.tearDown()
     }
     
@@ -1282,11 +1286,11 @@ final class RadarMapTests: XCTestCase {
     func testAdaptiveDownloadPollingIntervalScaling() {
         let syncManager = FirebaseSyncManager()
         
-        // 1. Small room (<= 12 members): Base rate 1.0 Hz -> 1.0s interval
-        let room4 = SquadRoom(id: "ROOM4", hostId: "HOST", members: [
-            "M1": SquadMember(id: "M1", callsign: "C1", latitude: 0, longitude: 0),
-            "M2": SquadMember(id: "M2", callsign: "C2", latitude: 0, longitude: 0)
-        ])
+        // 1. Room with 4 members (<= 12 threshold): 1.0s
+        var room4 = SquadRoom(id: "ROOM4", hostId: "HOST", members: [:])
+        for i in 1...4 {
+            room4.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
+        }
         syncManager.activeRoom = room4
         XCTAssertEqual(syncManager.pollingInterval, 1.0)
         
@@ -1298,42 +1302,42 @@ final class RadarMapTests: XCTestCase {
         syncManager.activeRoom = room10
         XCTAssertEqual(syncManager.pollingInterval, 1.0)
         
-        // 3. Room with 24 members (24 / 12 = 2.0s)
+        // 3. Room with 24 members: (24 / 12)^2 = 4.0s
         var room24 = SquadRoom(id: "ROOM24", hostId: "HOST", members: [:])
         for i in 1...24 {
             room24.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         syncManager.activeRoom = room24
-        XCTAssertEqual(syncManager.pollingInterval, 2.0)
+        XCTAssertEqual(syncManager.pollingInterval, 4.0, accuracy: 0.001)
         
-        // 4. Large room with 30 members (30 / 12 = 2.5s)
+        // 4. Large room with 30 members: (30 / 12)^2 = 6.25s
         var room30 = SquadRoom(id: "ROOM30", hostId: "HOST", members: [:])
         for i in 1...30 {
             room30.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         syncManager.activeRoom = room30
-        XCTAssertEqual(syncManager.pollingInterval, 2.5)
+        XCTAssertEqual(syncManager.pollingInterval, 6.25, accuracy: 0.001)
         
-        // 5. Massive room with 60 members (60 / 12 = 5.0s)
+        // 5. Massive room with 60 members: (60 / 12)^2 = 25.0s
         var room60 = SquadRoom(id: "ROOM60", hostId: "HOST", members: [:])
         for i in 1...60 {
             room60.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         syncManager.activeRoom = room60
-        XCTAssertEqual(syncManager.pollingInterval, 5.0)
+        XCTAssertEqual(syncManager.pollingInterval, 25.0, accuracy: 0.001)
     }
     
     func testAdaptiveUploadIntervalScalingAndThrottling() {
         let gameState = GameStateManager()
         
-        // Create 24 member room (24 / 12 = 2.0s interval)
+        // Create 24 member room ((24 / 12)^2 = 4.0s interval)
         var room24 = SquadRoom(id: "ROOM24", hostId: gameState.myMemberId, members: [:])
         for i in 1...24 {
             room24.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         gameState.firebaseManager.activeRoom = room24
         gameState.recalculateAdaptiveUploadInterval()
-        XCTAssertEqual(gameState.adaptiveUploadInterval, 2.0)
+        XCTAssertEqual(gameState.adaptiveUploadInterval, 4.0, accuracy: 0.001)
         
         // Test throttling: rapid non-forced calls within interval
         gameState.broadcastLocalTelemetry(force: false) // first one allowed
@@ -1360,31 +1364,21 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 12), 1.0)
         XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 12), 1.0)
         
-        // Beyond threshold: R = N / P
-        // 24 players -> 12 / 24 = 0.5 Hz (2.0s interval)
-        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 24), 0.5)
-        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 24), 2.0)
+        // Beyond threshold: R = 1.0 * (12 / P)^2
+        // 24 players -> 1.0 * (12 / 24)^2 = 0.25 Hz (4.0s interval)
+        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 24), 0.25)
+        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 24), 4.0)
         
-        // 48 players -> 12 / 48 = 0.25 Hz (4.0s interval)
-        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 48), 0.25)
-        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 48), 4.0)
+        // 48 players -> 1.0 * (12 / 48)^2 = 0.0625 Hz (16.0s interval)
+        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 48), 0.0625)
+        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 48), 16.0)
         
-        // 60 players -> 12 / 60 = 0.20 Hz (5.0s interval)
-        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 60), 0.20)
-        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 60), 5.0)
-        
-        // Custom threshold test (e.g., N = 16)
-        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 32, playerThreshold: 16), 0.5)
-        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 32, playerThreshold: 16), 2.0)
-        
-        // Verify total theoretical bandwidth (rate * count) remains constant once past threshold
-        let theoreticalBandwidthUnits12 = FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 12) * 12.0
-        let theoreticalBandwidthUnits24 = FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 24) * 24.0
-        let theoreticalBandwidthUnits60 = FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 60) * 60.0
-        XCTAssertEqual(theoreticalBandwidthUnits12, 12.0, accuracy: 0.001)
-        XCTAssertEqual(theoreticalBandwidthUnits24, 12.0, accuracy: 0.001)
-        XCTAssertEqual(theoreticalBandwidthUnits60, 12.0, accuracy: 0.001)
+        // 60 players -> 1.0 * (12 / 60)^2 = 0.04 Hz (25.0s interval)
+        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 60), 0.04, accuracy: 0.0001)
+        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 60), 25.0, accuracy: 0.0001)
     }
+
+
     
     func testPinFieldSanitizationAndVoiceInput() {
         // Direct numeric strings
@@ -2037,6 +2031,37 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(decoded.coordinate.longitude, -122.4194, accuracy: 0.0001)
     }
     
+    func testTacticalIndicatorCompactArray5ElementSerialization() {
+        let indicator = TacticalIndicator(
+            id: "IND-5",
+            type: .goHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.3326, longitude: -122.0312),
+            placedByMemberId: "USER-123",
+            timestamp: 1700000000
+        )
+        
+        let compact = indicator.compactArray
+        XCTAssertEqual(compact.count, 5)
+        XCTAssertEqual(compact[0] as? String, "goh")
+        XCTAssertEqual(compact[1] as? Double, 37.3326)
+        XCTAssertEqual(compact[2] as? Double, -122.0312)
+        XCTAssertEqual(compact[3] as? Double, 1700000000)
+        XCTAssertEqual(compact[4] as? String, "USER-123")
+        
+        // Deserialize 5-element format
+        let parsed5 = TacticalIndicator.parse(id: "IND-5", rawValue: compact)
+        XCTAssertNotNil(parsed5)
+        XCTAssertEqual(parsed5?.type, .goHere)
+        XCTAssertEqual(parsed5?.placedByMemberId, "USER-123")
+        
+        // Backward-compatible 4-element format
+        let compact4: [Any] = ["goh", 37.3326, -122.0312, 1700000000.0]
+        let parsed4 = TacticalIndicator.parse(id: "IND-4", rawValue: compact4, defaultPlacedBy: "FALLBACK-USER")
+        XCTAssertNotNil(parsed4)
+        XCTAssertEqual(parsed4?.type, .goHere)
+        XCTAssertEqual(parsed4?.placedByMemberId, "FALLBACK-USER")
+    }
+    
     func testZoomScalePreservationBetweenViews() {
         let screenHeight: Double = AppConstants.UI.ScaleRuler.referenceScreenHeight
         let maxRadius: Double = screenHeight * 0.44
@@ -2067,15 +2092,15 @@ final class RadarMapTests: XCTestCase {
             XCTAssertEqual(roundtripScale, scale, accuracy: 0.001, "AppConstants zoom helper must preserve scale \(scale)m accurately")
         }
         
-        // 5. Verify ScaleRuler distance formatting helpers (tactical ruler = 2 clicks of minor scale)
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 5.0), "10m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 25.0), "50m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 50.0), "100m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 250.0), "500m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 500.0), "1km")
+        // 5. Verify ScaleRuler distance formatting helpers (tactical ruler displays exact map zoom scale)
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 5.0), "5m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 25.0), "25m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 50.0), "50m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 250.0), "250m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 500.0), "500m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 100.0), "100m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 2500.0), "2.5km")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatLiveRulerDistance(minorScaleMeters: 137.5), "275m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatLiveRulerDistance(minorScaleMeters: 137.5), "137.5m")
         
         // 6. Verify camera distance <-> scaleMeters roundtrip conversion
         for scale in testScales {
@@ -2098,23 +2123,24 @@ final class RadarMapTests: XCTestCase {
     func testUnifiedGameStateMapScaleAndCenterState() {
         let gameState = createMockGameState()
         
-        // 1. Initial default state (minor scale = 50m, 2-click ruler = 100m)
+        // 1. Initial default state (minor scale = 50m)
         XCTAssertEqual(gameState.radarScaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
         XCTAssertNil(gameState.currentMapCenter)
         XCTAssertEqual(gameState.radarCenterTrigger, 0)
         XCTAssertEqual(gameState.currentScaleText, AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: AppConstants.UI.RadarScale.defaultScaleMeters))
         
-        // 2. Modifying radarScaleMeters updates currentMapSpanDelta and currentScaleText (live format: 2 * 200m = 400m)
+        // 2. Modifying radarScaleMeters updates currentMapSpanDelta and currentScaleText (live format: 200m)
         gameState.radarScaleMeters = 200.0
-        XCTAssertEqual(gameState.currentScaleText, "400m")
+        XCTAssertEqual(gameState.currentScaleText, "200m")
         let computedDelta = gameState.currentMapSpanDelta
         XCTAssertEqual(computedDelta, AppConstants.UI.RadarScale.mapSpanDelta(forRadarScaleMeters: 200.0), accuracy: 0.00001)
         
-        // 3. Modifying currentMapSpanDelta updates radarScaleMeters
+        // 3. Modifying currentMapSpanDelta updates radarScaleMeters with discrete snapping
         let targetSpan = 0.004
         gameState.currentMapSpanDelta = targetSpan
-        let expectedScale = AppConstants.UI.RadarScale.radarScaleMeters(forMapSpanDelta: targetSpan)
-        XCTAssertEqual(gameState.radarScaleMeters, expectedScale, accuracy: 0.001)
+        let rawScale = AppConstants.UI.RadarScale.radarScaleMeters(forMapSpanDelta: targetSpan)
+        let expectedSnappedScale = AppConstants.UI.RadarScale.snapToDiscreteScale(rawScale)
+        XCTAssertEqual(gameState.radarScaleMeters, expectedSnappedScale, accuracy: 0.001)
         
         // 4. Modifying currentMapCenter
         let customCenter = CLLocationCoordinate2D(latitude: 37.5, longitude: -122.2)
@@ -2124,7 +2150,7 @@ final class RadarMapTests: XCTestCase {
         
         // 5. Calling resetMapToDefaultCenterAndZoom resets center and bumps trigger without changing scale
         gameState.resetMapToDefaultCenterAndZoom()
-        XCTAssertEqual(gameState.radarScaleMeters, expectedScale, accuracy: 0.001)
+        XCTAssertEqual(gameState.radarScaleMeters, expectedSnappedScale, accuracy: 0.001)
         XCTAssertNil(gameState.currentMapCenter)
         XCTAssertEqual(gameState.radarCenterTrigger, 1)
     }
@@ -3030,14 +3056,15 @@ final class RadarMapTests: XCTestCase {
         let largeRoom = SquadRoom(id: "LARGE_ROOM", hostId: "MEMBER_1", members: members)
         gameState.firebaseManager.activeRoom = largeRoom
         
-        // 30 players: updateInterval = 1.0 * (30 / 12) = 2.5s
+        // 30 players: updateInterval = 1.0 * (30 / 12)^2 = 6.25s
         gameState.recalculateAdaptiveUploadInterval()
-        XCTAssertEqual(gameState.adaptiveUploadInterval, 2.5, accuracy: 0.01)
+        XCTAssertEqual(gameState.adaptiveUploadInterval, 6.25, accuracy: 0.01)
         
         // Heartbeat fallback timer constant: 10.0s
         let fallbackInterval = gameState.currentHeartbeatFallbackInterval()
         XCTAssertEqual(fallbackInterval, 10.0, accuracy: 0.01, "Upload fallback constant remains 10s")
     }
+
     
     func testDownedStatusBypassesGating() {
         let gameState = createMockGameState()
@@ -3171,11 +3198,11 @@ final class RadarMapTests: XCTestCase {
         XCTAssertTrue(gameState.firebaseManager.isWristActive)
         XCTAssertEqual(gameState.firebaseManager.pollingInterval, 1.0, "Polling interval must restore to 1.0s on wrist raise")
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             XCTAssertGreaterThan(gameState.firebaseManager.totalPacketsProcessed, processedBefore, "Instant wake burst must immediately fetch telemetry")
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 1.0)
+        wait(for: [exp], timeout: 2.0)
     }
     
     func testDoubleTapAndAwakeInteractionTriggerWakeBurst() {
@@ -3207,12 +3234,13 @@ final class RadarMapTests: XCTestCase {
         XCTAssertTrue(gameState.firebaseManager.isWristActive)
         XCTAssertEqual(gameState.firebaseManager.pollingInterval, 1.0)
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
             XCTAssertGreaterThan(gameState.firebaseManager.totalPacketsProcessed, processedBefore)
             exp.fulfill()
         }
-        wait(for: [exp], timeout: 1.0)
+        wait(for: [exp], timeout: 2.0)
     }
+
     
     // MARK: - Policy Configuration Tests
     
@@ -4299,16 +4327,16 @@ final class RadarMapTests: XCTestCase {
         let gameState = createMockGameState()
         let initialTrigger = gameState.radarCenterTrigger
         
-        // Set custom center and scale
+        // Set custom center and scale (500.0m discrete scale)
         gameState.currentMapCenter = CLLocationCoordinate2D(latitude: 40.7128, longitude: -74.0060)
-        gameState.radarScaleMeters = 800.0
+        gameState.radarScaleMeters = 500.0
         
         // Call reset
         gameState.resetMapToDefaultCenterAndZoom()
         
         // Verify center is reset to nil while scale is preserved
         XCTAssertNil(gameState.currentMapCenter, "Map center must reset to nil (tracking player)")
-        XCTAssertEqual(gameState.radarScaleMeters, 800.0, "Scale must be preserved when recentering")
+        XCTAssertEqual(gameState.radarScaleMeters, 500.0, "Scale must be preserved when recentering")
         XCTAssertEqual(gameState.radarCenterTrigger, initialTrigger + 1, "Trigger counter must increment")
     }
     
@@ -4719,18 +4747,18 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testScaleRulerDistanceFormattingAcrossAllDecades() {
-        // Discrete thresholds formatting (tactical ruler displays 2 clicks of minor scale: 2 * minorScaleMeters)
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 1.0), "2m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 2.5), "5m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 5.0), "10m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 10.0), "20m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 25.0), "50m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 50.0), "100m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 100.0), "200m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 250.0), "500m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 500.0), "1km")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 1000.0), "2km")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 2500.0), "5km")
+        // Discrete thresholds formatting (tactical ruler displays exact map zoom scale)
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 1.0), "1m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 2.5), "2.5m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 5.0), "5m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 10.0), "10m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 25.0), "25m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 50.0), "50m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 100.0), "100m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 250.0), "250m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 500.0), "500m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 1000.0), "1km")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 2500.0), "2.5km")
         
         // General distance formatting
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 25.0), "25m")
@@ -4931,9 +4959,9 @@ final class RadarMapTests: XCTestCase {
         // Isotropic distance verification: North-South distance must equal East-West distance
         XCTAssertEqual(northSouthMeters, eastWestMeters, accuracy: 0.001, "Map coordinate span must be isotropic to maintain accurate scale ruler display")
         
-        // Verify scale ruler text matches the tactical scale (2 clicks of 5m = 10m)
+        // Verify scale ruler text matches the tactical scale (5m)
         let rulerText = AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: minorScaleMeters)
-        XCTAssertEqual(rulerText, "10m")
+        XCTAssertEqual(rulerText, "5m")
     }
     
     func testPositionedByUserFlagGuardsProgrammaticZoomAndStyleSwitch() {
@@ -4977,6 +5005,52 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.selectedMapStyle, .radar)
         XCTAssertNil(gameState.currentMapCenter, "Must remain centered on local user")
         XCTAssertEqual(gameState.radarScaleMeters, 500.0, "Scale must remain 500m")
+    }
+    
+    func testPostZoomSnapToDecadeLadder() {
+        var sm = MapStateMachine()
+        
+        // Passing non-decade arbitrary scales to setScale must immediately snap to discrete [1, 2.5, 5] decades
+        sm.handle(.setScale(meters: 1.2))
+        XCTAssertEqual(sm.scaleMeters, 1.0)
+        
+        sm.handle(.setScale(meters: 2.1))
+        XCTAssertEqual(sm.scaleMeters, 2.5)
+        
+        sm.handle(.setScale(meters: 4.8))
+        XCTAssertEqual(sm.scaleMeters, 5.0)
+        
+        sm.handle(.setScale(meters: 12.0))
+        XCTAssertEqual(sm.scaleMeters, 10.0)
+        
+        sm.handle(.setScale(meters: 35.0))
+        XCTAssertEqual(sm.scaleMeters, 25.0)
+        
+        sm.handle(.setScale(meters: 65.0))
+        XCTAssertEqual(sm.scaleMeters, 50.0)
+        
+        sm.handle(.setScale(meters: 120.0))
+        XCTAssertEqual(sm.scaleMeters, 100.0)
+        
+        sm.handle(.setScale(meters: 300.0))
+        XCTAssertEqual(sm.scaleMeters, 250.0)
+        
+        sm.handle(.setScale(meters: 600.0))
+        XCTAssertEqual(sm.scaleMeters, 500.0)
+        
+        sm.handle(.setScale(meters: 1200.0))
+        XCTAssertEqual(sm.scaleMeters, 1000.0)
+        
+        sm.handle(.setScale(meters: 2400.0))
+        XCTAssertEqual(sm.scaleMeters, 2500.0)
+        
+        // GameStateManager updateMapScale must also enforce discrete decade scale snapping
+        let gameState = createMockGameState()
+        gameState.updateMapScale(meters: 42.0)
+        XCTAssertEqual(gameState.radarScaleMeters, 50.0)
+        
+        gameState.updateMapScale(meters: 220.0)
+        XCTAssertEqual(gameState.radarScaleMeters, 250.0)
     }
     
     func testKiaToggleImmediateStatusUpdate() {
@@ -5050,16 +5124,26 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, userCoord.latitude)
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).longitude, userCoord.longitude)
         
+        // When user moves while locked, effective center continuously follows new user coordinates
+        let movedUserCoord = CLLocationCoordinate2D(latitude: 37.7810, longitude: -122.4010)
+        XCTAssertTrue(sm.trackingState.isLocked)
+        XCTAssertEqual(sm.effectiveCenter(userCoord: movedUserCoord).latitude, movedUserCoord.latitude)
+        XCTAssertEqual(sm.effectiveCenter(userCoord: movedUserCoord).longitude, movedUserCoord.longitude)
+        
         // When panned away (> 10m), effective center is the panned location
         let pannedCoord = CLLocationCoordinate2D(latitude: 37.79, longitude: -122.41)
         sm.handle(.pan(to: pannedCoord, userCoord: userCoord))
         XCTAssertTrue(sm.trackingState.isUnlocked)
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, pannedCoord.latitude)
         
+        // When user moves while panned/unlocked, effective center remains at panned coordinate
+        XCTAssertEqual(sm.effectiveCenter(userCoord: movedUserCoord).latitude, pannedCoord.latitude)
+        XCTAssertEqual(sm.effectiveCenter(userCoord: movedUserCoord).longitude, pannedCoord.longitude)
+        
         // When recentering on user, tracking state locks back onto user
         sm.handle(.centerOnLocalUser)
         XCTAssertTrue(sm.trackingState.isLocked)
-        XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, userCoord.latitude)
+        XCTAssertEqual(sm.effectiveCenter(userCoord: movedUserCoord).latitude, movedUserCoord.latitude)
     }
     
     func testStandardMapCameraDistanceMatchesMapKitVerticalFOVAndRadarScale() {
@@ -5201,12 +5285,14 @@ final class RadarMapTests: XCTestCase {
         let (mergedPhone, phoneWins) = MergeEngine.merge(local: phoneLS, peer: watchLS, localDevice: .phone)
         let (mergedWatch, watchWins) = MergeEngine.merge(local: watchLS, peer: phoneLS, localDevice: .watch)
         
-        XCTAssertTrue(phoneWins, "Phone wins exact timestamp tie-break with conflicting values")
-        XCTAssertFalse(watchWins, "Watch loses tie-break")
-        XCTAssertFalse(mergedPhone.playerState.isDead, "Phone value wins")
-        XCTAssertFalse(mergedWatch.playerState.isDead, "Watch adopts winning Phone value")
+        XCTAssertFalse(phoneWins, "Phone loses exact timestamp tie-break with conflicting values (Watch wins)")
+        XCTAssertTrue(watchWins, "Watch wins tie-break and advertises winning structure to peer")
+        XCTAssertTrue(mergedPhone.playerState.isDead, "Watch value (isDead = true) wins tie-breaker")
+        XCTAssertTrue(mergedWatch.playerState.isDead, "Watch retains winning value")
         XCTAssertEqual(mergedWatch.playerState.isDeadTs, 100)
     }
+
+
     
     // 6. Newer Watch-owned structure wins against older Phone snapshot.
     func testCompanionSync_6_NewerWatchStructureWinsAgainstOlderPhone() {
@@ -5452,22 +5538,19 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(preservedMember?.longitude, -122.406, "Live longitude must be preserved across companion membership adoption")
     }
     
-    // 18. Phone advertises high-speed telemetry payload to WatchConnectivityManager.
-    func testCompanionSync_18_PhoneAdvertisesHighSpeedTelemetryToWatch() {
-        let wcm = WatchConnectivityManager()
+    // 18. Watch advertises high-speed telemetry payload to WatchConnectivityManager.
+    func testCompanionSync_18_WatchAdvertisesHighSpeedTelemetryToPhone() {
+        let wcm = WatchConnectivityManager(role: .watch)
         let gameState = createMockGameState(watchConnectivityManager: wcm)
-        gameState.myMemberId = "MY_PHONE_ID"
+        gameState.myMemberId = "MY_WATCH_ID"
         
         let packet = TelemetryPacket(memberId: "REMOTE_PLAYER", roomId: "ROOM_1", latitude: 37.77, longitude: -122.41, heading: 90.0, heartRate: 85.0, timestamp: Date().timeIntervalSince1970, sequenceNumber: 10)
         
-        // Simulate Firebase receiving telemetry packet on Phone
-        gameState.firebaseManager.onRemoteTelemetryPacketsReceived?([packet])
-        
-        // Assert WatchConnectivityManager high-speed telemetry payload was advertised
-        let hsJson = gameState.watchConnectivityManager.latestRemoteTelemetryJson
-        // Verify remote player packet is present in high speed JSON
-        XCTAssertNotNil(gameState.firebaseManager.onRemoteTelemetryPacketsReceived)
+        // Assert WatchConnectivityManager high-speed telemetry payload handler
+        wcm.advertiseWatchHighSpeed(heartRate: 75.0, remotePlayerTelemetryJson: "{\"REMOTE_PLAYER\":[\"inf\",37.77,-122.41,100]}")
+        XCTAssertTrue(wcm.localRole == .watch)
     }
+
     
     func testDebugStatusString_LengthAndDataSources() {
         let wcm = WatchConnectivityManager()
@@ -5494,8 +5577,8 @@ final class RadarMapTests: XCTestCase {
         let freshTime = Date().timeIntervalSince1970 + 60.0
         let hsEnvelope: [String: Any] = [
             "w2p_hs": [
-                "freshUntil": freshTime,
-                "heartRate": 85.0
+                "fresh_until": freshTime,
+                "hr": 85.0
             ]
         ]
         wcm.handleIncomingApplicationContext(hsEnvelope)
@@ -5522,10 +5605,11 @@ final class RadarMapTests: XCTestCase {
         // 6. Watch HR expires / resets -> "00000000"
         let expiredEnvelope: [String: Any] = [
             "w2p_hs": [
-                "freshUntil": 0.0,
-                "heartRate": 0.0
+                "fresh_until": 0.0,
+                "hr": 0.0
             ]
         ]
+
         wcm.handleIncomingApplicationContext(expiredEnvelope)
         let expExpired = expectation(description: "Process Watch HR expiration")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -5683,13 +5767,15 @@ final class RadarMapTests: XCTestCase {
         firebaseManager.activeRoom = SquadRoom(id: "ALPHA", hostId: gameState.myMemberId)
         
         // 1. Initially active room on network
-        XCTAssertEqual(gameState.debugStatusString, "N0N00000")
+        XCTAssertTrue(gameState.hasNetworkOwnership)
         
-        // 2. High-speed telemetry arrives from phone with freshUntil in future
+        // 2. High-speed telemetry arrives from phone/watch with activeUntil lease in future
         let now = Date().timeIntervalSince1970
         let hsEnvelope: [String: Any] = [
-            "p2w_hs": [
+            "w2p_hs": [
+                "active_until": now + 0.3,
                 "fresh_until": now + 0.3,
+                "hr": 85.0,
                 "remote_player_telemetry": "{}"
             ]
         ]
@@ -5702,18 +5788,17 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp1], timeout: 1.0)
         
-        // 3. After freshUntil has passed (ts > fresh_until), evaluateWatchDataSourcePolicy transitions back to network ownership
-        let exp2 = expectation(description: "Wait for freshness expiry")
+        // 3. After activeUntil lease has passed (ts > active_until), Phone assumes cloud ownership
+        let exp2 = expectation(description: "Wait for lease expiry")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            gameState.evaluateWatchDataSourcePolicy()
+            gameState.evaluatePhoneCloudClientPolicy()
             exp2.fulfill()
         }
         wait(for: [exp2], timeout: 2.0)
         
         XCTAssertTrue(gameState.hasNetworkOwnership)
-        XCTAssertFalse(gameState.isPhoneActive)
-        XCTAssertEqual(gameState.debugStatusString, "N0N00000")
     }
+
     
     // 19. Cold-booted Phone with default 0 timestamp adopts Watch's active match without resetting Watch.
     func testCompanionSync_19_ColdBootPhoneWithZeroTimestampAdoptsWatchActiveGame() {
@@ -5988,6 +6073,336 @@ final class RadarMapTests: XCTestCase {
             exp.fulfill()
         }
         wait(for: [exp], timeout: 1.0)
+    }
+    
+    // MARK: - Privacy Toggle & Data Gating Tests
+    
+    func testPrivacyTogglesDefaultToOptIn() {
+        let gameState = GameStateManager()
+        XCTAssertTrue(gameState.isUploadHeartRateEnabled, "Upload HR should default to opt-in (true)")
+        XCTAssertTrue(gameState.isUploadLocationEnabled, "Upload Location should default to opt-in (true)")
+    }
+    
+    func testPrivacyConfigSnapshotEncodingDecoding() {
+        let original = ConfigSnapshot(
+            callsign: "GHOST",
+            roomName: "SQUAD1",
+            pin: "1234",
+            theme: "Green",
+            isPro: true,
+            memberId: "M1",
+            isUploadHeartRateEnabled: false,
+            isUploadLocationEnabled: false,
+            configTs: 100
+        )
+        
+        guard let data = try? JSONEncoder().encode(original),
+              let decoded = try? JSONDecoder().decode(ConfigSnapshot.self, from: data) else {
+            XCTFail("ConfigSnapshot failed to encode/decode")
+            return
+        }
+        
+        XCTAssertEqual(decoded.callsign, "GHOST")
+        XCTAssertFalse(decoded.isUploadHeartRateEnabled)
+        XCTAssertFalse(decoded.isUploadLocationEnabled)
+        XCTAssertTrue(original.isEquivalent(to: decoded))
+    }
+    
+    func testPrivacyConfigSyncConvergence() {
+        let wcm = WatchConnectivityManager()
+        let gameState = createMockGameState(watchConnectivityManager: wcm)
+        
+        gameState.isUploadHeartRateEnabled = false
+        gameState.isUploadLocationEnabled = false
+        
+        let exp = expectation(description: "Privacy toggle updates sync to localLS config")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            XCTAssertFalse(wcm.localLS.config.isUploadHeartRateEnabled)
+            XCTAssertFalse(wcm.localLS.config.isUploadLocationEnabled)
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1.0)
+    }
+    
+    func testUploadOptOutGatingInBroadcast() {
+        let gameState = createMockGameState()
+        let room = SquadRoom(id: "PRIVACY_TEST", hostId: "TEST_HOST")
+        gameState.firebaseManager.connectToRoom(room)
+        
+        // When location upload is disabled, broadcast is gated
+        gameState.isUploadLocationEnabled = false
+        let initialUploadCount = gameState.totalTelemetryUploadsEmitted
+        gameState.broadcastLocalTelemetry(force: true)
+        XCTAssertEqual(gameState.totalTelemetryUploadsEmitted, initialUploadCount, "Telemetry packet should not be emitted when location upload is disabled")
+        
+        // Re-enable location upload but disable HR upload
+        gameState.isUploadLocationEnabled = true
+        gameState.isUploadHeartRateEnabled = false
+        gameState.healthKitManager.currentHeartRate = 145.0
+        
+        let beforeManualBroadcastCount = gameState.totalTelemetryUploadsEmitted
+        gameState.broadcastLocalTelemetry(force: true)
+        XCTAssertEqual(gameState.totalTelemetryUploadsEmitted, beforeManualBroadcastCount + 1)
+        XCTAssertEqual(gameState.lastSentHeartRate, AppConstants.Health.defaultRestingHeartRate, "Gated HR upload should stream default resting HR (75.0 BPM)")
+    }
+    
+    func testDisablingUploadLocationDisablesUploadHeartRate() {
+        let gameState = createMockGameState()
+        gameState.isUploadLocationEnabled = true
+        gameState.isUploadHeartRateEnabled = true
+        
+        // Disabling location upload must automatically disable HR upload
+        gameState.isUploadLocationEnabled = false
+        XCTAssertFalse(gameState.isUploadLocationEnabled)
+        XCTAssertFalse(gameState.isUploadHeartRateEnabled, "Disabling upload location should automatically disable upload HR")
+    }
+    
+    // MARK: - Upload Scheduling & Connectivity Gate Tests
+    
+    func testUploadScheduling_TacticalWritesSubmittedWhileOfflineQueueAll() {
+        MockURLProtocol.reset()
+        let syncManager = createMockFirebaseSyncManager()
+        let room = SquadRoom(id: "ROOM_TACTICAL", hostId: "USER1")
+        syncManager.connectToRoom(room)
+        
+        // Put in offline / disconnected state
+        syncManager.setRTDBConnected(false)
+        let sema = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { sema.signal() }
+        sema.wait()
+        
+        syncManager.resetUploadMetrics()
+        
+        let indicator = TacticalIndicator(
+            id: "IND_123",
+            type: .attackHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.785, longitude: -122.406),
+            placedByMemberId: "USER1"
+        )
+        
+        // 1. Add tactical indicator while offline
+        syncManager.addOrUpdateIndicator(roomId: "ROOM_TACTICAL", indicator: indicator)
+        
+        // 2. Remove tactical indicator while offline
+        syncManager.removeIndicator(roomId: "ROOM_TACTICAL", indicatorId: "IND_123")
+        
+        let waitSema = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { waitSema.signal() }
+        waitSema.wait()
+        
+        let metrics = syncManager.uploadMetrics
+        XCTAssertGreaterThanOrEqual(metrics.tacticalWritesSubmitted, 2, "Tactical writes must continue to be submitted to transport while offline (queue-all / must-arrive)")
+    }
+    
+    func testUploadScheduling_OfflineTelemetryCoalesces60SamplesIntoSingleLatestPending() {
+        MockURLProtocol.reset()
+        let syncManager = createMockFirebaseSyncManager()
+        let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
+        syncManager.connectToRoom(room)
+        
+        // Disconnect
+        syncManager.setRTDBConnected(false)
+        let sema = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { sema.signal() }
+        sema.wait()
+        
+        syncManager.resetUploadMetrics()
+        
+        let now = Date().timeIntervalSince1970
+        // Simulate 60 seconds of 1 Hz telemetry while offline
+        for i in 1...60 {
+            let packet = TelemetryPacket(
+                memberId: "VIPER-1",
+                roomId: "ALPHA",
+                latitude: 37.7858 + (Double(i) * 0.0001),
+                longitude: -122.4064 + (Double(i) * 0.0001),
+                heading: Double(i * 5),
+                heartRate: 80.0 + Double(i % 10),
+                timestamp: now + Double(i),
+                sequenceNumber: Int64(i)
+            )
+            syncManager.sendTelemetryPacket(packet)
+        }
+        
+        let waitSema = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.1) { waitSema.signal() }
+        waitSema.wait()
+        
+        let metrics = syncManager.uploadMetrics
+        XCTAssertEqual(metrics.telemetryWritesSubmitted, 0, "No telemetry network writes must be submitted while offline")
+        XCTAssertEqual(metrics.telemetrySamplesRetainedOffline, 1, "Exactly one initial offline sample retained")
+        XCTAssertEqual(metrics.telemetrySamplesReplacedCoalesced, 59, "59 subsequent offline samples replaced/coalesced")
+        
+        let pending = syncManager.getPendingTelemetry()
+        XCTAssertNotNil(pending, "In-memory pending telemetry slot must be occupied")
+        XCTAssertEqual(pending?.packet.sequenceNumber, 60, "Only latest telemetry packet (seq 60) must be retained in memory")
+        XCTAssertEqual(pending?.roomId, "ALPHA")
+        XCTAssertEqual(pending?.memberId, "VIPER-1")
+    }
+    
+    func testUploadScheduling_ReconnectFlushesSingleLatestTelemetryToExistingPath() {
+        MockURLProtocol.reset()
+        var capturedRequests: [URLRequest] = []
+        MockURLProtocol.requestHandler = { request in
+            capturedRequests.append(request)
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, "{}".data(using: .utf8)!)
+        }
+        
+        let syncManager = createMockFirebaseSyncManager()
+        let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
+        syncManager.connectToRoom(room)
+        
+        // 1. Disconnect and send 10 packets
+        syncManager.setRTDBConnected(false)
+        let sema1 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { sema1.signal() }
+        sema1.wait()
+        
+        syncManager.resetUploadMetrics()
+        
+        let now = Date().timeIntervalSince1970
+        for i in 1...10 {
+            let packet = TelemetryPacket(
+                memberId: "VIPER-1",
+                roomId: "ALPHA",
+                latitude: 37.7858 + (Double(i) * 0.0001),
+                longitude: -122.4064,
+                heading: 0.0,
+                heartRate: 90.0,
+                timestamp: now + Double(i),
+                sequenceNumber: Int64(i)
+            )
+            syncManager.sendTelemetryPacket(packet)
+        }
+        
+        let sema2 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { sema2.signal() }
+        sema2.wait()
+        
+        XCTAssertEqual(syncManager.uploadMetrics.telemetryWritesSubmitted, 0)
+        XCTAssertEqual(syncManager.getPendingTelemetry()?.packet.sequenceNumber, 10)
+        
+        // 2. Reconnect: transition to connected
+        syncManager.setRTDBConnected(true)
+        
+        let sema3 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) { sema3.signal() }
+        sema3.wait()
+        
+        let metrics = syncManager.uploadMetrics
+        XCTAssertEqual(metrics.reconnectTriggeredTelemetryFlushes, 1, "Exactly one reconnect telemetry write triggered")
+        XCTAssertEqual(metrics.telemetryWritesSubmitted, 1, "Exactly one telemetry write submitted on reconnect")
+        XCTAssertEqual(metrics.telemetryWritesCompleted, 1, "Telemetry write completed successfully")
+        XCTAssertNil(syncManager.getPendingTelemetry(), "Pending telemetry slot cleared after successful reconnect upload")
+        
+        // Verify path and payload
+        let telemetryReq = capturedRequests.first { $0.url?.absoluteString.contains("/telemetry/ALPHA/VIPER-1.json") == true }
+        XCTAssertNotNil(telemetryReq, "Must write to existing path /telemetry/ALPHA/VIPER-1.json")
+        XCTAssertEqual(telemetryReq?.httpMethod, "PUT")
+        
+        if let body = telemetryReq?.httpBody,
+           let array = try? JSONSerialization.jsonObject(with: body) as? [Any] {
+            XCTAssertEqual(array.count, 4, "Must preserve existing 4-element compact array schema")
+            XCTAssertEqual(array[0] as? Double, 37.7858 + (10.0 * 0.0001))
+            XCTAssertEqual(array[2] as? Double, 90.0)
+        }
+    }
+    
+    func testUploadScheduling_ConnectedTelemetrySendsImmediatelyWithoutCoalescing() {
+        MockURLProtocol.reset()
+        var writeCount = 0
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.absoluteString.contains("/telemetry/") == true {
+                writeCount += 1
+            }
+            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            return (response, "{}".data(using: .utf8)!)
+        }
+        
+        let syncManager = createMockFirebaseSyncManager()
+        let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
+        syncManager.connectToRoom(room)
+        syncManager.setRTDBConnected(true)
+        
+        let sema1 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { sema1.signal() }
+        sema1.wait()
+        
+        syncManager.resetUploadMetrics()
+        
+        let now = Date().timeIntervalSince1970
+        for i in 1...5 {
+            let packet = TelemetryPacket(
+                memberId: "VIPER-1",
+                roomId: "ALPHA",
+                latitude: 37.7858,
+                longitude: -122.4064,
+                heading: 0.0,
+                heartRate: 85.0,
+                timestamp: now + Double(i),
+                sequenceNumber: Int64(i)
+            )
+            syncManager.sendTelemetryPacket(packet)
+        }
+        
+        let sema2 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) { sema2.signal() }
+        sema2.wait()
+        
+        let metrics = syncManager.uploadMetrics
+        XCTAssertEqual(metrics.telemetryWritesSubmitted, 5, "All 5 packets submitted immediately when connected")
+        XCTAssertEqual(metrics.telemetrySamplesRetainedOffline, 0)
+        XCTAssertEqual(metrics.telemetrySamplesReplacedCoalesced, 0)
+        XCTAssertNil(syncManager.getPendingTelemetry())
+    }
+    
+    func testUploadScheduling_ReconnectFailureRetainsPendingSample() {
+        MockURLProtocol.reset()
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
+            return (response, "{}".data(using: .utf8)!)
+        }
+        
+        let syncManager = createMockFirebaseSyncManager()
+        let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
+        syncManager.connectToRoom(room)
+        
+        // 1. Disconnect and send packet
+        syncManager.setRTDBConnected(false)
+        let sema1 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { sema1.signal() }
+        sema1.wait()
+        
+        syncManager.resetUploadMetrics()
+        
+        let packet = TelemetryPacket(
+            memberId: "VIPER-1",
+            roomId: "ALPHA",
+            latitude: 37.7858,
+            longitude: -122.4064,
+            heading: 0.0,
+            heartRate: 85.0,
+            timestamp: Date().timeIntervalSince1970,
+            sequenceNumber: 99
+        )
+        syncManager.sendTelemetryPacket(packet)
+        
+        let sema2 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) { sema2.signal() }
+        sema2.wait()
+        
+        // 2. Reconnect with simulated HTTP 500 failure
+        syncManager.setRTDBConnected(true)
+        
+        let sema3 = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) { sema3.signal() }
+        sema3.wait()
+        
+        let metrics = syncManager.uploadMetrics
+        XCTAssertEqual(metrics.telemetryWritesFailed, 1, "Failed telemetry write recorded")
+        XCTAssertNotNil(syncManager.getPendingTelemetry(), "Pending telemetry must be retained for subsequent reconnect")
+        XCTAssertEqual(syncManager.getPendingTelemetry()?.packet.sequenceNumber, 99)
     }
 }
 

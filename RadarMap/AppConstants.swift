@@ -33,6 +33,8 @@ public enum AppConstants {
         public static let radarColorThemeKey = "radar_color_theme"
         public static let hasUnlimitedSquadUnlockKey = "hasUnlimitedSquadUnlock"
         public static let savedPinKey = "saved_pin"
+        public static let isUploadHeartRateEnabledKey = "is_upload_heart_rate_enabled"
+        public static let isUploadLocationEnabledKey = "is_upload_location_enabled"
     }
     
     // MARK: - Networking & Realtime Database
@@ -97,8 +99,8 @@ public enum AppConstants {
         public static let contactFormURL = "https://forms.gle/pCuy2zJtSfLoyqj16"
         
         public static let summary = "Radar Map is committed to protecting your privacy. We collect real-time location and heart rate data solely for live squad tactical coordination during active sessions."
-        public static let locationDataDescription = "Location data (GPS coordinates, heading, course over ground) is streamed in real time to your squad room and is automatically purged when the room is disbanded or after 7 days of inactivity."
-        public static let healthDataDescription = "Heart rate biometrics are read via Apple HealthKit to display squad stress levels and vital status. This data is never sold, used for advertising, or shared with third parties."
+        public static let locationDataDescription = "Location data (GPS coordinates, heading, course over ground) is streamed in real time to your squad room and is automatically purged when the room is disbanded or after 7 days of inactivity. You can opt out of location uploading at any time in Config."
+        public static let healthDataDescription = "Heart rate biometrics are read via Apple HealthKit to display squad stress levels and vital status. This data is never sold, used for advertising, or shared with third parties. You can opt out of HR uploading at any time in Config."
         public static let dataRetentionDescription = "We do not sell your data or use tracking cookies. All session data is ephemeral and tied to temporary squad rooms."
     }
     
@@ -215,10 +217,41 @@ public enum AppConstants {
             public static let heartbeatFallbackIntervalSeconds: TimeInterval = 10.0 // Fixed fallback timer constant for upload liveness (10s)
         }
         
-        /// Theoretical constant bandwidth rate adaptation equation constants
+        /// Theoretical aggregate bandwidth rate adaptation equation constants & schedule
         public enum ConstantBandwidth {
             public static let playerThreshold: Int = 12
             public static let baselineMaxUpdateRateHz: Double = 1.0
+            public static let refreshIntervalMultiplier: Double = 7.0
+            public static let staleTimeoutMultiplier: Double = 15.0
+            
+            /// Computes the maximum update rate in Hz for a given player count.
+            /// For P <= 12: 1.0 Hz
+            /// For P > 12: 1.0 * (12 / P)^2
+            public static func maxUpdateRateHz(forPlayerCount playerCount: Int) -> Double {
+                guard playerCount > 0 else { return baselineMaxUpdateRateHz }
+                if playerCount <= playerThreshold {
+                    return baselineMaxUpdateRateHz
+                }
+                let ratio = Double(playerThreshold) / Double(playerCount)
+                return baselineMaxUpdateRateHz * (ratio * ratio)
+            }
+            
+            /// Computes the minimum update interval in seconds.
+            public static func updateInterval(forPlayerCount playerCount: Int) -> TimeInterval {
+                let rate = maxUpdateRateHz(forPlayerCount: playerCount)
+                guard rate > 0 else { return 1.0 }
+                return 1.0 / rate
+            }
+            
+            /// Computes the fallback refresh heartbeat interval (7 * T).
+            public static func refreshInterval(forPlayerCount playerCount: Int) -> TimeInterval {
+                return refreshIntervalMultiplier * updateInterval(forPlayerCount: playerCount)
+            }
+            
+            /// Computes the stale timeout watermark (15 * T).
+            public static func staleTimeout(forPlayerCount playerCount: Int) -> TimeInterval {
+                return staleTimeoutMultiplier * updateInterval(forPlayerCount: playerCount)
+            }
         }
         
         /// Stale telemetry timeout constants
@@ -242,6 +275,61 @@ public enum AppConstants {
             public static let timerTickIntervalSeconds: TimeInterval = 0.03
             public static let actionHoldDurationSeconds: TimeInterval = 1.2
             public static let holdTimerTickIntervalSeconds: TimeInterval = 0.02
+        }
+    }
+    
+    // MARK: - Centralized 3-Letter Encodings & Field Mappings
+    public enum Encoding {
+        public enum Tactical {
+            public static let watchHere = "wat"
+            public static let goHere = "goh"
+            public static let attackHere = "atk"
+            public static let protectHere = "def"
+            public static let flag = "flg"
+            public static let point1 = "pt1"
+            public static let point2 = "pt2"
+            public static let point3 = "pt3"
+            public static let point4 = "pt4"
+            public static let point5 = "pt5"
+            public static let point6 = "pt6"
+            public static let point7 = "pt7"
+            public static let point8 = "pt8"
+            public static let point9 = "pt9"
+            public static let point10 = "p10"
+            
+            public static let infantry = "inf"
+            public static let vehicle = "veh"
+            public static let armor = "arm"
+            public static let drone = "drn"
+            
+            public static let water = "wtr"
+            public static let hazard = "haz"
+            public static let fire = "fir"
+            public static let snow = "snw"
+            public static let closure = "cls"
+            public static let emergency = "emg"
+        }
+        
+        public enum TelemetryKeys {
+            public static let latitude = "lat"
+            public static let longitude = "lon"
+            public static let altitude = "alt"
+            public static let heading = "hdg"
+            public static let heartRate = "hr"
+            public static let sequenceNumber = "seq"
+            public static let timestamp = "ts"
+        }
+        
+        public enum MetadataKeys {
+            public static let memberId = "mid"
+            public static let callsign = "csn"
+            public static let isHost = "hst"
+            public static let maxCapacity = "cap"
+            public static let pinHash = "pin"
+            public static let createdAt = "cts"
+            public static let updatedAt = "uts"
+            public static let lastActivity = "ats"
+            public static let expireAt = "exp"
         }
     }
     
@@ -279,7 +367,7 @@ public enum AppConstants {
         
         /// Radar scale distance bounds (meters)
         public enum RadarScale {
-            public static let defaultScaleMeters: Double = 25.0
+            public static let defaultScaleMeters: Double = 50.0
             public static let minScaleMeters: Double = 1.0
             public static let maxWatchScaleMeters: Double = 2500.0
             public static let maxiOSScaleMeters: Double = 2500.0
@@ -421,15 +509,15 @@ public enum AppConstants {
             public static let referenceScreenHeight: Double = 800.0
             #endif
             
-            /// Formats a distance in meters to a discrete ruler label (total distance across the 2-click tactical ruler: 2 * minor scale).
+            /// Formats a distance in meters to a discrete ruler label.
             public static func formatRulerDistance(minorScaleMeters: Double) -> String {
                 let snappedMinor = RadarScale.snapToDiscreteScale(minorScaleMeters)
-                return formatDistance(meters: snappedMinor * 2.0)
+                return formatDistance(meters: snappedMinor)
             }
             
-            /// Formats a live/continuous distance in meters directly to ruler label without pre-snapping (2 * minor scale).
+            /// Formats a live/continuous distance in meters directly to ruler label without pre-snapping.
             public static func formatLiveRulerDistance(minorScaleMeters: Double) -> String {
-                return formatDistance(meters: minorScaleMeters * 2.0)
+                return formatDistance(meters: minorScaleMeters)
             }
             
             /// Formats a distance in meters for display (e.g. range ring distance label or ruler label).
@@ -588,7 +676,10 @@ public enum AppConstants {
         
         public static let defaultHighSpeedCadenceSeconds: TimeInterval = 1.0
         public static let defaultFreshnessTTLSeconds: TimeInterval = 3.0
+        public static let activeUntilLeaseDurationSeconds: TimeInterval = 5.0
+        public static let activeAdvertisementCadenceSeconds: TimeInterval = 1.0
     }
 }
+
 
 

@@ -22,12 +22,17 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     
     // Last-known counterpart high-speed payload
     public private(set) var latestRemoteHSFreshUntil: TimeInterval = 0
+    public private(set) var latestRemoteActiveUntil: TimeInterval = 0
     public private(set) var latestRemoteTelemetryJson: String = "{}"
     public private(set) var latestRemoteHeartRate: Double = 75.0
+    
+    /// True if the Watch's active lease is currently valid (Phone.Time <= w2p_hs.active_until)
+    @Published public var isWatchLeaseActive: Bool = false
     
     // Convergence tracking
     public private(set) var isRollingSync: Bool = false
     private var rollingTimer: AnyCancellable?
+    private var leaseTimer: AnyCancellable?
     
     // Serialization queue for WCSession context updates to prevent concurrent partially-merged publishes
     private let contextQueue = DispatchQueue(label: "com.radarmap.watchconnectivity.queue")
@@ -37,6 +42,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     public var onHighSpeedTelemetryReceived: ((_ telemetryJson: String, _ freshUntil: TimeInterval) -> Void)?
     public var onHighSpeedHeartRateReceived: ((_ hr: Double, _ freshUntil: TimeInterval) -> Void)?
     public var onReachabilityChanged: ((Bool) -> Void)?
+    public var onWatchLeaseStatusChanged: ((Bool) -> Void)?
     
     // Persistence keys
     private let localLSPersistenceKey = "wc_local_ls_snapshot"
@@ -73,6 +79,8 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
             session.activate()
         }
         #endif
+        
+        startLeaseMonitoring()
     }
     
     public func activate() {
@@ -81,6 +89,23 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
             WCSession.default.activate()
         }
         #endif
+    }
+    
+    // MARK: - Lease Monitoring & Standby Gating
+    
+    private func startLeaseMonitoring() {
+        leaseTimer?.cancel()
+        leaseTimer = Timer.publish(every: 1.0, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                let now = Date().timeIntervalSince1970
+                let active = (self.latestRemoteActiveUntil > now)
+                if self.isWatchLeaseActive != active {
+                    self.isWatchLeaseActive = active
+                    self.onWatchLeaseStatusChanged?(active)
+                }
+            }
     }
     
     // MARK: - State Mutation & Low-Speed Updates
@@ -118,13 +143,21 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         }
     }
     
-    // MARK: - High-Speed Outgoing Stream
+    // MARK: - High-Speed Outgoing Stream (Asymmetrical Routing)
     
-    /// Advertises Phone-owned high-speed telemetry snapshot (p2w_hs).
-    public func advertisePhoneHighSpeed(remotePlayerTelemetryJson: String, ttl: TimeInterval = AppConstants.WatchConnectivity.defaultFreshnessTTLSeconds) {
+    /// Advertises Phone-owned high-speed payload (p2w_hs) via updateApplicationContext.
+    public func advertisePhoneHighSpeed(
+        remotePlayerTelemetryJson: String = "{}",
+        ttl: TimeInterval = AppConstants.WatchConnectivity.defaultFreshnessTTLSeconds
+    ) {
         guard localRole == .phone else { return }
         let now = Date().timeIntervalSince1970
-        let hs = PhoneToWatchHighSpeed(freshUntil: now + ttl, remotePlayerTelemetryJson: remotePlayerTelemetryJson)
+        let lease = now + AppConstants.WatchConnectivity.activeUntilLeaseDurationSeconds
+        let hs = PhoneToWatchHighSpeed(
+            activeUntil: lease,
+            freshUntil: now + ttl,
+            remotePlayerTelemetryJson: remotePlayerTelemetryJson
+        )
         
         contextQueue.async { [weak self] in
             guard let self = self else { return }
@@ -132,11 +165,39 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         }
     }
     
-    /// Advertises Watch-owned high-speed heart rate snapshot (w2p_hs).
-    public func advertiseWatchHighSpeed(heartRate: Double, ttl: TimeInterval = AppConstants.WatchConnectivity.defaultFreshnessTTLSeconds) {
+    /// Advertises Watch-owned high-speed stream (w2p_hs) via sendMessage (with updateApplicationContext fallback).
+    public func advertiseWatchHighSpeed(
+        heartRate: Double,
+        remotePlayerTelemetryJson: String = "{}",
+        ttl: TimeInterval = AppConstants.WatchConnectivity.defaultFreshnessTTLSeconds
+    ) {
         guard localRole == .watch else { return }
         let now = Date().timeIntervalSince1970
-        let hs = WatchToPhoneHighSpeed(freshUntil: now + ttl, heartRate: heartRate)
+        let lease = now + AppConstants.WatchConnectivity.activeUntilLeaseDurationSeconds
+        let hs = WatchToPhoneHighSpeed(
+            activeUntil: lease,
+            freshUntil: now + ttl,
+            heartRate: heartRate,
+            remotePlayerTelemetryJson: remotePlayerTelemetryJson
+        )
+        
+        #if canImport(WatchConnectivity)
+        let session = WCSession.default
+        if session.activationState == .activated && session.isReachable {
+            var envelope = ApplicationContextEnvelope()
+            envelope.w2pHS = hs
+            if let data = try? JSONEncoder().encode(envelope),
+               let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+                session.sendMessage(dict, replyHandler: nil) { [weak self] _ in
+                    // If sendMessage drops, fallback to context update
+                    self?.contextQueue.async {
+                        self?.publishApplicationContext(watchHS: hs)
+                    }
+                }
+                return
+            }
+        }
+        #endif
         
         contextQueue.async { [weak self] in
             guard let self = self else { return }
@@ -257,13 +318,21 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
             // 1. Process High-Speed Payloads (Unidirectional)
             if self.localRole == .watch, let p2wHS = envelope.p2wHS {
                 self.latestRemoteHSFreshUntil = p2wHS.freshUntil
+                self.latestRemoteActiveUntil = p2wHS.activeUntil
                 self.latestRemoteTelemetryJson = p2wHS.remotePlayerTelemetryJson
                 DispatchQueue.main.async {
                     self.onHighSpeedTelemetryReceived?(p2wHS.remotePlayerTelemetryJson, p2wHS.freshUntil)
                 }
             } else if self.localRole == .phone, let w2pHS = envelope.w2pHS {
                 self.latestRemoteHSFreshUntil = w2pHS.freshUntil
+                self.latestRemoteActiveUntil = w2pHS.activeUntil
                 self.latestRemoteHeartRate = w2pHS.heartRate
+                if !w2pHS.remotePlayerTelemetryJson.isEmpty && w2pHS.remotePlayerTelemetryJson != "{}" {
+                    self.latestRemoteTelemetryJson = w2pHS.remotePlayerTelemetryJson
+                    DispatchQueue.main.async {
+                        self.onHighSpeedTelemetryReceived?(w2pHS.remotePlayerTelemetryJson, w2pHS.freshUntil)
+                    }
+                }
                 DispatchQueue.main.async {
                     self.onHighSpeedHeartRateReceived?(w2pHS.heartRate, w2pHS.freshUntil)
                 }
@@ -364,5 +433,10 @@ extension WatchConnectivityManager: WCSessionDelegate {
     public func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
         handleIncomingApplicationContext(applicationContext)
     }
+    
+    public func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
+        handleIncomingApplicationContext(message)
+    }
 }
 #endif
+

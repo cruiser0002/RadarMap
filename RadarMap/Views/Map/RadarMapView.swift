@@ -152,14 +152,14 @@ public struct RadarMapView: View {
                 MagnifyGesture()
                     .onChanged { value in
                         if pinchInitialScale == nil {
-                            pinchInitialScale = gameState.radarScaleMeters
+                            pinchInitialScale = gameState.mapStateMachine.scaleMeters
                         }
                         guard let initial = pinchInitialScale, value.magnification > 0 else { return }
                         // Pinching in (magnification > 1) zooms IN (smaller scaleMeters)
                         // Pinching out (magnification < 1) zooms OUT (larger scaleMeters)
                         let newScale = initial / Double(value.magnification)
                         let clamped = min(max(newScale, AppConstants.UI.RadarScale.minScaleMeters), AppConstants.UI.RadarScale.maxiOSScaleMeters)
-                        gameState.radarScaleMeters = clamped
+                        gameState.liveMapScaleMeters = clamped
                     }
                     .onEnded { value in
                         guard let initial = pinchInitialScale, value.magnification > 0 else {
@@ -172,6 +172,7 @@ public struct RadarMapView: View {
                         pinchInitialScale = nil
                         withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
                             gameState.sendMapAction(.setScale(meters: snapped))
+                            gameState.liveMapScaleMeters = snapped
                         }
                     }
             )

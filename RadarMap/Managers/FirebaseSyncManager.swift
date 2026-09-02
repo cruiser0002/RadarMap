@@ -77,6 +77,77 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     public let networkQualityMonitor = NetworkQualityMonitor()
     private var cancellables = Set<AnyCancellable>()
     
+    // MARK: - Upload Scheduling & Observability Metrics
+    
+    public struct UploadSchedulerMetrics: Equatable {
+        public var tacticalWritesSubmitted: Int = 0
+        public var tacticalWritesCompleted: Int = 0
+        public var tacticalWritesFailed: Int = 0
+        public var telemetryWritesSubmitted: Int = 0
+        public var telemetryWritesCompleted: Int = 0
+        public var telemetryWritesFailed: Int = 0
+        public var telemetrySamplesRetainedOffline: Int = 0
+        public var telemetrySamplesReplacedCoalesced: Int = 0
+        public var reconnectTriggeredTelemetryFlushes: Int = 0
+        public var rtdbConnectionTransitions: Int = 0
+    }
+    
+    public struct PendingTelemetry: Equatable {
+        public let roomId: String
+        public let memberId: String
+        public let packet: TelemetryPacket
+        public let payload: [Any]
+        
+        public static func == (lhs: PendingTelemetry, rhs: PendingTelemetry) -> Bool {
+            return lhs.roomId == rhs.roomId &&
+                   lhs.memberId == rhs.memberId &&
+                   lhs.packet == rhs.packet
+        }
+    }
+    
+    private let telemetrySchedulerQueue = DispatchQueue(label: "RadarMap.TelemetrySchedulerQueue")
+    private var _pendingTelemetry: PendingTelemetry?
+    private var _uploadMetrics = UploadSchedulerMetrics()
+    private var _isRTDBConnected: Bool = true
+    
+    public var isRTDBConnected: Bool {
+        telemetrySchedulerQueue.sync { _isRTDBConnected }
+    }
+    
+    public var uploadMetrics: UploadSchedulerMetrics {
+        telemetrySchedulerQueue.sync { _uploadMetrics }
+    }
+    
+    public func getPendingTelemetry() -> PendingTelemetry? {
+        telemetrySchedulerQueue.sync { _pendingTelemetry }
+    }
+    
+    public func resetUploadMetrics() {
+        telemetrySchedulerQueue.sync {
+            _uploadMetrics = UploadSchedulerMetrics()
+        }
+    }
+    
+    public func setRTDBConnected(_ connected: Bool) {
+        telemetrySchedulerQueue.async { [weak self] in
+            guard let self = self else { return }
+            let wasConnected = self._isRTDBConnected
+            self._isRTDBConnected = connected
+            if !wasConnected && connected {
+                self._uploadMetrics.rtdbConnectionTransitions += 1
+                #if DEBUG
+                print("[FirebaseSyncManager] RTDB connection transition: disconnected -> connected. Triggering pending telemetry flush.")
+                #endif
+                self.flushPendingTelemetryLocked()
+            } else if wasConnected && !connected {
+                self._uploadMetrics.rtdbConnectionTransitions += 1
+                #if DEBUG
+                print("[FirebaseSyncManager] RTDB connection transition: connected -> disconnected.")
+                #endif
+            }
+        }
+    }
+    
     // Database endpoint configuration
     public var databaseURL: String = AppConstants.Network.defaultDatabaseURL
     public var authToken: String? = nil
@@ -114,6 +185,13 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     override public init() {
         super.init()
         
+        _isRTDBConnected = networkQualityMonitor.isConnected
+        networkQualityMonitor.$isConnected
+            .sink { [weak self] connected in
+                self?.setRTDBConnected(connected)
+            }
+            .store(in: &cancellables)
+        
         // Recalculate polling interval only when player count or connection grade changes —
         // not on every coordinate update — preventing spurious Timer restarts.
         Publishers.CombineLatest(
@@ -150,49 +228,24 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     /// The baseline maximum update frequency (in Hz).
     public static let baselineMaxUpdateRateHz: Double = AppConstants.Timing.ConstantBandwidth.baselineMaxUpdateRateHz
     
-    /// Solves for the maximum update rate (in Hz) given the active player count,
-    /// ensuring aggregate theoretical bandwidth stays constant beyond `playerThreshold`.
-    ///
-    /// Equation:
-    ///   R_max(P) = R_base * min(1.0, N_threshold / max(1, P))
-    ///
-    /// - Parameters:
-    ///   - playerCount: Active number of players on the server.
-    ///   - playerThreshold: Player count threshold N (defaults to `constantBandwidthPlayerThreshold` = 10).
-    ///   - baselineRateHz: Baseline peak update rate in Hz (defaults to `baselineMaxUpdateRateHz` = 1.0).
-    /// - Returns: The maximum update rate in Hertz (updates / second).
+    /// Solves for the maximum update rate (in Hz) given the active player count.
     public static func solveMaxUpdateRateHz(
         playerCount: Int,
         playerThreshold: Int = constantBandwidthPlayerThreshold,
         baselineRateHz: Double = baselineMaxUpdateRateHz
     ) -> Double {
-        guard playerCount > 0 else { return baselineRateHz }
-        if playerCount <= playerThreshold {
-            return baselineRateHz
-        }
-        return baselineRateHz * (Double(playerThreshold) / Double(playerCount))
+        return AppConstants.Timing.ConstantBandwidth.maxUpdateRateHz(forPlayerCount: playerCount)
     }
     
     /// Solves for the update interval (in seconds) corresponding to `solveMaxUpdateRateHz`.
-    ///
-    /// - Parameters:
-    ///   - playerCount: Active number of players on the server.
-    ///   - playerThreshold: Player count threshold N (defaults to `constantBandwidthPlayerThreshold` = 10).
-    ///   - baselineRateHz: Baseline peak update rate in Hz (defaults to `baselineMaxUpdateRateHz` = 1.0).
-    /// - Returns: The time interval between updates in seconds.
     public static func solveUpdateInterval(
         playerCount: Int,
         playerThreshold: Int = constantBandwidthPlayerThreshold,
         baselineRateHz: Double = baselineMaxUpdateRateHz
     ) -> TimeInterval {
-        let rateHz = solveMaxUpdateRateHz(
-            playerCount: playerCount,
-            playerThreshold: playerThreshold,
-            baselineRateHz: baselineRateHz
-        )
-        guard rateHz > 0 else { return 1.0 / baselineRateHz }
-        return 1.0 / rateHz
+        return AppConstants.Timing.ConstantBandwidth.updateInterval(forPlayerCount: playerCount)
     }
+
     
     // MARK: - PIN / Password Hashing Utility
     
@@ -411,26 +464,98 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             DispatchQueue.main.async(execute: apply)
         }
         
-        // Broadcast over Firebase Realtime Database
-        guard let url = URL(string: "\(databaseURL)/telemetry/\(packet.roomId)/\(packet.memberId).json") else { return }
+        let payload = packet.toCompactArray()
+        
+        telemetrySchedulerQueue.async { [weak self] in
+            guard let self = self else { return }
+            
+            if self._isRTDBConnected {
+                self.executeTelemetryWrite(
+                    roomId: packet.roomId,
+                    memberId: packet.memberId,
+                    packet: packet,
+                    payload: payload
+                )
+            } else {
+                // Offline: retain latest only, coalesce/drop older
+                if self._pendingTelemetry == nil {
+                    self._uploadMetrics.telemetrySamplesRetainedOffline += 1
+                    #if DEBUG
+                    print("[FirebaseSyncManager] Offline: Retained initial pending telemetry for \(packet.memberId) in \(packet.roomId).")
+                    #endif
+                } else {
+                    self._uploadMetrics.telemetrySamplesReplacedCoalesced += 1
+                    #if DEBUG
+                    print("[FirebaseSyncManager] Offline: Coalesced/replaced pending telemetry for \(packet.memberId).")
+                    #endif
+                }
+                self._pendingTelemetry = PendingTelemetry(
+                    roomId: packet.roomId,
+                    memberId: packet.memberId,
+                    packet: packet,
+                    payload: payload
+                )
+            }
+        }
+    }
+    
+    private func executeTelemetryWrite(roomId: String, memberId: String, packet: TelemetryPacket, payload: [Any], isReconnectFlush: Bool = false) {
+        guard let url = URL(string: "\(databaseURL)/telemetry/\(roomId)/\(memberId).json") else { return }
         var request = createRequest(url: url, method: "PUT")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        
-        let payload = packet.toCompactArray()
         
         guard let jsonData = try? JSONSerialization.data(withJSONObject: payload) else { return }
         request.httpBody = jsonData
         
+        _uploadMetrics.telemetryWritesSubmitted += 1
+        
         let startTime = Date()
         urlSession.dataTask(with: request) { [weak self] _, response, error in
+            guard let self = self else { return }
+            var isSuccess = false
             if error == nil, let httpRes = response as? HTTPURLResponse, (200...299).contains(httpRes.statusCode) {
-                let latency = Date().timeIntervalSince(startTime) * AppConstants.Timing.millisecondsPerSecond
-                DispatchQueue.main.async {
-                    self?.syncLatencyMs = latency
-                    self?.networkQualityMonitor.recordLatencySample(latency)
+                isSuccess = true
+            }
+            
+            self.telemetrySchedulerQueue.async {
+                if isSuccess {
+                    self._uploadMetrics.telemetryWritesCompleted += 1
+                    if isReconnectFlush {
+                        // Clear pending slot only if it hasn't been replaced by a newer packet during transmission
+                        if self._pendingTelemetry?.packet == packet {
+                            self._pendingTelemetry = nil
+                        }
+                    }
+                    let latency = Date().timeIntervalSince(startTime) * AppConstants.Timing.millisecondsPerSecond
+                    DispatchQueue.main.async {
+                        self.syncLatencyMs = latency
+                        self.networkQualityMonitor.recordLatencySample(latency)
+                    }
+                } else {
+                    self._uploadMetrics.telemetryWritesFailed += 1
+                    if isReconnectFlush {
+                        #if DEBUG
+                        print("[FirebaseSyncManager] Reconnect telemetry write failed. Retaining latest pending sample.")
+                        #endif
+                    }
                 }
             }
         }.resume()
+    }
+    
+    private func flushPendingTelemetryLocked() {
+        guard let pending = _pendingTelemetry else { return }
+        _uploadMetrics.reconnectTriggeredTelemetryFlushes += 1
+        #if DEBUG
+        print("[FirebaseSyncManager] Executing reconnect telemetry write to /telemetry/\(pending.roomId)/\(pending.memberId).json")
+        #endif
+        executeTelemetryWrite(
+            roomId: pending.roomId,
+            memberId: pending.memberId,
+            packet: pending.packet,
+            payload: pending.payload,
+            isReconnectFlush: true
+        )
     }
     
     // MARK: - Room Management
@@ -981,9 +1106,27 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         var request = createRequest(url: url, method: "PUT")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        guard let data = try? JSONEncoder().encode(indicator) else { return }
+        guard let data = try? JSONSerialization.data(withJSONObject: indicator.compactArray) else { return }
         request.httpBody = data
-        urlSession.dataTask(with: request).resume()
+        
+        telemetrySchedulerQueue.async {
+            self._uploadMetrics.tacticalWritesSubmitted += 1
+        }
+        
+        urlSession.dataTask(with: request) { [weak self] _, response, error in
+            guard let self = self else { return }
+            var success = false
+            if error == nil, let httpRes = response as? HTTPURLResponse, (200...299).contains(httpRes.statusCode) {
+                success = true
+            }
+            self.telemetrySchedulerQueue.async {
+                if success {
+                    self._uploadMetrics.tacticalWritesCompleted += 1
+                } else {
+                    self._uploadMetrics.tacticalWritesFailed += 1
+                }
+            }
+        }.resume()
         touchTacticalUpdatedAt(roomId: roomId)
     }
     
@@ -991,7 +1134,25 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         // Delete from /indicators/{indicatorId}
         guard let url = URL(string: "\(databaseURL)/tactical/\(roomId)/indicators/\(indicatorId).json") else { return }
         let request = createRequest(url: url, method: "DELETE")
-        urlSession.dataTask(with: request).resume()
+        
+        telemetrySchedulerQueue.async {
+            self._uploadMetrics.tacticalWritesSubmitted += 1
+        }
+        
+        urlSession.dataTask(with: request) { [weak self] _, response, error in
+            guard let self = self else { return }
+            var success = false
+            if error == nil, let httpRes = response as? HTTPURLResponse, (200...299).contains(httpRes.statusCode) {
+                success = true
+            }
+            self.telemetrySchedulerQueue.async {
+                if success {
+                    self._uploadMetrics.tacticalWritesCompleted += 1
+                } else {
+                    self._uploadMetrics.tacticalWritesFailed += 1
+                }
+            }
+        }.resume()
         
         // Also cleanup legacy root indicator node if present for backward compatibility
         if let legacyUrl = URL(string: "\(databaseURL)/tactical/\(roomId)/\(indicatorId).json") {
@@ -1012,7 +1173,23 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             if let data = try? JSONEncoder().encode(now) {
                 request.httpBody = data
-                urlSession.dataTask(with: request).resume()
+                telemetrySchedulerQueue.async {
+                    self._uploadMetrics.tacticalWritesSubmitted += 1
+                }
+                urlSession.dataTask(with: request) { [weak self] _, response, error in
+                    guard let self = self else { return }
+                    var success = false
+                    if error == nil, let httpRes = response as? HTTPURLResponse, (200...299).contains(httpRes.statusCode) {
+                        success = true
+                    }
+                    self.telemetrySchedulerQueue.async {
+                        if success {
+                            self._uploadMetrics.tacticalWritesCompleted += 1
+                        } else {
+                            self._uploadMetrics.tacticalWritesFailed += 1
+                        }
+                    }
+                }.resume()
             }
         }
         
@@ -1083,21 +1260,20 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                 return
             }
             
-            let metadataKeys: Set<String> = ["createdAt", "expireAt", "lastActivityTimestamp", "ttl", "updatedAt", "meta"]
+            let metadataKeys: Set<String> = ["createdAt", "expireAt", "lastActivityTimestamp", "ttl", "updatedAt", "meta", "uts", "exp", "cts", "ats"]
             var decodedIndicators: [String: TacticalIndicator] = [:]
             
-            // Check for new schema: indicators subtree under /tactical/{roomId}/indicators
+            // Check for new schema: indicators subtree under /tactical/{roomId}/indicators or direct
             let indicatorsSource = (json["indicators"] as? [String: Any]) ?? json
             for (key, val) in indicatorsSource {
                 if key.starts(with: "_") || metadataKeys.contains(key) { continue }
-                if let dict = val as? [String: Any],
-                   let indData = try? JSONSerialization.data(withJSONObject: dict),
-                   let ind = try? JSONDecoder().decode(TacticalIndicator.self, from: indData) {
+                if let ind = TacticalIndicator.parse(id: key, rawValue: val) {
                     if !ind.isExpired {
                         decodedIndicators[ind.id] = ind
                     }
                 }
             }
+
             
             DispatchQueue.main.async {
                 if var current = self.activeRoom {

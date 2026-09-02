@@ -14,6 +14,7 @@ public struct StandardMapView: View {
     @State private var currentCameraDistance: Double
     @State private var hasSettledInitialCamera: Bool = false
     @State private var userDidPan: Bool = false
+    @State private var isUserZooming: Bool = false
     @State private var baseScale: Double = AppConstants.UI.RadarScale.defaultScaleMeters
     
     public init(
@@ -28,7 +29,11 @@ public struct StandardMapView: View {
         let distance = AppConstants.UI.RadarScale.cameraDistance(forScale: scale)
         let center = gameState.mapStateMachine.effectiveCenter(userCoord: gameState.localPlayerMember.coordinate)
         let camera = MapCamera(centerCoordinate: center, distance: distance, heading: 0, pitch: 0)
-        self._position = State(initialValue: .camera(camera))
+        if gameState.mapStateMachine.trackingState.isLocked {
+            self._position = State(initialValue: .userLocation(fallback: .camera(camera)))
+        } else {
+            self._position = State(initialValue: .camera(camera))
+        }
         self._currentCameraDistance = State(initialValue: distance)
     }
     
@@ -45,18 +50,18 @@ public struct StandardMapView: View {
     }
     
     private var cameraBounds: MapCameraBounds {
-        #if os(watchOS)
-        let distance = AppConstants.UI.RadarScale.cameraDistance(forScale: gameState.mapStateMachine.scaleMeters)
-        if gameState.mapStateMachine.trackingState.isLocked {
-            return MapCameraBounds(minimumDistance: distance, maximumDistance: distance)
+        let currentScaleDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: gameState.mapStateMachine.scaleMeters)
+        if position.positionedByUser {
+            let minDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.minScaleMeters)
+            let maxDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.maxiOSScaleMeters)
+            return MapCameraBounds(minimumDistance: minDistance, maximumDistance: maxDistance)
+        } else if gameState.mapStateMachine.trackingState.isLocked {
+            return MapCameraBounds(minimumDistance: currentScaleDistance, maximumDistance: currentScaleDistance)
         } else {
-            return MapCameraBounds(minimumDistance: 1, maximumDistance: 25000)
+            let minDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.minScaleMeters)
+            let maxDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.maxiOSScaleMeters)
+            return MapCameraBounds(minimumDistance: minDistance, maximumDistance: maxDistance)
         }
-        #else
-        let minDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.minScaleMeters)
-        let maxDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.maxiOSScaleMeters)
-        return MapCameraBounds(minimumDistance: minDistance, maximumDistance: maxDistance)
-        #endif
     }
     
     public static func cameraDistance(forScale scaleMeters: Double) -> Double {
@@ -123,48 +128,58 @@ public struct StandardMapView: View {
             .mapStyle(gameState.selectedMapStyle.mapKitStyle)
             .mapControls { }
             .onMapCameraChange(frequency: .continuous) { context in
-                #if !os(watchOS)
-                guard hasSettledInitialCamera else { return }
                 currentCameraDistance = context.camera.distance
                 let liveScale = AppConstants.UI.RadarScale.scaleMeters(forCameraDistance: context.camera.distance)
-                if abs(gameState.radarScaleMeters - liveScale) > 0.01 {
-                    gameState.radarScaleMeters = liveScale
+                if position.positionedByUser {
+                    let scaleDelta = abs(liveScale - gameState.mapStateMachine.scaleMeters)
+                    if scaleDelta > 0.5 {
+                        isUserZooming = true
+                    }
                 }
-                #endif
+                if abs(gameState.liveMapScaleMeters - liveScale) > 0.001 {
+                    gameState.liveMapScaleMeters = liveScale
+                }
             }
             .onMapCameraChange(frequency: .onEnd) { context in
+                guard hasSettledInitialCamera else { return }
+                
                 let center = context.camera.centerCoordinate
                 lastCameraCenterCoordinate = center
-                
-                guard hasSettledInitialCamera else { return }
-                currentCameraDistance = context.camera.distance
-                
-                #if !os(watchOS)
-                let currentScale = AppConstants.UI.RadarScale.scaleMeters(forCameraDistance: context.camera.distance)
-                let snappedScale = AppConstants.UI.RadarScale.snapToDiscreteScale(currentScale)
                 let userCoord = gameState.localPlayerMember.coordinate
                 
-                gameState.sendMapAction(.pan(to: center, userCoord: userCoord))
+                // Check if user panned away beyond the center threshold
+                let dLat = (center.latitude - userCoord.latitude) * AppConstants.Location.metersPerDegreeLatitude
+                let dLon = (center.longitude - userCoord.longitude) * AppConstants.Location.metersPerDegreeLatitude * cos(center.latitude * AppConstants.Location.degreesToRadiansFactor)
+                let panDist = hypot(dLat, dLon)
+                let priorFollowMeLocked = gameState.mapStateMachine.trackingState.isLocked && panDist <= AppConstants.Location.centerThresholdMeters
                 
-                let targetDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: snappedScale)
-                if abs(context.camera.distance - targetDistance) > 1.0 {
-                    gameState.sendMapAction(.setScale(meters: snappedScale))
+                // Only unlock tracking if the user physically dragged/panned away
+                if position.positionedByUser && panDist > AppConstants.Location.centerThresholdMeters {
+                    gameState.sendMapAction(.pan(to: center, userCoord: userCoord))
+                }
+                
+                // ONLY snap scale if an actual user zoom operation took place
+                if isUserZooming {
+                    isUserZooming = false
+                    
+                    let currentScale = AppConstants.UI.RadarScale.scaleMeters(forCameraDistance: context.camera.distance)
+                    let snappedScale = AppConstants.UI.RadarScale.snapToDiscreteScale(currentScale)
+                    let targetDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: snappedScale)
                     currentCameraDistance = targetDistance
+                    
+                    gameState.sendMapAction(.setScale(meters: snappedScale))
+                    
+                    let targetCenter = gameState.mapStateMachine.effectiveCenter(userCoord: userCoord)
+                    let camera = MapCamera(centerCoordinate: targetCenter, distance: targetDistance, heading: 0, pitch: 0)
                     withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                        let targetCenter = gameState.mapStateMachine.effectiveCenter(userCoord: userCoord)
-                        let camera = MapCamera(centerCoordinate: targetCenter, distance: targetDistance, heading: 0, pitch: 0)
-                        position = .camera(camera)
+                        if priorFollowMeLocked {
+                            position = .userLocation(fallback: .camera(camera))
+                        } else {
+                            position = .camera(camera)
+                        }
                     }
                 }
                 onRequestCrownFocus()
-                #else
-                if userDidPan {
-                    userDidPan = false
-                    let userCoord = gameState.localPlayerMember.coordinate
-                    gameState.sendMapAction(.pan(to: center, userCoord: userCoord))
-                    onRequestCrownFocus()
-                }
-                #endif
             }
             .onTapGesture { screenPoint in
                 if gameState.pendingIndicatorPlacementType != nil,
@@ -188,13 +203,18 @@ public struct StandardMapView: View {
         .edgesIgnoringSafeArea(.all)
         .onChange(of: gameState.mapStateMachine.scaleMeters) { _, newScale in
             baseScale = newScale
+            isUserZooming = false
             let targetDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: newScale)
-            if abs(currentCameraDistance - targetDistance) > 2.0 {
+            if abs(currentCameraDistance - targetDistance) > 1.0 {
                 currentCameraDistance = targetDistance
                 let targetCenter = gameState.mapStateMachine.effectiveCenter(userCoord: meMember.coordinate)
                 let camera = MapCamera(centerCoordinate: targetCenter, distance: targetDistance, heading: 0, pitch: 0)
                 withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                    position = .camera(camera)
+                    if gameState.mapStateMachine.trackingState.isLocked {
+                        position = .userLocation(fallback: .camera(camera))
+                    } else {
+                        position = .camera(camera)
+                    }
                 }
             }
         }
@@ -202,21 +222,25 @@ public struct StandardMapView: View {
             let userCoord = meMember.coordinate
             lastCameraCenterCoordinate = userCoord
             userDidPan = false
+            isUserZooming = false
             let distance = AppConstants.UI.RadarScale.cameraDistance(forScale: gameState.mapStateMachine.scaleMeters)
             currentCameraDistance = distance
             let camera = MapCamera(centerCoordinate: userCoord, distance: distance, heading: 0, pitch: 0)
             withAnimation(.easeInOut(duration: 0.25)) {
-                position = .camera(camera)
+                position = .userLocation(fallback: .camera(camera))
             }
         }
         .onChange(of: gameState.mapStateMachine.trackingState) { _, state in
+            isUserZooming = false
             let distance = AppConstants.UI.RadarScale.cameraDistance(forScale: gameState.mapStateMachine.scaleMeters)
             let targetCenter = state.isLocked ? meMember.coordinate : (state.pannedCoordinate ?? meMember.coordinate)
             lastCameraCenterCoordinate = targetCenter
-            if state.isLocked && abs(currentCameraDistance - distance) > 2.0 {
-                currentCameraDistance = distance
-                let camera = MapCamera(centerCoordinate: targetCenter, distance: distance, heading: 0, pitch: 0)
-                withAnimation(.easeInOut(duration: 0.25)) {
+            currentCameraDistance = distance
+            let camera = MapCamera(centerCoordinate: targetCenter, distance: distance, heading: 0, pitch: 0)
+            withAnimation(.easeInOut(duration: 0.25)) {
+                if state.isLocked {
+                    position = .userLocation(fallback: .camera(camera))
+                } else {
                     position = .camera(camera)
                 }
             }
@@ -225,12 +249,18 @@ public struct StandardMapView: View {
             hasSettledInitialCamera = false
             baseScale = gameState.mapStateMachine.scaleMeters
             userDidPan = false
+            isUserZooming = false
+            gameState.liveMapScaleMeters = gameState.mapStateMachine.scaleMeters
             let distance = AppConstants.UI.RadarScale.cameraDistance(forScale: gameState.mapStateMachine.scaleMeters)
             currentCameraDistance = distance
             let targetCenter = gameState.mapStateMachine.effectiveCenter(userCoord: meMember.coordinate)
             lastCameraCenterCoordinate = targetCenter
             let camera = MapCamera(centerCoordinate: targetCenter, distance: distance, heading: 0, pitch: 0)
-            position = .camera(camera)
+            if gameState.mapStateMachine.trackingState.isLocked {
+                position = .userLocation(fallback: .camera(camera))
+            } else {
+                position = .camera(camera)
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
                 hasSettledInitialCamera = true
             }

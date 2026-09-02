@@ -47,6 +47,21 @@ public final class GameStateManager: ObservableObject {
             syncConfigToWatchConnectivity()
         }
     }
+    @Published public var isUploadHeartRateEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isUploadHeartRateEnabled, forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
+            syncConfigToWatchConnectivity()
+        }
+    }
+    @Published public var isUploadLocationEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isUploadLocationEnabled, forKey: AppConstants.Storage.isUploadLocationEnabledKey)
+            if !isUploadLocationEnabled && isUploadHeartRateEnabled {
+                isUploadHeartRateEnabled = false
+            }
+            syncConfigToWatchConnectivity()
+        }
+    }
     @Published public var isHosting: Bool = false {
         didSet {
             updateLocalPlayerMember()
@@ -70,8 +85,13 @@ public final class GameStateManager: ObservableObject {
             if mapStateMachine.scaleMeters != radarScaleMeters {
                 mapStateMachine.handle(.setScale(meters: radarScaleMeters))
             }
+            if liveMapScaleMeters != radarScaleMeters {
+                liveMapScaleMeters = radarScaleMeters
+            }
         }
     }
+    /// The actual live zoom scale directly tracking the map's camera properties / pinch interactions
+    @Published public var liveMapScaleMeters: Double = AppConstants.UI.RadarScale.defaultScaleMeters
     @Published public var currentMapCenter: CLLocationCoordinate2D? = nil {
         didSet {
             if let center = currentMapCenter {
@@ -114,7 +134,7 @@ public final class GameStateManager: ObservableObject {
     }
     
     public var currentScaleText: String {
-        AppConstants.UI.ScaleRuler.formatLiveRulerDistance(minorScaleMeters: radarScaleMeters)
+        AppConstants.UI.ScaleRuler.formatLiveRulerDistance(minorScaleMeters: liveMapScaleMeters)
     }
     
     public var isTacticalSessionActive: Bool {
@@ -382,9 +402,18 @@ public final class GameStateManager: ObservableObject {
     public let watchConnectivityManager: WatchConnectivityManager
     
     // PRD Network Ownership and Activity Tokens
-    @Published public var hasNetworkOwnership: Bool = true
+    public var hasNetworkOwnership: Bool {
+        #if os(watchOS)
+        // Watch is primary cloud client
+        return true
+        #else
+        // Phone connects only if Watch lease is expired/inactive
+        return !watchConnectivityManager.isWatchLeaseActive
+        #endif
+    }
     @Published public var isPhoneActive: Bool = false
     @Published public var isWatchActive: Bool = false
+
     
     public var lastLowSpeedPayloadTimestamp: TimeInterval = 0
     public var lastLowSpeedPayloadSource: Character = "0"
@@ -408,6 +437,12 @@ public final class GameStateManager: ObservableObject {
         self.myMemberId = savedMemberId
         self.savedRoomName = UserDefaults.standard.string(forKey: AppConstants.Storage.savedRoomNameKey) ?? ""
         self.savedPin = UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey) ?? ""
+        
+        let savedUploadHR = UserDefaults.standard.object(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey) as? Bool ?? true
+        self.isUploadHeartRateEnabled = savedUploadHR
+        
+        let savedUploadLoc = UserDefaults.standard.object(forKey: AppConstants.Storage.isUploadLocationEnabledKey) as? Bool ?? true
+        self.isUploadLocationEnabled = savedUploadLoc
         
         firebaseManager.localMemberId = savedMemberId
         
@@ -433,6 +468,9 @@ public final class GameStateManager: ObservableObject {
         locationHeadingManager.requestPermissions()
         locationHeadingManager.startUpdates()
         
+        // Request HealthKit workout session authorization at app launch
+        healthKitManager.requestAuthorization()
+        
         self.isApplyingRemoteSync = false
     }
     
@@ -447,7 +485,9 @@ public final class GameStateManager: ObservableObject {
            current.pin == savedPin &&
            current.theme == radarColorTheme.rawValue &&
            current.isPro == isPro &&
-           current.memberId == myMemberId {
+           current.memberId == myMemberId &&
+           current.isUploadHeartRateEnabled == isUploadHeartRateEnabled &&
+           current.isUploadLocationEnabled == isUploadLocationEnabled {
             return
         }
         let now = timestamp ?? Date().timeIntervalSince1970
@@ -458,6 +498,8 @@ public final class GameStateManager: ObservableObject {
             theme: radarColorTheme.rawValue,
             isPro: isPro,
             memberId: myMemberId,
+            isUploadHeartRateEnabled: isUploadHeartRateEnabled,
+            isUploadLocationEnabled: isUploadLocationEnabled,
             configTs: now
         )
         watchConnectivityManager.updateLocalStructures(config: config)
@@ -526,11 +568,11 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
-    // MARK: - Inbound WCSession Callbacks
+    // MARK: - Inbound WCSession Callbacks & Watch-Centric Cloud Policy
     
     private func setupWatchConnectivity() {
-        // High-speed remote telemetry hook (Phone -> Watch)
-        #if !os(watchOS)
+        // High-speed remote telemetry hook (Watch -> Phone)
+        #if os(watchOS)
         firebaseManager.onRemoteTelemetryPacketsReceived = { [weak self] packets in
             guard let self = self else { return }
             var telemetryMap: [String: Any] = [:]
@@ -542,12 +584,13 @@ public final class GameStateManager: ObservableObject {
             if !telemetryMap.isEmpty,
                let data = try? JSONSerialization.data(withJSONObject: telemetryMap),
                let json = String(data: data, encoding: .utf8) {
-                self.watchConnectivityManager.advertisePhoneHighSpeed(remotePlayerTelemetryJson: json)
+                let hr = self.isDead ? AppConstants.Health.flatlineHeartRate : (self.healthKitManager.currentHeartRate > 0 ? self.healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
+                self.watchConnectivityManager.advertiseWatchHighSpeed(heartRate: hr, remotePlayerTelemetryJson: json)
             }
         }
         #endif
         
-        // 1. High-speed remote telemetry (Phone -> Watch)
+        // 1. High-speed remote telemetry
         watchConnectivityManager.onHighSpeedTelemetryReceived = { [weak self] (telemetryJson: String, freshUntil: TimeInterval) in
             guard let self = self else { return }
             guard let data = telemetryJson.data(using: .utf8),
@@ -564,9 +607,8 @@ public final class GameStateManager: ObservableObject {
             if !packets.isEmpty {
                 self.firebaseManager.validateAndProcessPackets(packets)
             }
-            #if os(watchOS)
-            self.evaluateWatchDataSourcePolicy()
-            self.scheduleFreshnessExpiration(freshUntil: freshUntil)
+            #if !os(watchOS)
+            self.evaluatePhoneCloudClientPolicy()
             #endif
         }
         
@@ -580,7 +622,15 @@ public final class GameStateManager: ObservableObject {
             }
         }
         
-        // 3. Low-speed converged snapshot received
+        // 3. Lease status changed (Watch active_until lease monitored on Phone)
+        watchConnectivityManager.onWatchLeaseStatusChanged = { [weak self] isWatchActive in
+            guard let self = self else { return }
+            #if !os(watchOS)
+            self.evaluatePhoneCloudClientPolicy()
+            #endif
+        }
+        
+        // 4. Low-speed converged snapshot received
         watchConnectivityManager.onLowSpeedConvergenceStateChanged = { [weak self] (mergedSnapshot: LowSpeedSnapshot) in
             guard let self = self else { return }
             self.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970
@@ -612,6 +662,14 @@ public final class GameStateManager: ObservableObject {
             if self.subscriptionManager.hasUnlimitedSquadUnlock != config.isPro {
                 self.subscriptionManager.hasUnlimitedSquadUnlock = config.isPro
                 UserDefaults.standard.set(config.isPro, forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
+            }
+            if self.isUploadHeartRateEnabled != config.isUploadHeartRateEnabled {
+                self.isUploadHeartRateEnabled = config.isUploadHeartRateEnabled
+                UserDefaults.standard.set(config.isUploadHeartRateEnabled, forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
+            }
+            if self.isUploadLocationEnabled != config.isUploadLocationEnabled {
+                self.isUploadLocationEnabled = config.isUploadLocationEnabled
+                UserDefaults.standard.set(config.isUploadLocationEnabled, forKey: AppConstants.Storage.isUploadLocationEnabledKey)
             }
             
             // Player state adoption
@@ -683,58 +741,43 @@ public final class GameStateManager: ObservableObject {
             self.isApplyingRemoteSync = false
         }
         
-        // 4. Reachability changes & Watch cloud access policy
-        watchConnectivityManager.onReachabilityChanged = { [weak self] reachable in
+        // 5. Reachability changes
+        watchConnectivityManager.onReachabilityChanged = { [weak self] _ in
             guard let self = self else { return }
-            self.evaluateWatchDataSourcePolicy()
+            #if !os(watchOS)
+            self.evaluatePhoneCloudClientPolicy()
+            #endif
         }
     }
     
-    /// Watch cloud access policy:
-    /// When Watch needs cloud-backed data:
-    /// If Phone is reachable AND Phone snapshot is fresh -> use WCSession data (pause direct polling)
-    /// Else -> direct Firebase RTDB read
-    public func evaluateWatchDataSourcePolicy() {
-        #if os(watchOS)
-        let now = Date().timeIntervalSince1970
-        let phoneReachable = watchConnectivityManager.isReachable
-        let freshUntil = watchConnectivityManager.latestRemoteHSFreshUntil
-        let isFresh = (freshUntil > 0 && now < freshUntil)
+    /// Watch-Centric Cloud Policy:
+    /// Watch is ALWAYS the primary cloud client during an active session.
+    /// Phone is on stand-by and only connects to cloud if Watch lease expires (Phone.Time > w2p_hs.active_until).
+    public func evaluatePhoneCloudClientPolicy() {
+        #if !os(watchOS)
+        let isWatchActive = watchConnectivityManager.isWatchLeaseActive
+        let hasActiveSession = isTacticalSessionActive
         
-        if phoneReachable && isFresh {
-            if self.hasNetworkOwnership != false || self.isPhoneActive != true {
-                self.hasNetworkOwnership = false
-                self.isPhoneActive = true
-                self.firebaseManager.stopTelemetryPolling()
-            }
-        } else {
-            if self.hasNetworkOwnership != true || self.isPhoneActive != false {
-                self.hasNetworkOwnership = true
-                self.isPhoneActive = false
-                let roomId = self.firebaseManager.activeRoom?.id ?? (!self.savedRoomName.isEmpty ? self.savedRoomName : nil)
-                if let roomId = roomId {
-                    self.firebaseManager.startTelemetryPolling(roomId: roomId)
+        if hasActiveSession {
+            if isWatchActive {
+                // Watch is active cloud client; Phone stands down to conserve battery
+                if firebaseManager.isConnected {
+                    firebaseManager.stopTelemetryPolling()
+                }
+            } else {
+                // Watch is absent or lease expired; Phone assumes cloud client duties
+                if let roomId = firebaseManager.activeRoom?.id ?? (!savedRoomName.isEmpty ? savedRoomName : nil) {
+                    firebaseManager.startTelemetryPolling(roomId: roomId)
                 }
             }
         }
         #endif
     }
     
-    private func scheduleFreshnessExpiration(freshUntil: TimeInterval) {
-        #if os(watchOS)
-        freshnessExpiryTimer?.cancel()
-        let now = Date().timeIntervalSince1970
-        let delay = max(0.05, freshUntil - now)
-        freshnessExpiryTimer = Just(())
-            .delay(for: .seconds(delay), scheduler: DispatchQueue.main)
-            .sink { [weak self] _ in
-                guard let self = self else { return }
-                self.evaluateWatchDataSourcePolicy()
-            }
-        #endif
-    }
-    
     private func bindManagers() {
+
+
+
         firebaseManager.$activeRoom
             .sink { [weak self] room in
                 guard let self = self else { return }
@@ -878,9 +921,6 @@ public final class GameStateManager: ObservableObject {
             .sink { [weak self] _ in
                 guard let self = self else { return }
                 self.broadcastLocalTelemetry(force: true)
-                #if os(watchOS)
-                self.evaluateWatchDataSourcePolicy()
-                #endif
             }
     }
     
@@ -947,8 +987,11 @@ public final class GameStateManager: ObservableObject {
             healthKitManager.resumeLiveHeartRateSession()
         }
         firebaseManager.setWristActive(true)
-        evaluateWatchDataSourcePolicy()
+        #if !os(watchOS)
+        evaluatePhoneCloudClientPolicy()
+        #endif
     }
+
     
     public func handleAppSuspend() {
         locationHeadingManager.enterLowPowerMode()
@@ -1307,8 +1350,22 @@ public final class GameStateManager: ObservableObject {
         let alt = currentLoc.altitude
         let currentHeading = heading ?? locationHeadingManager.blendedHeading
         
+        guard isUploadLocationEnabled else {
+            // Location upload opted out: do not upload position / heading telemetry packets to the server
+            return
+        }
+        
         let rawHr = heartRate ?? healthKitManager.currentHeartRate
-        let currentHr: Double = isDead ? AppConstants.Health.flatlineHeartRate : (rawHr > 0 ? rawHr : AppConstants.Health.defaultRestingHeartRate)
+        let effectiveHr: Double
+        if isDead {
+            effectiveHr = AppConstants.Health.flatlineHeartRate
+        } else if !isUploadHeartRateEnabled {
+            // HR upload opted out: broadcast default resting HR (75 BPM)
+            effectiveHr = AppConstants.Health.defaultRestingHeartRate
+        } else {
+            effectiveHr = rawHr > 0 ? rawHr : AppConstants.Health.defaultRestingHeartRate
+        }
+        let currentHr = effectiveHr
         
         let shouldEmit = shouldEmitTelemetry(
             currentLocation: currentLoc,

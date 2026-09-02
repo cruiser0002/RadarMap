@@ -81,7 +81,8 @@ public struct MapStateMachine: Equatable {
             let maxScale = AppConstants.UI.RadarScale.maxiOSScaleMeters
             #endif
             let clamped = min(max(meters, AppConstants.UI.RadarScale.minScaleMeters), maxScale)
-            scaleMeters = clamped
+            let snapped = AppConstants.UI.RadarScale.snapToDiscreteScale(clamped)
+            scaleMeters = snapped
             
         case .cycleStyle:
             switch style {

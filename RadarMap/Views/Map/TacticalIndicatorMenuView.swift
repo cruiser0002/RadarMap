@@ -25,7 +25,7 @@ public struct TacticalIndicatorMenuView: View {
                     categorySelectionList
                 }
             }
-            .navigationTitle(selectedCategory?.title ?? "Tactical Orders")
+            .navigationTitle(selectedCategory?.title ?? "Place Markers")
             #if os(watchOS) || os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
