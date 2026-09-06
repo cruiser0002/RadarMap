@@ -325,6 +325,52 @@ class TestRadarPlayerSimulatorIntegration(unittest.TestCase):
 
         coordinator.close()
 
+    def test_member_id_derivation_and_rules_compliance(self):
+        """Verifies member_id is exactly 8 characters from Crockford Base32 alphabet,
+        matching GameStateManager.deriveMemberId and database.rules.json length check."""
+        with patch("player_simulator._get_or_create_firebase_app", return_value=MagicMock(name="FakeFirebaseApp")):
+            coordinator = FirebaseUploadCoordinator(
+                "https://test-rtdb.firebaseio.com", credentials_path="/fake/credentials.json"
+            )
+        sim = RadarPlayerSimulator(callsign="VIPER-1", room_name="ALPHA", pin="1234", coordinator=coordinator)
+        self.assertEqual(len(sim.member_id), 8)
+        self.assertTrue(all(c in RadarPlayerSimulator.ROOM_PADDING_ALPHABET for c in sim.member_id))
+        derived = RadarPlayerSimulator.derive_member_id("VIPER-1")
+        self.assertEqual(sim.member_id, derived)
+        coordinator.close()
+
+    def test_constant_bandwidth_rate_adaptation_linear_falloff(self):
+        """Verifies rate adaptation follows linear falloff R(P) = R_base * (N / P)
+        so aggregate bandwidth P * R(P) = 12 pkt/s for P > 12."""
+        # P <= 12 -> 1.0 Hz
+        self.assertEqual(RadarPlayerSimulator.solve_max_update_rate_hz(12), 1.0)
+        self.assertEqual(RadarPlayerSimulator.solve_update_interval(12), 1.0)
+
+        # P = 16 -> 0.75 Hz, interval 1.333s, agg = 12
+        rate_16 = RadarPlayerSimulator.solve_max_update_rate_hz(16)
+        self.assertAlmostEqual(rate_16, 0.75, places=3)
+        self.assertAlmostEqual(16 * rate_16, 12.0, places=3)
+
+        # P = 24 -> 0.5 Hz, interval 2.0s, agg = 12
+        rate_24 = RadarPlayerSimulator.solve_max_update_rate_hz(24)
+        self.assertAlmostEqual(rate_24, 0.5, places=3)
+        self.assertAlmostEqual(24 * rate_24, 12.0, places=3)
+
+    def test_hash_parity_with_swift(self):
+        """Cross-language parity verification against Swift CryptoKit reference outputs:
+        - Room padding for ALPHA with PIN 1234 -> 'JUAT8TJZH2B'
+        - Member ID for VIPER-1 -> 'DTYTZD3W'
+        - PIN hash for 1234 salted with ALPHA -> 'd5b93eba76c149bafd2bc09099eff86e3f9b89624220f6c1c194f379ccdd438c'
+        """
+        padding = RadarPlayerSimulator.derive_room_padding("1234", "ALPHA")
+        self.assertEqual(padding, "JUAT8TJZH2B")
+
+        mid = RadarPlayerSimulator.derive_member_id("VIPER-1")
+        self.assertEqual(mid, "DTYTZD3W")
+
+        pin_hash = RadarPlayerSimulator.hash_pin("1234", "ALPHA")
+        self.assertEqual(pin_hash, "d5b93eba76c149bafd2bc09099eff86e3f9b89624220f6c1c194f379ccdd438c")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -596,7 +596,7 @@ class RadarPlayerSimulator:
         self.speed = max(0.0, speed_mps)
         self.update_interval = max(0.1, update_interval_sec)
         self.database_url = database_url.rstrip("/")
-        self.member_id = (member_id or f"sim_{uuid.uuid4().hex[:8]}").strip()
+        self.member_id = (member_id or self.derive_member_id(self.callsign)).strip()
         self.color_hex = color_hex
         self.telemetry_format = telemetry_format
 
@@ -672,6 +672,16 @@ class RadarPlayerSimulator:
         digest = hashlib.sha256(combined.encode("utf-8")).digest()
         return "".join(alphabet[b % len(alphabet)] for b in digest[:pad_length])
 
+    @staticmethod
+    def derive_member_id(callsign: str, length: int = 8) -> str:
+        """Deterministically derives an 8-character member ID matching GameStateManager.deriveMemberId.
+        Satisfies database.rules.json validation: $memberId.length == 8."""
+        alphabet = RadarPlayerSimulator.ROOM_PADDING_ALPHABET
+        normalized = callsign.strip().upper()
+        combined = f"memberid:{normalized}"
+        digest = hashlib.sha256(combined.encode("utf-8")).digest()
+        return "".join(alphabet[b % len(alphabet)] for b in digest[:length])
+
     # MARK: - Rate Adaptation Equations
     @staticmethod
     def solve_max_update_rate_hz(
@@ -681,14 +691,16 @@ class RadarPlayerSimulator:
     ) -> float:
         """
         Solves for the maximum update rate (in Hz) given active player count:
-        R_max(P) = R_base * (N_threshold / max(1, P))^2 for P > N_threshold
+        R_max(P) = R_base * (N_threshold / P) for P > N_threshold (linear falloff,
+        holding aggregate upload bandwidth constant at the P=12 ceiling, matching
+        AppConstants.swift and CLOUD_DATA_MANAGEMENT.md §4).
         """
         if player_count <= 0:
             return baseline_rate_hz
         if player_count <= player_threshold:
             return baseline_rate_hz
         ratio = float(player_threshold) / float(player_count)
-        return baseline_rate_hz * (ratio * ratio)
+        return baseline_rate_hz * ratio
 
     @staticmethod
     def solve_update_interval(
