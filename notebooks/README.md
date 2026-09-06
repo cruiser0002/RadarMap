@@ -6,8 +6,8 @@ This directory contains Jupyter notebooks and Python scripts for simulating squa
 
 ## 📁 Directory Contents
 
-- [`player_simulation.ipynb`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/notebooks/player_simulation.ipynb): Interactive Jupyter notebook with setup cells, Host/Join operations, live circular trajectory simulation, tactical indicators placement, KIA flatline simulation, and rate adaptation equations.
-- [`player_simulator.py`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/notebooks/player_simulator.py): Self-contained Python module and CLI script implementing the circular motion engine, geodesic bearing / COG calculations, tactical indicator endpoints, and Firebase RTDB synchronization.
+- [`player_simulation.ipynb`](player_simulation.ipynb): Interactive Jupyter notebook with setup cells, Host/Join operations, live circular trajectory simulation, tactical indicators placement, KIA flatline simulation, and rate adaptation equations.
+- [`player_simulator.py`](player_simulator.py): Self-contained Python module and CLI script implementing the circular motion engine, geodesic bearing / COG calculations, tactical indicator endpoints, and Firebase RTDB synchronization.
 
 ---
 
@@ -62,7 +62,7 @@ In the setup section of the notebook (or CLI arguments), you can configure:
 | `SPEED_MPS` | `float` | `4.5` | Movement speed along the circle in meters/second. |
 | `UPDATE_INTERVAL_SEC` | `float` | `1.0` | Telemetry packet transmission interval in seconds. |
 | `TELEMETRY_FORMAT` | `str` | `"compact4"` | `"compact4"` (`[lat, lng, hr, ts]`), `"compact6"`, `"compact7"`, or `"dict"`. |
-| `ENABLE_DELTA_GATING` | `bool` | `False` | Gating movement ($< 3.5\text{m}$) and HR ($< 12\text{ BPM}$) with $7.5\text{s}$ heartbeat fallback. |
+| `ENABLE_DELTA_GATING` | `bool` | `False` | Gating movement ($< 3.5\text{m}$) and HR ($< 12\text{ BPM}$) with $10.0\text{s}$ heartbeat fallback. |
 
 ---
 
@@ -89,14 +89,15 @@ In the setup section of the notebook (or CLI arguments), you can configure:
 ## 🚀 How to Run
 
 ### Option 1: Using Jupyter Notebook
-1. Open [`player_simulation.ipynb`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/notebooks/player_simulation.ipynb) in your Jupyter environment or IDE.
+1. Open [`player_simulation.ipynb`](player_simulation.ipynb) in your Jupyter environment or IDE.
 2. Run **Section 1** to load configuration parameters.
 3. Run **Section 2** to initialize the simulator engine.
 4. Run **Section 3A (Host)** or **Section 3B (Join)** to connect to the squad room.
 5. Run **Section 4** to start the live telemetry stream.
 6. Run **Section 5** to test placing tactical indicators.
 7. Run **Section 6** to test biometrics / KIA downed states.
-8. Run **Section 8** when finished to cleanly leave and clean up Firebase nodes.
+8. Run **Section 7** to inspect the constant bandwidth rate adaptation equation.
+9. Run **Section 8** when finished to cleanly leave and clean up Firebase nodes.
 
 ### Option 2: Running via Terminal CLI
 ```bash

@@ -1,0 +1,23 @@
+{
+  "name": "Scheme v1.0 (Baseline)",
+  "p_free": 4,
+  "p_pro": 12,
+  "upload_rate_free": 0.5,
+  "upload_rate_pro": 0.5,
+  "glance_free": 5.0,
+  "idle_free": 30.0,
+  "glance_pro": 10.0,
+  "idle_pro": 20.0,
+  "payload_telemetry": 200,
+  "tactical_rate": 1.0,
+  "payload_tactical": 200,
+  "max_tactical_markers": 100,
+  "hours_per_month_4wk": 64.0,
+  "hours_per_month_avg": 69.3333,
+  "rtdb_free_egress_gb": 10.0,
+  "rtdb_free_connections": 100,
+  "rtdb_egress_cost_gb": 1.00,
+  "one_time_price": 29.99,
+  "apple_small_biz_fee": 0.15,
+  "apple_standard_fee": 0.30
+}

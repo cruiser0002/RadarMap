@@ -8,14 +8,14 @@ It is structured to be **fully reproducible and parameterized**: whenever a netw
 
 ## ⚡ Quick Start: How to Re-evaluate Future Network Changes
 
-All benchmark outputs (evaluations, JSON dumps, and side-by-side comparison tables) are **automatically stored in the [`output/`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/output/) folder**.
+All benchmark outputs (evaluations, JSON dumps, and side-by-side comparison tables) are **automatically stored in the [`output/`](output/) folder**.
 
 When proposing or testing a network design update:
-1. **Define or update candidate parameters** in a JSON file (e.g. `benchmarks/candidate_scheme.json`) or modify `scripts/network_benchmark.py`.
+1. **Define or update candidate parameters** in a JSON file (e.g. `benchmarks/candidate_scheme_v2_optimized.json`) or modify `scripts/network_benchmark.py`.
 2. **Run the comparison CLI**:
    ```bash
    python3 scripts/network_benchmark.py \
-     --compare benchmarks/baseline_scheme_v1.0.json benchmarks/candidate_scheme.json
+     --compare benchmarks/baseline_scheme_v1.0.json benchmarks/candidate_scheme_v2_optimized.json
    ```
 3. **Inspect the automatically saved reports in `output/`**:
    * Comparative diff report: `output/benchmark_comparison_<scheme_a>_vs_<scheme_b>.md`
@@ -137,19 +137,19 @@ Once on paid Blaze, Firebase RTDB bills \$1.00/GB egress. A self-hosted dedicate
 
 ---
 
-### Question 3: The app charges one time $19.99, how many months will it take to deplete 50% of the revenue?
+### Question 3: The app charges one time $29.99, how many months will it take to deplete 50% of the revenue?
 *(Assuming active weekend tournament play: 8 hours/day $\times$ 2 days/weekend = 64 hours/month)*
 
-* **Scenario A: Per-Player Lifetime Purchase ($19.99 paid by each Pro player):**
+* **Scenario A: Per-Player Lifetime Purchase ($29.99 paid by each Pro player):**
   * Monthly cost per player: **$0.0986 / month** (~9.86¢/month).
-  * Runway to deplete **50% of Gross Revenue** ($9.995): **101.4 Months** (**8.45 Years**).
-  * Runway to deplete **50% of Net Revenue** after Apple 15% Small Biz fee ($8.496): **86.2 Months** (**7.18 Years**).
-  * Runway to deplete **50% of Net Revenue** after Apple 30% Standard fee ($6.997): **71.0 Months** (**5.92 Years**).
-* **Scenario B: Host-Subsidized Squad License ($19.99 paid once by host for entire 12-player squad):**
+  * Runway to deplete **50% of Gross Revenue** ($14.995): **152.1 Months** (**12.68 Years**).
+  * Runway to deplete **50% of Net Revenue** after Apple 15% Small Biz fee ($12.746): **129.3 Months** (**10.78 Years**).
+  * Runway to deplete **50% of Net Revenue** after Apple 30% Standard fee ($10.497): **106.5 Months** (**8.87 Years**).
+* **Scenario B: Host-Subsidized Squad License ($29.99 paid once by host for entire 12-player squad):**
   * Monthly cost for entire 12-player room: **$1.1827 / month**.
-  * Runway to deplete **50% of Gross Revenue** ($9.995): **8.45 Months** (~0.70 Years).
-  * Runway to deplete **50% of Net Revenue** after Apple 15% fee ($8.496): **7.18 Months** (~0.60 Years).
-  * Runway to deplete **50% of Net Revenue** after Apple 30% fee ($6.997): **5.92 Months** (~0.49 Years).
+  * Runway to deplete **50% of Gross Revenue** ($14.995): **12.68 Months** (~1.06 Years).
+  * Runway to deplete **50% of Net Revenue** after Apple 15% fee ($12.746): **10.78 Months** (~0.90 Years).
+  * Runway to deplete **50% of Net Revenue** after Apple 30% fee ($10.497): **8.88 Months** (~0.74 Years).
 
 ---
 
@@ -173,7 +173,7 @@ Once on paid Blaze, Firebase RTDB bills \$1.00/GB egress. A self-hosted dedicate
 | **RTDB Free Egress Quota** | $B_{\text{free}}$ | GB / mo | 10.0 | 10.0 | Firebase Blaze included allocation |
 | **RTDB Free Connection Cap** | $C_{\text{free}}$ | conns | 100 | 100 | Simultaneous connections included |
 | **RTDB Egress Overage Rate** | $\text{Rate}_{\text{egress}}$ | \$/GB | \$1.00 | \$1.00 | Standard Blaze pay-as-you-go rate |
-| **One-Time App Price** | $\text{Price}$ | \$ | \$19.99 | \$19.99 | StoreKit lifetime IAP price |
+| **One-Time App Price** | $\text{Price}$ | \$ | \$29.99 | \$29.99 | StoreKit lifetime IAP price |
 | **Apple StoreKit Fee Rate** | $f_{\text{apple}}$ | ratio | 0.15 / 0.30 | 0.15 / 0.30 | Small Business (15%) vs Standard (30%) |
 
 ---
@@ -295,13 +295,13 @@ flowchart LR
    * Inspect the framed WebSocket text frames.
    * Verify the JSON payload length and add WebSocket + TLS overhead (~40–60 bytes per packet).
 3. **Using In-App Metrics:**
-   * [`FirebaseSyncManager.swift`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/RadarMap/Managers/FirebaseSyncManager.swift) maintains `_uploadMetrics.telemetryWritesCompleted` and `_uploadMetrics.tacticalWritesCompleted`.
+   * [`FirebaseSyncManager.swift`](RadarMap/Managers/FirebaseSyncManager.swift) maintains `_uploadMetrics.telemetryWritesCompleted` and `_uploadMetrics.tacticalWritesCompleted`.
    * Cross-reference completed write counts against elapsed match duration to confirm $R_{\text{up}} \approx 0.5\text{ Hz}$.
 
 ### Step 2: Measuring Delta-Gated Upload Frequency ($R_{\text{up}}$)
-* Use [`player_simulator.py`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/notebooks/player_simulator.py) to simulate standard tactical patrol movement:
+* Use [`player_simulator.py`](notebooks/player_simulator.py) to simulate standard tactical patrol movement (run once per simulated player, joining the same room, to build up a 12-player room):
   ```bash
-  python3 notebooks/player_simulator.py --speed 1.5 --radius 50 --num-players 12
+  python3 notebooks/player_simulator.py --mode host --room ALPHA --pin 1234 --callsign VIPER-1 --speed 1.5 --radius 50
   ```
 * Delta-gating triggers an upload only when distance divergence exceeds $3.5\text{ m}$. At walking speeds ($1.4\text{ m/s}$), updates dispatch every $2.0$ to $2.5$ seconds ($0.4\text{ – }0.5\text{ Hz}$).
 
@@ -350,22 +350,22 @@ flowchart LR
 
 ---
 
-### Table 4: Revenue Depletion Runway ($19.99 Purchase, 64 hrs/month)
+### Table 4: Revenue Depletion Runway ($29.99 Purchase, 64 hrs/month)
 
-| Purchase Model | Monthly Cost | Runway to 50% Gross ($10.00) | Runway to 50% Net 15% ($8.50) | Runway to 50% Net 30% ($7.00) |
+| Purchase Model | Monthly Cost | Runway to 50% Gross ($15.00) | Runway to 50% Net 15% ($12.75) | Runway to 50% Net 30% ($10.50) |
 | :--- | :---: | :---: | :---: | :---: |
-| **Per-Player License** | $0.0986 / mo (9.9¢) | **101.4 Months** (**8.45 Years**) | **86.2 Months** (**7.18 Years**) | **71.0 Months** (**5.92 Years**) |
-| **Host-Subsidized Squad** | $1.1827 / mo | **8.45 Months** (~0.70 Years) | **7.18 Months** (~0.60 Years) | **5.92 Months** (~0.49 Years) |
-| **Per-Player (Continuous 100%)**| $0.2957 / mo | **33.8 Months** (~2.82 Years) | **28.7 Months** (~2.39 Years) | **23.7 Months** (~1.97 Years) |
+| **Per-Player License** | $0.0986 / mo (9.9¢) | **152.1 Months** (**12.68 Years**) | **129.3 Months** (**10.78 Years**) | **106.5 Months** (**8.87 Years**) |
+| **Host-Subsidized Squad** | $1.1827 / mo | **12.68 Months** (~1.06 Years) | **10.78 Months** (~0.90 Years) | **8.88 Months** (~0.74 Years) |
+| **Per-Player (Continuous 100%)**| $0.2957 / mo | **50.7 Months** (~4.23 Years) | **43.1 Months** (~3.59 Years) | **35.5 Months** (~2.96 Years) |
 
 ---
 
 ## 5. Automated Evaluation CLI & Comparison Engine
 
-The benchmark evaluation script is committed at [`scripts/network_benchmark.py`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/scripts/network_benchmark.py). It has **zero external dependencies** (standard Python 3 only) and generates all markdown tables deterministically.
+The benchmark evaluation script is committed at [`scripts/network_benchmark.py`](scripts/network_benchmark.py). It has **zero external dependencies** (standard Python 3 only) and generates all markdown tables deterministically.
 
 ### Output Storage Policy & CLI Usage:
-All benchmark outputs are written directly to the [`output/`](file:///Users/cruiser/Documents/antigravity/jolly-hypatia/output/) directory by default:
+All benchmark outputs are written directly to the [`output/`](output/) directory by default:
 * **Evaluation Reports:** `output/benchmark_<scheme_name>.md` and `output/benchmark_<scheme_name>.json`
 * **Comparison Reports:** `output/benchmark_comparison_<scheme_a>_vs_<scheme_b>.md`
 
@@ -406,7 +406,7 @@ Save candidate parameters into a `.json` file matching this template:
   "rtdb_free_egress_gb": 10.0,
   "rtdb_free_connections": 100,
   "rtdb_egress_cost_gb": 1.00,
-  "one_time_price": 19.99,
+  "one_time_price": 29.99,
   "apple_small_biz_fee": 0.15,
   "apple_standard_fee": 0.30
 }

@@ -77,13 +77,13 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 
 ### Option A: Live Camera Text Recognition (iOS)
 1. Open RadarMap on your iPhone.
-2. Navigate to **Host Squad** (or **Settings**).
+2. Navigate to **Settings**, or the room creation/join screen — the database URL field appears on both.
 3. Tap the **Camera Icon** beside the database URL field.
 4. Point your camera at the Firebase Console screen showing your database URL. iOS Live Text recognition will automatically scan and populate the URL.
 5. Toggle the **Lock** switch to protect the URL from being overwritten by future scans.
 
 ### Option B: Manual Entry or Clipboard Paste
-1. Open **Settings** (or **Host Squad**) in RadarMap.
+1. Open **Settings**, or the room creation/join screen, in RadarMap.
 2. Tap the **Database URL** field (placeholder: `Default RTDB or enter custom URL`).
 3. Paste your copied Firebase URL.
 4. Toggle the **Lock** switch ON.

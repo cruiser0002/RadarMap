@@ -1,0 +1,23 @@
+{
+  "name": "Scheme v2.0 (Hyper-Optimized)",
+  "p_free": 4,
+  "p_pro": 12,
+  "upload_rate_free": 0.38,
+  "upload_rate_pro": 0.38,
+  "glance_free": 4.0,
+  "idle_free": 36.0,
+  "glance_pro": 8.0,
+  "idle_pro": 32.0,
+  "payload_telemetry": 110,
+  "tactical_rate": 1.0,
+  "payload_tactical": 120,
+  "max_tactical_markers": 100,
+  "hours_per_month_4wk": 64.0,
+  "hours_per_month_avg": 69.3333,
+  "rtdb_free_egress_gb": 10.0,
+  "rtdb_free_connections": 100,
+  "rtdb_egress_cost_gb": 1.00,
+  "one_time_price": 29.99,
+  "apple_small_biz_fee": 0.15,
+  "apple_standard_fee": 0.30
+}

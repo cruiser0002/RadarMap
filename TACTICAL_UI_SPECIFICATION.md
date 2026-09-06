@@ -28,8 +28,8 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 | **§2 Motion & Tracking** | Hardware Compositor Rate | `60Hz` (watchOS) / `120Hz` (iOS) | Native MapKit `showsUserLocation` / `UserAnnotation` follow-me refresh rate |
 | **§2 Motion & Tracking** | `centerThresholdMeters` | `10.0m` (`AppConstants.Location`) | Deadband threshold before map transitions from local follow to free-roam pan |
 | **§3 Tactical Scales** | `defaultScale` | `50.0m` (`TacticalScalePolicy`) | Baseline minor scale on initial room entry or cold boot |
-| **§3 Tactical Scales** | `standardAllowedScales` | `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000]` m | Canonical discrete logarithmic decade scale ladder |
-| **§3 Tactical Scales** | Scale Range Bounds | `1.0m` min / `50,000.0m` max | Clamping boundaries for Digital Crown and pinch-to-zoom |
+| **§3 Tactical Scales** | `standardAllowedScales` | `[1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]` m | Canonical discrete logarithmic decade scale ladder |
+| **§3 Tactical Scales** | Scale Range Bounds | `1.0m` min / `2,500.0m` max | Clamping boundaries for Digital Crown and pinch-to-zoom |
 | **§4 Radar Geometry** | `rangeRingRatios` | `[0.25, 0.50, 0.75, 1.0]` (`RadarScale`) | Radial multipliers for 4 concentric rings ($S, 2S, 3S, 4S$) |
 | **§4 Radar Geometry** | `radarRadiusRatio` | `0.44` (`RadarScale`) | Outer ring radius as fraction of minimum screen dimension |
 | **§4 Radar Geometry** | Outer Ring Gating | $d > 4 \times S$ | Strict out-of-range cutoff; entities beyond $4S$ are dropped |
@@ -101,14 +101,14 @@ The application operates on a single product-level state:
 ### The Canonical Scale Ladder (`TacticalScalePolicy`):
 Scale steps are constrained to the discrete ladder:
 ```swift
-public static let standardAllowedScales: [Double] = [
-    1, 5, 10, 25, 50, 100, 250, 500,
-    1_000, 2_500, 5_000, 10_000, 25_000, 50_000
+public static let standardAllowedScales: [CLLocationDistance] = [
+    1, 2.5, 5, 10, 25, 50, 100, 250, 500,
+    1_000, 2_500
 ]
 ```
 * **Startup Default Scale:** **50 meters**.
 * **Minimum Scale:** 1 meter.
-* **Maximum Scale:** 50 kilometers.
+* **Maximum Scale:** 2.5 kilometers.
 * **Logarithmic Snapping:** Snapping to the ladder uses logarithmic distance minimization:
   $$\text{target} = \arg\min_s \left| \ln\left(\frac{s}{\text{observedScale}}\right) \right|$$
 * **Bounded Stepping:** `nextScale()` and `previousScale()` clamp at the boundary limits; they never wrap around.

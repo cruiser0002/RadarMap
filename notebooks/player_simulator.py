@@ -573,7 +573,7 @@ class RadarPlayerSimulator:
         enable_delta_gating: bool = False,
         min_movement_delta_meters: float = 3.5,
         min_hr_delta_bpm: float = 12.0,
-        heartbeat_interval_sec: float = 7.5,
+        heartbeat_interval_sec: float = 10.0,
         coordinator: Optional[FirebaseUploadCoordinator] = None,
     ):
         self.callsign = callsign.strip()
