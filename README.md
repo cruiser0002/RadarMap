@@ -1,5 +1,10 @@
 # Radar Map: Your Milsim Companion (watchOS & iOS)
 
+[![watchOS 10.0+](https://img.shields.io/badge/watchOS-10.0%2B-black?style=flat&logo=apple)](https://developer.apple.com/watchos/)
+[![iOS 17.0+](https://img.shields.io/badge/iOS-17.0%2B-black?style=flat&logo=apple)](https://developer.apple.com/ios/)
+[![Swift 5.9](https://img.shields.io/badge/Swift-5.9-orange?style=flat&logo=swift)](https://swift.org)
+[![Xcode 15.0+](https://img.shields.io/badge/Xcode-15.0%2B-blue?style=flat&logo=xcode)](https://developer.apple.com/xcode/)
+
 **Radar Map** is a tactical companion application built with SwiftUI for watchOS and iOS, engineered for milsim (military simulation), airsoft, paintball, and outdoor tactical squad coordination.
 
 ---
@@ -32,7 +37,7 @@
   * Split upload scheduling: must-arrive queueing for tactical mutations; latest-only coalescing for high-frequency telemetry.
   * Dead-reckoning predictive delta gating ($3.5\text{m}$ error threshold) and remote player extrapolation smoothing.
   * Monotonic sequence numbers and timestamp watermarking to prevent out-of-order jitter.
-  * *Details:* [**`CLOUD_DATA_MANAGEMENT.md`**](CLOUD_DATA_MANAGEMENT.md), [**`DEAD_RECKONING.md`**](DEAD_RECKONING.md), & [**`ROOM_ID_HARDENING.md`**](ROOM_ID_HARDENING.md)
+  * *Details:* [**`CLOUD_DATA_MANAGEMENT.md`**](CLOUD_DATA_MANAGEMENT.md) & [**`DEAD_RECKONING.md`**](DEAD_RECKONING.md)
 * 🌐 **Bring Your Own Firebase (BYO-Firebase)**:
   * Squad leaders can host private rooms on their own dedicated Google Firebase Realtime Database (100% free Spark plan) to isolate traffic from shared public room quotas.
   * Features camera Live Text OCR recognition, Lock protection, and instant teammate auto-configuration via Join QR codes.
@@ -67,7 +72,7 @@ The application is parameterized by centralized constants in [`RadarMap/AppConst
 | **Monetization** | Lifetime Price / Product ID | `$29.99` / `com.radarmap.watch.pro` | One-time non-consumable Squad Leader lifetime unlock |
 | **Tactical Markers**| `freeTierMaxTacticalIndicators` / `pro` | `0` / `20` markers | Concurrent active enemy & environmental markers cap |
 | **Tactical Markers**| `enemyIndicatorFadeDurationSeconds` | `300.0s` (5 min) | Automatic fade-to-grayscale duration for enemy sightings |
-| **Room Identifiers**| Room ID / Entry Length | `16` total / `4–12` name | 12-char squad name + 4-char PIN-derived SHA-256 padding |
+| **Room Identifiers**| Room ID / Entry Length | `16` total / `4–12` name | 4–12 char squad name + dynamic Crockford Base32 padding ($16 - \text{name.length}$) = fixed 16-char path key |
 | **PIN Validation** | `minPinLength` / `maxPinLength`| `4` min / `16` max | Mandatory join PIN validation limits |
 | **Biometrics** | Optical PPG Duty Cycle | `4.0s` active / `16.0s` sleep | 80% battery conservation duty cycling (`HealthKitManager`) |
 | **Biometrics** | `flatlineHeartRate` | `0.0 BPM` | KIA / Downed status indicator triggered via 1.2s hold gesture |
@@ -76,11 +81,13 @@ The application is parameterized by centralized constants in [`RadarMap/AppConst
 
 ---
 
-## ⚠️ Core Engineering Rule: No Fallback Datasources or Placeholder Masking
+## ⚠️ Architectural & Engineering Standards
 
-* **Datasource Resilience Over Fallbacks**: NEVER introduce fallback data sources, secondary compensatory lookup pipelines, or synthetic placeholder stitching unless explicitly specified.
-* **Direct Authoritative Consumption**: Consume data directly from authoritative sources as-is. If a field or property (e.g., player callsign) is not yet available, it remains empty or unrendered until delivered by the authoritative stream.
-* **No ID / Mock Leakage**: NEVER fall back to internal identifiers (such as UUIDs, member IDs, or synthetic keys) as user-facing values. Doing so masks data gaps, causes unpredictable race conditions, and produces UI flickering.
+RadarMap adheres to strict zero-mock, real-time tactical synchronization standards:
+* **No Fallback Data Sources**: Production targets consume data directly from authoritative sensors and streams; missing telemetry is surfaced via explicit UI states rather than masked with synthetic fallbacks.
+* **No Internal Identifier Leakage**: The UI never presents internal UUIDs or member hashes while callsigns or locations are resolving.
+
+For project generation, dual-target layout, and pull request testing standards, see [**`CONTRIBUTING.md`**](CONTRIBUTING.md).
 
 ---
 
@@ -96,8 +103,7 @@ All operational procedures, netcode specifications, and compliance rules are mai
 ### ⚙️ Netcode, Synchronization & Architecture Specifications
 * [**Tactical UI & Radar Specification**](TACTICAL_UI_SPECIFICATION.md): Authoritative UI/UX specification covering Map and Radar presentations, discrete decade scale ladders, 60Hz native follow-me motion rules, and platform adapters.
 * [**Dead Reckoning & Predictive Delta Gating**](DEAD_RECKONING.md): Predictive delta compression, dual-sample velocity derivation, and local extrapolation for smooth remote player rendering.
-* [**Room ID Hardening & Schema Architecture**](ROOM_ID_HARDENING.md): 16-character PIN-derived room ID padding, role migration, short leaf keys, and tactical indicator pruning.
-* [**Cloud Data Management Architecture**](CLOUD_DATA_MANAGEMENT.md): Cloud Data Matrix, delta gating, dead reckoning, late packet rejection, and scheduled Cloud Functions garbage collection.
+* [**Cloud Data Management Architecture**](CLOUD_DATA_MANAGEMENT.md): Cloud Data Matrix, delta gating, dead reckoning, late packet rejection, scheduled Cloud Functions garbage collection, and the RTDB schema reference (16-character PIN-derived room ID padding, role migration, short leaf keys, and tactical indicator pruning).
 * [**Local Companion Data Sync Architecture**](COMPANION_DATA_SYNC_MODEL.md): `WatchConnectivity` (`WCSession`) dual-stream sync protocol, immediate local rendering, and phone preference network handover.
 * [**MapKit Equivalents & Native Behavioral Standards**](MAPKIT_EQUIVALENTS.md): MapKit native behaviors, camera altitude trigonometry, `UserAnnotation` standards, and discrete decade zoom scales.
 
@@ -107,7 +113,7 @@ All operational procedures, netcode specifications, and compliance rules are mai
 
 ```
 RadarMap/
-├── RadarMapApp.swift                       # Multiplatform app entry point (watchOS & iOS)
+├── RadarMapApp.swift                       # Apple Watch app entry point (#if os(watchOS))
 ├── AppConstants.swift                      # Global constants, decade scales & API keys
 ├── Models/
 │   ├── AppBuildVersion.swift               # Version tracking & schema migration
@@ -176,7 +182,7 @@ Additional top-level project contents (outside `RadarMap/`):
 ```
 RadarMapTests/
 └── RadarMapTests.swift                     # Unit & integration test suite (187+ tests)
-RadarMapCompanion/                          # watchOS companion target
+RadarMapCompanion/                          # iOS (iPhone) companion target
 └── RadarMapCompanionApp.swift
 functions/                                  # Firebase Cloud Functions (room TTL sweeps, indicator pruning)
 notebooks/                                  # Jupyter notebook & CLI player simulator (see notebooks/README.md)
@@ -196,9 +202,18 @@ generate_xcodeproj.py                       # Regenerates RadarMap.xcodeproj fro
 * Target Platforms: **watchOS 10.0+**, **iOS 17.0+**, **macOS 14.0+**
 
 ### Run Unit Tests
+Execute unit tests from the command line:
 ```bash
 swift test
 ```
+Or within Xcode:
+* Press `⌘U` with either `RadarMap` (watchOS) or `RadarMapCompanion` (iOS) active.
+
+### In-App Purchases & StoreKit Testing
+To validate Pro Squad Leader tier entitlements locally:
+1. In Xcode, navigate to **Product > Scheme > Edit Scheme... > Run > Options**.
+2. Set **StoreKit Configuration** to [`RadarMap/Resources/RadarMap.storekit`](RadarMap/Resources/RadarMap.storekit).
+3. Test lifetime unlock transactions and restoration flows offline without live App Store Connect accounts.
 
 ### Opening in Xcode
 `RadarMap.xcodeproj` is generated from the file tree by [`generate_xcodeproj.py`](generate_xcodeproj.py). Re-run it any time you add, remove, or move a Swift file — otherwise Xcode/`xcodebuild` won't see the change:
@@ -207,3 +222,21 @@ python3 generate_xcodeproj.py
 xed .
 ```
 Select an Apple Watch target (e.g. Apple Watch Series 9 or Ultra 2, watchOS 10+) or iPhone target (iOS 17+) to build and run.
+
+---
+
+## 🤝 Contributing
+
+Contributions and issue reports are welcome! Please review [**`CONTRIBUTING.md`**](CONTRIBUTING.md) for architectural invariants, dual-target layout standards, and pull request testing requirements.
+
+---
+
+## 📄 License
+
+This repository is maintained for tactical simulation and development. All rights reserved. See repository settings and headers for specific distribution terms.
+
+---
+
+## 💬 Support & Inquiries
+
+For tactical deployment inquiries, feature requests, or issue tracking, please open an issue in the GitHub repository or consult the in-app [**HUD Field Manual**](RadarMap/Views/Guide/HUDGuideView.swift).

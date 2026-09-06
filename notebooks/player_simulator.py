@@ -540,10 +540,10 @@ class RadarPlayerSimulator:
     MAX_ROOM_NAME_LENGTH = 16
     MAX_ROOM_NAME_ENTRY_LENGTH = 12
     MIN_ROOM_NAME_ENTRY_LENGTH = 4
-    ROOM_TTL_SECONDS = 12.0 * 3600.0  # 12-hour idle cutoff (see ROOM_ID_HARDENING.md §8)
+    ROOM_TTL_SECONDS = 12.0 * 3600.0  # 12-hour idle cutoff (see CLOUD_DATA_MANAGEMENT.md)
     ROOM_PADDING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
     # Squad-order 3-letter codes — these self-prune under /t/{roomId}/o and never share the
-    # enemy+environment cap under /t/{roomId}/i (see ROOM_ID_HARDENING.md §6).
+    # enemy+environment cap under /t/{roomId}/i (see CLOUD_DATA_MANAGEMENT.md).
     SQUAD_ORDER_CODES = frozenset({
         "wat", "goh", "atk", "def", "flg",
         "pt1", "pt2", "pt3", "pt4", "pt5", "pt6", "pt7", "pt8", "pt9", "p10",
@@ -578,13 +578,13 @@ class RadarPlayerSimulator:
     ):
         self.callsign = callsign.strip()
         # Plain user-entered name (<=12 chars) — the Firebase path key is the derived `room_id`
-        # below, not this. See ROOM_ID_HARDENING.md §1.
+        # below, not this. See CLOUD_DATA_MANAGEMENT.md.
         self.room_name = room_name.strip().upper()[:self.MAX_ROOM_NAME_ENTRY_LENGTH]
         self.pin = self.sanitize_pin(pin) if pin else ""
         if len(self.pin) < self.MIN_PIN_LENGTH:
             raise ValueError(
                 f"PIN is mandatory and must be at least {self.MIN_PIN_LENGTH} digits "
-                "(see ROOM_ID_HARDENING.md §2) — pass pin=... with >= 4 digits."
+                "(see CLOUD_DATA_MANAGEMENT.md) — pass pin=... with >= 4 digits."
             )
         self.max_tactical_indicators = self.PRO_TIER_MAX_TACTICAL_INDICATORS
         self.room_id = self.room_name + self.derive_room_padding(self.pin, self.room_name)
@@ -653,7 +653,7 @@ class RadarPlayerSimulator:
         """Derives the room-id padding suffix matching FirebaseSyncManager.deriveRoomPadding —
         domain-separated from hash_pin via the "roompad:" prefix. Padding fills the remainder of
         MAX_ROOM_NAME_LENGTH (16) so the total room id is always 16 chars. See
-        ROOM_ID_HARDENING.md §1."""
+        CLOUD_DATA_MANAGEMENT.md."""
         alphabet = RadarPlayerSimulator.ROOM_PADDING_ALPHABET
         pad_length = length if length is not None else max(0, RadarPlayerSimulator.MAX_ROOM_NAME_LENGTH - len(name))
         combined = f"roompad:{name}:{pin}"
@@ -812,10 +812,10 @@ class RadarPlayerSimulator:
         status, room_data = self._http_request("GET", f"r/{self.room_id}.json")
 
         if status != 200 or not room_data or not isinstance(room_data, dict):
-            print(f"[ERROR] Room '{self.room_id}' not found on server (wrong name or PIN both derive a miss — see ROOM_ID_HARDENING.md §1).")
+            print(f"[ERROR] Room '{self.room_id}' not found on server (wrong name or PIN both derive a miss — see CLOUD_DATA_MANAGEMENT.md).")
             return False
 
-        # Validate PIN (mandatory — see ROOM_ID_HARDENING.md §2)
+        # Validate PIN (mandatory — see CLOUD_DATA_MANAGEMENT.md)
         expected_pin_hash = room_data.get("pin", "")
         input_hash = self.hash_pin(self.pin, self.room_id)
         if input_hash != expected_pin_hash:
@@ -920,7 +920,7 @@ class RadarPlayerSimulator:
         """
         Enqueues placing a tactical indicator on the server at /t/{roomId}/o/{indicatorId} (squad
         orders) or /t/{roomId}/i/{indicatorId} (enemy+environment, shared cap) using the compact
-        5-element array format: [type_code, lat, lon, ts, placed_by]. See ROOM_ID_HARDENING.md §6.
+        5-element array format: [type_code, lat, lon, ts, placed_by]. See CLOUD_DATA_MANAGEMENT.md.
         """
         ind_id = indicator_id or f"ind_{uuid.uuid4().hex[:8]}"
         type_code = self.type_codes.get(indicator_type, indicator_type)
@@ -983,7 +983,7 @@ class RadarPlayerSimulator:
     def refresh_room_expiry(self):
         """Refreshes this room's TTL expiry across all three top-level trees, matching
         FirebaseSyncManager.refreshRoomExpiry — keeps a long-running simulated room alive under
-        the new 12h idle cutoff. See ROOM_ID_HARDENING.md §8."""
+        the new 12h idle cutoff. See CLOUD_DATA_MANAGEMENT.md."""
         if not self.is_connected or not self.room_id:
             return
         new_expire_at = time.time() + self.ROOM_TTL_SECONDS
@@ -1014,7 +1014,7 @@ class RadarPlayerSimulator:
             self._http_request("DELETE", f"p/{self.room_id}/{self.member_id}.json")
 
             # Remove this player's own squad-order markers (compact array format; no
-            # dictionary-shaped guard — mirrors the FirebaseSyncManager fix in ROOM_ID_HARDENING.md §6)
+            # dictionary-shaped guard — mirrors the FirebaseSyncManager fix in CLOUD_DATA_MANAGEMENT.md)
             t_status, t_data = self._http_request("GET", f"t/{self.room_id}/o.json")
             if t_status == 200 and isinstance(t_data, dict):
                 for ind_id, arr in t_data.items():
@@ -1107,7 +1107,7 @@ def main():
     parser.add_argument("--mode", choices=["host", "join"], default="host", help="Host a new room or join existing")
     parser.add_argument("--callsign", default="VIPER-1", help="Player callsign")
     parser.add_argument("--room", default="ALPHA", help="Room name")
-    parser.add_argument("--pin", required=True, help="Mandatory PIN, 4-16 digits (see ROOM_ID_HARDENING.md §2)")
+    parser.add_argument("--pin", required=True, help="Mandatory PIN, 4-16 digits (see CLOUD_DATA_MANAGEMENT.md)")
     parser.add_argument("--lat", type=float, default=37.785834, help="Center latitude")
     parser.add_argument("--lon", type=float, default=-122.406417, help="Center longitude")
     parser.add_argument("--hr", type=float, default=110.0, help="Heart rate BPM")

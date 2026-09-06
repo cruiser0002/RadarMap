@@ -34,7 +34,7 @@ The following centralized constants from [`AppConstants.swift`](../RadarMap/AppC
 | Section & Domain | Constant / Parameter | Value | Description & Code Source |
 | :--- | :--- | :--- | :--- |
 | **Endpoint** | `defaultDatabaseURL` | `"https://radarmap-8adf0-default-rtdb.firebaseio.com"` | Default RTDB target URL (`Network.defaultDatabaseURL`) |
-| **Path Segments** | RTDB Branch Keys | `/r` (rooms), `/p` (telemetry), `/t` (tactical) | Shortened path hierarchy (`ROOM_ID_HARDENING.md`) |
+| **Path Segments** | RTDB Branch Keys | `/r` (rooms), `/p` (telemetry), `/t` (tactical) | Shortened path hierarchy (`CLOUD_DATA_MANAGEMENT.md`) |
 | **Telemetry Array** | Compact 4 Format | `[lat, lon, hr, ts]` | Lean 4-element telemetry payload (`TelemetryPacket`) |
 | **Delta Gating** | `maxPredictedPositionErrorMeters` | `3.5m` | Position divergence threshold before upload (`DeltaGating`) |
 | **Delta Gating** | `minHeartRateDeltaBpm` | `12.0 BPM` | Heart rate swing threshold (`DeltaGating`) |

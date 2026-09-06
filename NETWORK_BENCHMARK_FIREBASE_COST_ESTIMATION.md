@@ -223,7 +223,7 @@ For a revenue target $R_{\text{target}}$ (e.g. $50\%$ of gross $\approx \$9.995$
 
 ### C. Text & UID Shortening Specification (Hardened Wire Schema)
 
-Per [`ROOM_ID_HARDENING.md`](ROOM_ID_HARDENING.md) and [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md), all text on the wire is systematically shortened to eliminate JSON and path overhead:
+Per [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md) and [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md), all text on the wire is systematically shortened to eliminate JSON and path overhead:
 
 #### 1. RTDB Path Segments (Single-Character Endpoints)
 | Original Segment | Hardened Segment | Byte Savings | Code Mapping |
@@ -264,9 +264,9 @@ Tactical indicator type strings are shortened to 3 ASCII letters (`AppConstants.
 #### 5. UID Length Hardening & Implementation Status
 | Identifier Type | Planned Length & Encoding | Live Code Status | Rationale / Reference |
 | :--- | :---: | :---: | :--- |
-| **Room ID** | **16 chars** (12-char squad name + 4-char PIN-derived Crockford Base32 padding) | ✅ Active in code | Prevents dictionary room enumeration (`ROOM_ID_HARDENING.md` §1) |
+| **Room ID** | **16 chars** (12-char squad name + 4-char PIN-derived Crockford Base32 padding) | ✅ Active in code | Prevents dictionary room enumeration (`CLOUD_DATA_MANAGEMENT.md` §1) |
 | **Member ID** | **8 chars** (Crockford Base32: `[2-9A-HJKMNP-Z]`) | ✅ Active in code | Generated via `GameStateManager.generateShortMemberId()` (shaves 28 B off 36-char UUID) |
-| **Tactical Indicator ID** | **8 chars** (Crockford Base32) | ⚠️ **Gap: Defaults to 36-char UUID** | Planned in `ROOM_ID_HARDENING.md` §4; `TacticalIndicator.swift:242` currently defaults to `UUID().uuidString` |
+| **Tactical Indicator ID** | **8 chars** (Crockford Base32) | ⚠️ **Gap: Defaults to 36-char UUID** | Planned in `CLOUD_DATA_MANAGEMENT.md` §4; `TacticalIndicator.swift:242` currently defaults to `UUID().uuidString` |
 
 ---
 
