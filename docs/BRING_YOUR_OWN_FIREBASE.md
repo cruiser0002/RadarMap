@@ -19,7 +19,7 @@ This guide provides step-by-step instructions for provisioning, configuring, and
 
 ## ⚡ Key BYO-Firebase Constants & Parameters
 
-The following centralized constants from [`AppConstants.swift`](RadarMap/AppConstants.swift) (`AppConstants.Network`, `AppConstants.Storage`, and `AppConstants.UI`) govern custom Firebase database configurations:
+The following centralized constants from [`AppConstants.swift`](../RadarMap/AppConstants.swift) (`AppConstants.Network`, `AppConstants.Storage`, and `AppConstants.UI`) govern custom Firebase database configurations:
 
 | Section & Context | Constant / Property | Value / Limit | Purpose & Architectural Scope |
 | :--- | :--- | :--- | :--- |
@@ -29,10 +29,10 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 | **Step 3 Rules** | Security Rules Mode | Open (`.read: true`, `.write: true`) | Allows peer synchronization without Firebase Auth accounts |
 | **Step 4 URL Format** | Custom Endpoint Regex | `https://*.firebaseio.com` or `*.firebasedatabase.app` | Valid Firebase Realtime Database URL domains |
 | **Connecting** | `customDatabaseURLKey` | `"custom_database_url"` | UserDefaults persistence key for custom RTDB endpoint |
-| **Connecting** | `isCustomDatabaseURLLockedKey` | `"is_custom_database_url_locked"` | UserDefaults key locking custom URL against accidental scan overwrite |
+| **Connecting** | `isCustomDatabaseURLEnabledKey` | `"is_custom_database_url_enabled"` | UserDefaults key for the custom-vs-default RTDB switch (default `true`) |
 | **QR Code Join** | `minRoomNameEntryLength` / `maxRoomNameEntryLength` | `4` min / `12` max characters | Squad name character limits (`UI.minRoomNameEntryLength`) |
-| **QR Code Join** | `minPinLength` / `maxPinLength` | `4` min / `16` max digits | Mandatory squad PIN character limits (`UI.minPinLength`) |
-| **QR Code Join** | Room Path Key Length | `16` characters total | Name + 4-char SHA-256 PIN-derived suffix padding (`maxRoomNameLength`) |
+| **QR Code Join** | `minPinLength` / `maxPinLength` | `4` min / `16` max characters | Mandatory squad PIN character limits, ASCII alphanumeric (`UI.minPinLength`) |
+| **QR Code Join** | Room Path Key Length | `16` characters total | 4–12 char name + dynamic Crockford Base32 padding ($16 - \text{name.length}$) (`maxRoomNameLength`) |
 | **QR Code Join** | Deep-Link Payload | `radarmap://join?room=...&pin=...&db=...` | Formatted QR join payload schema (`QRJoinPayload.swift`) |
 
 ---
@@ -77,18 +77,17 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 
 ### Option A: Live Camera Text Recognition (iOS)
 1. Open RadarMap on your iPhone.
-2. Navigate to **Settings**, or the room creation/join screen — the database URL field appears on both.
+2. Navigate to **Config** via the gear icon in the upper-left of the map HUD (see [`SETTINGS_VIEW.md`](SETTINGS_VIEW.md)).
 3. Tap the **Camera Icon** beside the database URL field.
-4. Point your camera at the Firebase Console screen showing your database URL. iOS Live Text recognition will automatically scan and populate the URL.
-5. Toggle the **Lock** switch to protect the URL from being overwritten by future scans.
+4. Make sure the **Custom URL** switch beside the field is ON (it is by default), then point your camera at the Firebase Console screen showing your database URL. iOS Live Text recognition will automatically scan and populate the URL.
 
 ### Option B: Manual Entry or Clipboard Paste
-1. Open **Settings**, or the room creation/join screen, in RadarMap.
-2. Tap the **Database URL** field (placeholder: `Default RTDB or enter custom URL`).
-3. Paste your copied Firebase URL.
-4. Toggle the **Lock** switch ON.
+1. Open **Config** via the gear icon in the map HUD in RadarMap.
+2. Make sure the **Custom URL** switch beside the field is ON (it is by default).
+3. Tap the **Database URL** field (placeholder: `Default RTDB or enter custom URL`).
+4. Paste your copied Firebase URL.
 
-> **Tip:** To return to the shared RadarMap cloud at any time, simply clear the text in the database URL field. The field will immediately revert to the default shared infrastructure.
+> **Tip:** To return to the shared RadarMap cloud at any time, toggle the **Custom URL** switch OFF (or clear the text in the database URL field). Either way, the app immediately reverts to the default shared infrastructure regardless of whatever URL is still sitting in the field.
 
 ---
 
@@ -102,9 +101,19 @@ Once you host a room on your custom Firebase project:
 2. Teammates open RadarMap and tap **"Scan Squad QR to Join"**.
 3. Upon scanning, their app automatically populates:
    * **Room Name**
-   * **Room PIN** (mandatory, 4–16 digits)
+   * **Room PIN** (mandatory, 4–16 alphanumeric characters)
    * **Custom Database Endpoint**
 4. Teammates connect directly to your private Firebase project without any manual typing or configuration!
+
+---
+
+## 🔒 Input Sanitization
+
+Every field that feeds into this flow is sanitized at the point of entry, not just length-checked, since some of these values become literal Firebase Realtime Database path segments where a stray character can break the connection outright:
+
+* **Room Name & PIN** are restricted to plain ASCII letters and digits (`A-Z`, `0-9`) — typing Greek letters, emoji, CJK, or symbols like `.`/`#`/`$`/`[`/`]` simply has no effect, since those characters are silently dropped as you type rather than accepted and later rejected by Firebase. This exists because the room name becomes part of the actual database path key, and RTDB keys reject `. # $ [ ]` and control characters outright; non-ASCII characters are excluded too because they can throw off the deterministic name+PIN padding math that builds that key (see [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md) §6.A.1).
+* **Custom Database URL** can't use that same narrow filter — a real URL needs `: / . -` at minimum — so instead it accepts the full set of characters a URL is allowed to contain (RFC 3986) and strips everything else (control characters, whitespace, non-ASCII text), including from camera-scanned text. This still won't fix a URL that's structurally wrong (e.g. missing `https://`) — that's caught separately, and the field turns red until it parses as a valid `http(s)://host` URL.
+* **Takeaway for anyone extending this screen:** if you add a new text field here, decide *before* wiring it up whether its value ever becomes a literal RTDB path segment. If yes, restrict it to a narrow, Firebase-key-safe character set (plain alphanumerics is simplest); if it's only ever stored or transmitted as a value (like Callsign), length/trim validation is enough — don't over-restrict user-facing text that doesn't need it.
 
 ---
 
@@ -127,10 +136,10 @@ Once you host a room on your custom Firebase project:
   * Double-check Step 3. Ensure both `".read"` and `".write"` are set to `true` and you clicked **Publish**.
 * **URL Formatting:**
   * Ensure the URL begins with `https://` and ends with either `.firebaseio.com` or `.firebasedatabase.app`.
-* **Lock Switch Protection:**
-  * Always flip the **Lock** switch ON after setting your custom URL so that joining another squad's room in the future does not accidentally overwrite your saved hosting URL.
+* **Custom URL Switch:**
+  * The **Custom URL** switch must stay ON for your typed database URL to actually be used — flipping it OFF grays out the field/camera button and forces the shared default RTDB regardless of what's saved there. An explicit database URL from a scanned join QR code always applies on top of this switch, so scanning a teammate's code still works even with your own switch OFF.
 * **Data Retention & Pruning:**
-  * Unlike the shared default project, where rooms expire after a 12h idle TTL (`idleCutoffHours = 12.0`, refreshed hourly by active hosts) and an hourly Cloud Functions sweep (`cleanExpiredRooms` in [`functions/index.js`](functions/index.js)) prunes them, custom Firebase projects do not have this scheduled job. Expired squad data remains until cleared manually via your Firebase Console Data tab.
+  * Unlike the shared default project, where rooms expire after a 12h idle TTL (`idleCutoffHours = 12.0`, refreshed hourly by active hosts) and an hourly Cloud Functions sweep (`cleanExpiredRooms` in [`functions/index.js`](../functions/index.js)) prunes them, custom Firebase projects do not have this scheduled job. Expired squad data remains until cleared manually via your Firebase Console Data tab.
 * **Quota Upgrades:**
   * If your squad outgrows the Spark plan's free quota (100 simultaneous connections or 10 GB/month egress), Firebase will prompt you to upgrade that specific project to Blaze (pay-as-you-go). This only affects your personal project and has zero effect on the shared project or other hosts.
 * **In-App Guide Reference:**

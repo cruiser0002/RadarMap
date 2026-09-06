@@ -17,12 +17,12 @@ This document provides the complete operational setup, dashboard configuration, 
 
 ## ⚡ Key Monetization & IAP Constants
 
-The following centralized constants from [`AppConstants.swift`](RadarMap/AppConstants.swift) (`AppConstants.Subscription` and `AppConstants.Storage`) govern all in-app purchase, paywall, and tier-enforcement behaviors:
+The following centralized constants from [`AppConstants.swift`](../RadarMap/AppConstants.swift) (`AppConstants.Subscription` and `AppConstants.Storage`) govern all in-app purchase, paywall, and tier-enforcement behaviors:
 
 | Section & Context | Constant / Identifier | Value | Code Source / Usage |
 | :--- | :--- | :--- | :--- |
-| **§1 Tier Limits** | `freeTierMaxCapacity` | `4` operators | `Subscription.freeTierMaxCapacity` — Free host squad room cap |
-| **§1 Tier Limits** | `proTierMaxCapacity` | `12` operators | `Subscription.proTierMaxCapacity` — Pro squad leader room cap |
+| **§1 Tier Limits** | `freeTierMaxCapacity` | `4` players | `Subscription.freeTierMaxCapacity` — Free host squad room cap |
+| **§1 Tier Limits** | `proTierMaxCapacity` | `12` players | `Subscription.proTierMaxCapacity` — Pro squad leader room cap |
 | **§1 Tactical Markers**| `freeTierMaxTacticalIndicators` | `0` markers | `Subscription.freeTierMaxTacticalIndicators` — Free tier cannot drop markers |
 | **§1 Tactical Markers**| `proTierMaxTacticalIndicators` | `20` markers | `Subscription.proTierMaxTacticalIndicators` — Shared cap on enemy/hazard indicators |
 | **§2 StoreKit Product**| `productID` | `"com.radarmap.watch.pro"` | App Store Connect Non-Consumable Product ID (`Subscription.productID`) |
@@ -40,16 +40,16 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 
 ## 1. Product Overview & Tier Limits
 
-Radar Map uses a freemium model governed by [`SubscriptionManager.swift`](RadarMap/Managers/SubscriptionManager.swift):
+Radar Map uses a freemium model governed by [`SubscriptionManager.swift`](../RadarMap/Managers/SubscriptionManager.swift):
 
 * **Free Tier (`freeTierMaxCapacity = 4`)**:
-  * Free operators can host squad rooms of up to **4 operators**.
-  * Free operators can join hosted rooms of **any size** 100% free.
+  * Free players can host squad rooms of up to **4 players**.
+  * Free players can join hosted rooms of **any size** 100% free.
   * Tactical marker placement is locked to Pro hosts.
 * **Pro Tier (`proTierMaxCapacity = 12`)**:
   * **Product ID:** `com.radarmap.watch.pro`
   * **Price:** $29.99 USD (One-time lifetime non-consumable unlock; no recurring subscriptions).
-  * Unlocks squad hosting capacity up to **12 operators**.
+  * Unlocks squad hosting capacity up to **12 players**.
   * Unlocks tactical marker placements (orders, objectives, enemy tags, and environmental hazards).
 
 ---
@@ -68,7 +68,7 @@ Radar Map uses a freemium model governed by [`SubscriptionManager.swift`](RadarM
 5. **Localization**:
    * Language: English (U.S.)
    * Display Name: `Squad Leader Lifetime`
-   * Description: `Create squads of up to 12 operators and place tactical map indicators.`
+   * Description: `Host squads of up to 12 players and place custom field map markers.`
 6. **Review Information**:
    * Upload a screenshot of the in-app paywall screen (`PaywallView`).
    * Provide review notes explaining how to test the purchase in sandbox mode.
@@ -94,7 +94,7 @@ Radar Map uses a freemium model governed by [`SubscriptionManager.swift`](RadarM
    * Attach product `com.radarmap.watch.pro` to `$rc_lifetime`.
 5. **API Key Integration**:
    * Under **Project Settings** → **API Keys**, copy your **Public Apple API Key** (`appl_...`).
-   * Verify or update `revenueCatApiKey` in [`RadarMap/AppConstants.swift`](RadarMap/AppConstants.swift):
+   * Verify or update `revenueCatApiKey` in [`RadarMap/AppConstants.swift`](../RadarMap/AppConstants.swift):
      ```swift
      public static let revenueCatApiKey: String = Bundle.main.infoDictionary?["REVENUECAT_API_KEY"] as? String ?? mockRevenueCatApiKey
      ```
@@ -112,7 +112,7 @@ Xcode includes a native StoreKit testing environment that bypasses App Store san
 2. Edit the active scheme (**Product > Scheme > Edit Scheme...** or `⌘<`).
 3. Select **Run** on the left sidebar, then click the **Options** tab.
 4. In the **StoreKit Configuration** dropdown, select:
-   * `RadarMap.storekit` (located in [`RadarMap/Resources/RadarMap.storekit`](RadarMap/Resources/RadarMap.storekit)).
+   * `RadarMap.storekit` (located in [`RadarMap/Resources/RadarMap.storekit`](../RadarMap/Resources/RadarMap.storekit)).
 5. Click **Close**.
 6. Build and run on either the watchOS or iOS Simulator:
    * Open **Config** → **Unlock Pro**.
@@ -124,10 +124,17 @@ Xcode includes a native StoreKit testing environment that bypasses App Store san
 
 ## 5. Code References & Architecture
 
-* **Manager:** [`RadarMap/Managers/SubscriptionManager.swift`](RadarMap/Managers/SubscriptionManager.swift)
+* **Manager:** [`RadarMap/Managers/SubscriptionManager.swift`](../RadarMap/Managers/SubscriptionManager.swift)
   * Handles purchase lifecycle, RevenueCat customer info listeners, restore purchases, and offline receipt fallback.
-* **Paywall View:** [`RadarMap/Views/Paywall/PaywallView.swift`](RadarMap/Views/Paywall/PaywallView.swift)
+* **Paywall View:** [`RadarMap/Views/Paywall/PaywallView.swift`](../RadarMap/Views/Paywall/PaywallView.swift)
   * SwiftUI purchase modal displaying feature comparison, price formatting, Terms of Use (EULA) links, Privacy Policy links, and restore controls.
-* **Constants:** [`RadarMap/AppConstants.swift`](RadarMap/AppConstants.swift) (`AppConstants.Subscription`)
+* **Constants:** [`RadarMap/AppConstants.swift`](../RadarMap/AppConstants.swift) (`AppConstants.Subscription`)
   * Declares product IDs, entitlement IDs, offering keys, and fallback pricing strings.
-* **Compliance:** For App Store Review Guidelines (3.1.1 and 3.1.2) governing paywalls, see [**`PRIVACY_AND_COMPLIANCE.md`**](PRIVACY_AND_COMPLIANCE.md).
+
+### Mandatory App Store Paywall Invariants (Guidelines 3.1.1 & 3.1.2)
+To pass App Store review, `PaywallView.swift` must maintain the following elements:
+1. **Clickable Terms of Use (EULA)**: Direct link to the Apple Standard EULA (`https://www.apple.com/legal/internet-services/itunes/dev/stdeula/`) or custom terms.
+2. **Clickable Privacy Policy**: Direct link to `AppConstants.Policy.privacyPolicyURL`.
+3. **Restore Purchases**: Interactive button invoking `subscriptionManager.restorePurchases()` with visual loading/completion feedback.
+4. **Billing Disclosure**: Clear, prominent text disclosing that the purchase is a *"One-time lifetime unlock (no recurring subscriptions)"*.
+

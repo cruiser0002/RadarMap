@@ -2,11 +2,16 @@ import Foundation
 import Combine
 import CoreLocation
 import SwiftUI
+import CryptoKit
 
 public final class GameStateManager: ObservableObject {
     @Published public var myCallsign: String {
         didSet {
             UserDefaults.standard.set(myCallsign, forKey: AppConstants.Storage.userCallsignKey)
+            let derivedId = GameStateManager.deriveMemberId(fromCallsign: myCallsign)
+            if derivedId != myMemberId {
+                myMemberId = derivedId
+            }
             updateLocalMember()
             updateLocalPlayerMember()
             updateAllTacticalIndicators()
@@ -28,7 +33,13 @@ public final class GameStateManager: ObservableObject {
     @Published public private(set) var playerVitalStateMachine = PlayerVitalStateMachine()
     
     // Synchronized Published State Accessors
-    @Published public var selectedMapStyle: TacticalMapStyle = .radar
+    @Published public var selectedPresentation: TacticalPresentation = .radar {
+        didSet {
+            if mapStateMachine.presentation != selectedPresentation {
+                mapStateMachine.handle(.togglePresentation)
+            }
+        }
+    }
     @Published public var radarColorTheme: RadarColorTheme = .green {
         didSet {
             UserDefaults.standard.set(radarColorTheme.rawValue, forKey: AppConstants.Storage.radarColorThemeKey)
@@ -46,6 +57,40 @@ public final class GameStateManager: ObservableObject {
             UserDefaults.standard.set(savedPin, forKey: AppConstants.Storage.savedPinKey)
             syncConfigToWatchConnectivity()
         }
+    }
+    /// Host-provided Firebase Realtime Database URL for squads that run against their own
+    /// Firebase project instead of the shared default (see BRING_YOUR_OWN_FIREBASE.md). Empty means
+    /// "use the shared default project."
+    @Published public var customDatabaseURL: String {
+        didSet {
+            UserDefaults.standard.set(customDatabaseURL, forKey: AppConstants.Storage.customDatabaseURLKey)
+        }
+    }
+    /// Master switch for the custom database URL feature. Off: the URL field and camera button
+    /// are grayed out, and host/join always uses the shared default RTDB regardless of whatever
+    /// text is sitting in `customDatabaseURL`. On: the field/camera are editable, and host/join
+    /// uses `customDatabaseURL` (falling back to the default only if it's empty). Defaults to on
+    /// so a fresh install behaves like a plain "type your URL" field.
+    @Published public var isCustomDatabaseURLEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(isCustomDatabaseURLEnabled, forKey: AppConstants.Storage.isCustomDatabaseURLEnabledKey)
+        }
+    }
+    /// Most-recently-used custom database URLs, newest first, capped at
+    /// `AppConstants.UI.maxRecentDatabaseURLs`, for quick reselection in `DatabaseURLField`.
+    @Published public private(set) var recentDatabaseURLs: [String] {
+        didSet {
+            UserDefaults.standard.set(recentDatabaseURLs, forKey: AppConstants.Storage.recentDatabaseURLsKey)
+        }
+    }
+    /// Records a successfully-used custom database URL, moving it to the front of
+    /// `recentDatabaseURLs` and trimming the list to `AppConstants.UI.maxRecentDatabaseURLs`.
+    public func rememberRecentDatabaseURL(_ url: String) {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var updated = recentDatabaseURLs.filter { $0 != trimmed }
+        updated.insert(trimmed, at: 0)
+        recentDatabaseURLs = Array(updated.prefix(AppConstants.UI.maxRecentDatabaseURLs))
     }
     @Published public var isUploadHeartRateEnabled: Bool {
         didSet {
@@ -79,27 +124,32 @@ public final class GameStateManager: ObservableObject {
     }
     @Published public var errorMessage: String? = nil
     
-    // Map State
-    @Published public var radarScaleMeters: Double = AppConstants.UI.RadarScale.defaultScaleMeters {
+    // Canonical Scale & Map State
+    @Published public var selectedScaleMeters: CLLocationDistance = TacticalScalePolicy.defaultScale {
         didSet {
-            if mapStateMachine.scaleMeters != radarScaleMeters {
-                mapStateMachine.handle(.setScale(meters: radarScaleMeters))
+            if mapStateMachine.scaleMeters != selectedScaleMeters {
+                mapStateMachine.handle(.setScale(meters: selectedScaleMeters))
             }
-            if liveMapScaleMeters != radarScaleMeters {
-                liveMapScaleMeters = radarScaleMeters
+            if liveMapScaleMeters != selectedScaleMeters {
+                liveMapScaleMeters = selectedScaleMeters
             }
         }
     }
+    /// Backward-compatibility alias for radarScaleMeters
+    public var radarScaleMeters: Double {
+        get { selectedScaleMeters }
+        set { selectedScaleMeters = newValue }
+    }
     /// The actual live zoom scale directly tracking the map's camera properties / pinch interactions
-    @Published public var liveMapScaleMeters: Double = AppConstants.UI.RadarScale.defaultScaleMeters
+    @Published public var liveMapScaleMeters: Double = TacticalScalePolicy.defaultScale
     @Published public var currentMapCenter: CLLocationCoordinate2D? = nil {
         didSet {
             if let center = currentMapCenter {
                 if mapStateMachine.trackingState.pannedCoordinate?.latitude != center.latitude || mapStateMachine.trackingState.pannedCoordinate?.longitude != center.longitude {
                     mapStateMachine = MapStateMachine(
                         trackingState: .unlocked(latitude: center.latitude, longitude: center.longitude),
-                        scaleMeters: radarScaleMeters,
-                        style: selectedMapStyle,
+                        scaleMeters: selectedScaleMeters,
+                        presentation: selectedPresentation,
                         centerTriggerCount: radarCenterTrigger
                     )
                     mapCenterLockState = .unlocked
@@ -126,7 +176,7 @@ public final class GameStateManager: ObservableObject {
     
     public var currentMapSpanDelta: Double {
         get {
-            AppConstants.UI.RadarScale.mapSpanDelta(forRadarScaleMeters: radarScaleMeters)
+            AppConstants.UI.RadarScale.mapSpanDelta(forRadarScaleMeters: selectedScaleMeters)
         }
         set {
             sendMapAction(.setScale(meters: AppConstants.UI.RadarScale.radarScaleMeters(forMapSpanDelta: newValue)))
@@ -152,11 +202,11 @@ public final class GameStateManager: ObservableObject {
     
     public func sendMapAction(_ action: MapAction) {
         mapStateMachine.handle(action)
-        if selectedMapStyle != mapStateMachine.style {
-            selectedMapStyle = mapStateMachine.style
+        if selectedPresentation != mapStateMachine.presentation {
+            selectedPresentation = mapStateMachine.presentation
         }
-        if radarScaleMeters != mapStateMachine.scaleMeters {
-            radarScaleMeters = mapStateMachine.scaleMeters
+        if selectedScaleMeters != mapStateMachine.scaleMeters {
+            selectedScaleMeters = mapStateMachine.scaleMeters
         }
         let panned = mapStateMachine.trackingState.pannedCoordinate
         if currentMapCenter?.latitude != panned?.latitude || currentMapCenter?.longitude != panned?.longitude {
@@ -198,8 +248,8 @@ public final class GameStateManager: ObservableObject {
             let center = currentMapCenter ?? localPlayerMember.coordinate
             mapStateMachine = MapStateMachine(
                 trackingState: .unlocked(latitude: center.latitude, longitude: center.longitude),
-                scaleMeters: radarScaleMeters,
-                style: selectedMapStyle,
+                scaleMeters: selectedScaleMeters,
+                presentation: selectedPresentation,
                 centerTriggerCount: radarCenterTrigger
             )
             mapCenterLockState = .unlocked
@@ -219,19 +269,21 @@ public final class GameStateManager: ObservableObject {
         sendMapAction(.centerOnLocalUser)
     }
     
-    public func toggleNextMapStyle() {
-        sendMapAction(.cycleStyle)
+    public func togglePresentation() {
+        sendMapAction(.togglePresentation)
     }
     
     // Login Field Error States
     @Published public var callsignError: Bool = false
     @Published public var squadNameError: Bool = false
     @Published public var pinError: Bool = false
-    
+    @Published public var databaseURLError: Bool = false
+
     public func clearFieldErrors() {
         callsignError = false
         squadNameError = false
         pinError = false
+        databaseURLError = false
     }
     
     // Pro Tier Tactical Indicators
@@ -292,34 +344,18 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
+    /// Local-only instant-UI-feedback sweep of this device's own expired non-order indicators.
+    /// Cap eviction and cross-member expiry pruning now live server-side (Cloud Function
+    /// `pruneExcessTacticalIndicators`, see CLOUD_DATA_MANAGEMENT.md) — this no longer performs any
+    /// remote deletion.
     public func enforceHostTacticalIndicatorMaintenance() {
-        guard isHosting, var currentRoom = firebaseManager.activeRoom else { return }
-        var needsUpdate = false
-        
-        var activeIndicators = currentRoom.indicators
-        for (id, ind) in activeIndicators {
-            if ind.isExpired {
-                activeIndicators.removeValue(forKey: id)
-                firebaseManager.removeIndicator(roomId: currentRoom.id, indicatorId: id)
-                needsUpdate = true
-            }
-        }
-        
-        let enemyIndicators = activeIndicators.values.filter { $0.category == .enemyIndicator }.sorted { $0.timestamp < $1.timestamp }
-        if enemyIndicators.count > AppConstants.Subscription.maxEnemyIndicatorsCount {
-            let overflowCount = enemyIndicators.count - AppConstants.Subscription.maxEnemyIndicatorsCount
-            let toRemove = enemyIndicators.prefix(overflowCount)
-            for oldInd in toRemove {
-                activeIndicators.removeValue(forKey: oldInd.id)
-                firebaseManager.removeIndicator(roomId: currentRoom.id, indicatorId: oldInd.id)
-                needsUpdate = true
-            }
-        }
-        
-        if needsUpdate {
-            currentRoom.indicators = activeIndicators
-            firebaseManager.activeRoom = currentRoom
-            updateAllTacticalIndicators(room: currentRoom)
+        guard isHosting else { return }
+        let expiredIds = localIndicators.values.filter { $0.category != .squadOrder && $0.isExpired }.map { $0.id }
+        guard !expiredIds.isEmpty else { return }
+        let now = Date().timeIntervalSince1970
+        for id in expiredIds {
+            localIndicators.removeValue(forKey: id)
+            deletedIndicatorTombstones[id] = now
         }
     }
     
@@ -353,6 +389,17 @@ public final class GameStateManager: ObservableObject {
     public var lastSentHeartRate: Double? = nil
     public var lastSentIsDead: Bool? = nil
     public var lastSentTimestamp: TimeInterval = 0.0
+    // One sample further back than lastSentLocation — the minimum history needed to derive a
+    // velocity vector for predictive gating (see shouldEmitTelemetry / predictedPositionError).
+    public var secondLastSentLocation: CLLocation? = nil
+    public var secondLastSentTimestamp: TimeInterval = 0.0
+
+    /// Dead-reckoned positions for `otherSquadMembers`, recomputed locally at
+    /// `AppConstants.Timing.DisplayRefresh.remotePlayerDeadReckoningHz` independent of how often
+    /// real telemetry actually arrives (see DEAD_RECKONING.md). Keyed by member id. Views should
+    /// prefer this over a member's raw `latitude`/`longitude` for smooth remote-position rendering.
+    @Published public private(set) var remoteDisplayPositions: [String: CLLocationCoordinate2D] = [:]
+    private var deadReckoningTimer: AnyCancellable?
     public var totalTelemetryUploadsEmitted: Int = 0
     public var totalTelemetryUploadsGated: Int = 0
     
@@ -372,7 +419,7 @@ public final class GameStateManager: ObservableObject {
         lastUpdatedTimestamp: 0,
         sequenceNumber: 0,
         status: .active,
-        isHost: false
+        role: .player
     )
     
     public func updateLocalPlayerMember() {
@@ -390,7 +437,7 @@ public final class GameStateManager: ObservableObject {
             lastUpdatedTimestamp: Date().timeIntervalSince1970,
             sequenceNumber: localSequenceCounter,
             status: isDead ? .downed : .active,
-            isHost: isCurrentMemberHost
+            role: isCurrentMemberHost ? .leader : .player
         )
     }
     
@@ -432,11 +479,12 @@ public final class GameStateManager: ObservableObject {
         let savedCallsign = UserDefaults.standard.string(forKey: AppConstants.Storage.userCallsignKey) ?? ""
         self.myCallsign = savedCallsign
         
-        let savedMemberId = UserDefaults.standard.string(forKey: AppConstants.Storage.userMemberIdKey) ?? UUID().uuidString
-        UserDefaults.standard.set(savedMemberId, forKey: AppConstants.Storage.userMemberIdKey)
-        self.myMemberId = savedMemberId
+        self.myMemberId = GameStateManager.deriveMemberId(fromCallsign: savedCallsign)
         self.savedRoomName = UserDefaults.standard.string(forKey: AppConstants.Storage.savedRoomNameKey) ?? ""
         self.savedPin = UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey) ?? ""
+        self.customDatabaseURL = UserDefaults.standard.string(forKey: AppConstants.Storage.customDatabaseURLKey) ?? ""
+        self.isCustomDatabaseURLEnabled = UserDefaults.standard.object(forKey: AppConstants.Storage.isCustomDatabaseURLEnabledKey) as? Bool ?? true
+        self.recentDatabaseURLs = UserDefaults.standard.stringArray(forKey: AppConstants.Storage.recentDatabaseURLsKey) ?? []
         
         let savedUploadHR = UserDefaults.standard.object(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey) as? Bool ?? true
         self.isUploadHeartRateEnabled = savedUploadHR
@@ -444,7 +492,7 @@ public final class GameStateManager: ObservableObject {
         let savedUploadLoc = UserDefaults.standard.object(forKey: AppConstants.Storage.isUploadLocationEnabledKey) as? Bool ?? true
         self.isUploadLocationEnabled = savedUploadLoc
         
-        firebaseManager.localMemberId = savedMemberId
+        firebaseManager.localMemberId = myMemberId
         
         #if !os(watchOS)
         // Default resting heart rate on iOS standalone
@@ -483,9 +531,9 @@ public final class GameStateManager: ObservableObject {
         if current.callsign == myCallsign &&
            current.roomName == savedRoomName &&
            current.pin == savedPin &&
+           current.databaseURL == customDatabaseURL &&
            current.theme == radarColorTheme.rawValue &&
            current.isPro == isPro &&
-           current.memberId == myMemberId &&
            current.isUploadHeartRateEnabled == isUploadHeartRateEnabled &&
            current.isUploadLocationEnabled == isUploadLocationEnabled {
             return
@@ -495,9 +543,9 @@ public final class GameStateManager: ObservableObject {
             callsign: myCallsign,
             roomName: savedRoomName,
             pin: savedPin,
+            databaseURL: customDatabaseURL,
             theme: radarColorTheme.rawValue,
             isPro: isPro,
-            memberId: myMemberId,
             isUploadHeartRateEnabled: isUploadHeartRateEnabled,
             isUploadLocationEnabled: isUploadLocationEnabled,
             configTs: now
@@ -544,7 +592,7 @@ public final class GameStateManager: ObservableObject {
             return
         }
         let roster = room.members.values.map { member in
-            SquadMember(id: member.id, callsign: member.callsign, latitude: 0.0, longitude: 0.0, isHost: member.isHost)
+            SquadMember(id: member.id, callsign: member.callsign, latitude: 0.0, longitude: 0.0, role: member.role)
         }.sorted { $0.id < $1.id }
         
         if let data = try? JSONEncoder().encode(roster), let json = String(data: data, encoding: .utf8) {
@@ -643,6 +691,11 @@ public final class GameStateManager: ObservableObject {
             
             // Config adoption
             let config = mergedSnapshot.config
+            // Captured before the write below so the room-lifecycle switch can tell whether the
+            // room name textbox actually changed, rather than comparing against
+            // firebaseManager.activeRoom?.id — which is the derived (salted+padded) Firebase room
+            // id, never equal to the plain name carried in config.roomName.
+            let previousRoomName = self.savedRoomName
             if !config.callsign.isEmpty && self.myCallsign != config.callsign {
                 self.myCallsign = config.callsign
             }
@@ -652,12 +705,13 @@ public final class GameStateManager: ObservableObject {
             if !config.pin.isEmpty && self.savedPin != config.pin {
                 self.savedPin = config.pin
             }
+            // Unlike roomName/pin above, empty is a meaningful value here ("use the shared
+            // default project"), so it's adopted unconditionally rather than skipped.
+            if self.customDatabaseURL != config.databaseURL {
+                self.customDatabaseURL = config.databaseURL
+            }
             if let theme = RadarColorTheme(rawValue: config.theme), self.radarColorTheme != theme {
                 self.radarColorTheme = theme
-            }
-            if !config.memberId.isEmpty && self.myMemberId != config.memberId {
-                self.myMemberId = config.memberId
-                UserDefaults.standard.set(config.memberId, forKey: AppConstants.Storage.userMemberIdKey)
             }
             if self.subscriptionManager.hasUnlimitedSquadUnlock != config.isPro {
                 self.subscriptionManager.hasUnlimitedSquadUnlock = config.isPro
@@ -682,11 +736,11 @@ public final class GameStateManager: ObservableObject {
             let cycle = mergedSnapshot.loginCycle
             switch cycle.loginCycle {
             case .hostActive:
-                if self.firebaseManager.activeRoom?.id != config.roomName || !self.isTacticalSessionActive {
+                if previousRoomName != config.roomName || !self.isTacticalSessionActive {
                     self.adoptCompanionSession(roomName: config.roomName, isHosting: true, pin: config.pin)
                 }
             case .joinActive:
-                if self.firebaseManager.activeRoom?.id != config.roomName || !self.isTacticalSessionActive {
+                if previousRoomName != config.roomName || !self.isTacticalSessionActive {
                     self.adoptCompanionSession(roomName: config.roomName, isHosting: false, pin: config.pin)
                 }
             case .inactive:
@@ -700,7 +754,8 @@ public final class GameStateManager: ObservableObject {
                 }
             }
             
-            // Tactical indicators adoption
+            // Tactical indicators adoption — watch only (phone is the canonical owner of localIndicators)
+            #if os(watchOS)
             if let tacData = mergedSnapshot.tactical.tacticalJson.data(using: .utf8),
                let indicators = try? JSONDecoder().decode([TacticalIndicator].self, from: tacData) {
                 var newLocalMap: [String: TacticalIndicator] = [:]
@@ -710,6 +765,7 @@ public final class GameStateManager: ObservableObject {
                 self.localIndicators = newLocalMap
                 self.updateAllTacticalIndicators()
             }
+            #endif
             
             // Membership adoption: update room members while preserving live coordinates
             if cycle.loginCycle != .inactive,
@@ -720,9 +776,9 @@ public final class GameStateManager: ObservableObject {
                 var hasChanges = false
                 for member in members {
                     if var existing = room.members[member.id] {
-                        if existing.callsign != member.callsign || existing.isHost != member.isHost {
+                        if existing.callsign != member.callsign || existing.role != member.role {
                             existing.callsign = member.callsign
-                            existing.isHost = member.isHost
+                            existing.role = member.role
                             room.members[member.id] = existing
                             hasChanges = true
                         }
@@ -811,7 +867,7 @@ public final class GameStateManager: ObservableObject {
             if isHosting {
                 isHost = true
             } else if let room = room {
-                isHost = room.hostId == memberId || (room.members[memberId]?.isHost == true)
+                isHost = room.hostId == memberId || (room.members[memberId]?.role == .leader)
             } else {
                 isHost = false
             }
@@ -887,15 +943,20 @@ public final class GameStateManager: ObservableObject {
     // MARK: - Adaptive Rate Control
     
     public func currentHeartbeatFallbackInterval() -> TimeInterval {
-        return AppConstants.Timing.DeltaGating.heartbeatFallbackIntervalSeconds
+        let memberCount = firebaseManager.activeRoom?.members.count ?? 0
+        return AppConstants.Timing.ConstantBandwidth.refreshInterval(forPlayerCount: memberCount)
     }
-    
+
     public func recalculateAdaptiveUploadInterval() {
         let memberCount = firebaseManager.activeRoom?.members.count ?? 0
         let grade = firebaseManager.networkQualityMonitor.connectionGrade
-        
+
         let calculatedInterval = FirebaseSyncManager.solveUpdateInterval(playerCount: memberCount)
-        
+
+        // Keep the display-side stale threshold (SquadMember.isStale) in sync with the
+        // room-size-scaled update interval, so peers gray out at Y * T(P), not a fixed value.
+        SquadMember.defaultUpdateInterval = calculatedInterval
+
         let newInterval: TimeInterval
         if grade == .critical || grade == .offline {
             newInterval = max(AppConstants.Timing.AdaptiveRate.criticalInterval, calculatedInterval)
@@ -904,7 +965,7 @@ public final class GameStateManager: ObservableObject {
         } else {
             newInterval = calculatedInterval
         }
-        
+
         if abs(self.adaptiveUploadInterval - newInterval) > AppConstants.Timing.AdaptiveRate.intervalChangeEpsilon {
             self.adaptiveUploadInterval = newInterval
             if timer != nil {
@@ -932,10 +993,12 @@ public final class GameStateManager: ObservableObject {
         healthKitManager.requestAuthorization { [weak self] _ in
             self?.healthKitManager.startLiveHeartRateSession()
         }
-        
+
         restartHeartbeatTimer()
+        startDeadReckoningTimer()
+        startTTLRefreshTimer()
     }
-    
+
     public func stopTacticalSession() {
         isHosting = false
         isInitiatingHost = false
@@ -944,13 +1007,59 @@ public final class GameStateManager: ObservableObject {
         healthKitManager.stopLiveHeartRateSession()
         timer?.cancel()
         timer = nil
+        deadReckoningTimer?.cancel()
+        deadReckoningTimer = nil
+        freshnessExpiryTimer?.cancel()
+        freshnessExpiryTimer = nil
+        remoteDisplayPositions = [:]
         lastSentLocation = nil
         lastSentHeading = nil
         lastSentHeartRate = nil
         lastSentIsDead = nil
         lastSentTimestamp = 0.0
+        secondLastSentLocation = nil
+        secondLastSentTimestamp = 0.0
         sendSessionAction(.leave)
         purgeLocalSessionAndIcons()
+    }
+
+    /// Re-pushes `exp` on all three top-level trees once per hour while this member is hosting,
+    /// keeping an actively-hosted room alive past the idle cutoff (see CLOUD_DATA_MANAGEMENT.md §5).
+    /// Not server-enforced; gated client-side on `isCurrentMemberHost`.
+    private func startTTLRefreshTimer() {
+        freshnessExpiryTimer?.cancel()
+        freshnessExpiryTimer = Timer.publish(every: AppConstants.Timing.Inactivity.ttlRefreshIntervalSeconds, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self, self.isCurrentMemberHost, let roomId = self.firebaseManager.activeRoom?.id else { return }
+                self.firebaseManager.refreshRoomExpiry(roomId: roomId)
+            }
+    }
+
+    /// Recomputes `remoteDisplayPositions` at a fixed cadence
+    /// (`AppConstants.Timing.DisplayRefresh.remotePlayerDeadReckoningHz`), independent of the
+    /// network's actual telemetry arrival rate — see DEAD_RECKONING.md.
+    private func startDeadReckoningTimer() {
+        deadReckoningTimer?.cancel()
+        deadReckoningTimer = Timer.publish(every: AppConstants.Timing.DisplayRefresh.remotePlayerDeadReckoningIntervalSeconds, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.refreshRemoteDisplayPositions()
+            }
+    }
+
+    private func refreshRemoteDisplayPositions() {
+        guard !otherSquadMembers.isEmpty else {
+            if !remoteDisplayPositions.isEmpty { remoteDisplayPositions = [:] }
+            return
+        }
+        let now = Date().timeIntervalSince1970
+        var positions: [String: CLLocationCoordinate2D] = [:]
+        positions.reserveCapacity(otherSquadMembers.count)
+        for member in otherSquadMembers {
+            positions[member.id] = member.extrapolatedCoordinate(at: now)
+        }
+        remoteDisplayPositions = positions
     }
     
     public func purgeLocalSessionAndIcons() {
@@ -1008,10 +1117,61 @@ public final class GameStateManager: ObservableObject {
     }
     
     // MARK: - Room Actions
-    
+
+    /// Generates a short, Firebase-key-safe random identifier, used as a fallback id for a
+    /// squad member constructed/decoded without one (e.g. a roster entry missing `mid`).
+    ///
+    /// This id is embedded as a path segment on every telemetry/tactical/room write and delta
+    /// event a device ever sends or receives — a `UUID().uuidString` (36 chars) here costs
+    /// ~28 bytes of wire overhead on every single packet, on top of the actual payload. An
+    /// 8-character id from a 32-symbol alphabet (Crockford-style, excluding easily-confused
+    /// O/0/I/1) still carries 40 bits of entropy, far more than enough to avoid a collision
+    /// within one room's member cap (birthday-bound collision odds at 999 members are ~4e-7),
+    /// while cutting that per-packet path overhead by roughly three quarters.
+    ///
+    /// Note: the local device's own `myMemberId` no longer uses this — see `deriveMemberId`.
+    public static let shortMemberIdLength = 8
+
+    public static func generateShortMemberId(length: Int = shortMemberIdLength) -> String {
+        let alphabet = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+        var generator = SystemRandomNumberGenerator()
+        return String((0..<length).map { _ in alphabet.randomElement(using: &generator)! })
+    }
+
+    /// Deterministically derives the local device's `myMemberId` from its callsign, so the
+    /// phone and watch companion apps — which each run an independent `GameStateManager` with
+    /// no shared `UserDefaults` (no App Group entitlement) — converge on the same member id for
+    /// the same callsign without depending on a WatchConnectivity sync round-trip. Mirrors
+    /// `FirebaseSyncManager.deriveRoomPadding`'s SHA256-into-Crockford-alphabet pattern, always
+    /// emitting exactly `shortMemberIdLength` characters to satisfy the server-side
+    /// `$memberId.length == 8` validation in database.rules.json regardless of callsign content.
+    public static func deriveMemberId(fromCallsign callsign: String) -> String {
+        let alphabet = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+        let normalized = callsign.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let combined = "memberid:\(normalized)"
+        let digest = Array(SHA256.hash(data: Data(combined.utf8)))
+        return String(digest.prefix(shortMemberIdLength).map { alphabet[Int($0) % alphabet.count] })
+    }
+
+    /// ASCII `[A-Za-z0-9]` only — the character set every Firebase-RTDB-path-derived text field
+    /// (room name, PIN) is restricted to. Deliberately narrower than "not a Firebase-illegal
+    /// character": rejecting all non-ASCII outright (Greek letters, emoji, CJK, combining marks)
+    /// avoids the grapheme-cluster-vs-UTF-16-length mismatch between Swift's `String.count` (used
+    /// to size `deriveRoomPadding`'s output) and the server's `.validate` rule, which counts
+    /// UTF-16 code units — a mismatch that let some Unicode names overpad past the 16-character
+    /// room-id cap and get silently rejected. See CLOUD_DATA_MANAGEMENT.md §6.A.
+    private static let asciiAlphanumerics = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+
+    /// Sanitizes free-typed text destined to become (part of) a Firebase RTDB path key — today,
+    /// only the room/squad name — to ASCII alphanumerics, uppercased, truncated to `maxLength`.
+    public static func sanitizeRoomNameInput(_ input: String, maxLength: Int = AppConstants.UI.maxRoomNameEntryLength) -> String {
+        let filtered = String(String.UnicodeScalarView(input.unicodeScalars.filter { asciiAlphanumerics.contains($0) }))
+        return String(filtered.uppercased().prefix(maxLength))
+    }
+
     public static func sanitizePinInput(_ input: String) -> String {
         let wordMapping = AppConstants.UI.pinWordMapping
-        
+
         let lowercased = input.lowercased()
         let tokens = lowercased.components(separatedBy: CharacterSet.alphanumerics.inverted)
         var result = ""
@@ -1019,20 +1179,65 @@ public final class GameStateManager: ObservableObject {
             if let digit = wordMapping[token] {
                 result.append(digit)
             } else {
-                result.append(token.filter { $0.isNumber })
+                result.append(String(String.UnicodeScalarView(token.unicodeScalars.filter { asciiAlphanumerics.contains($0) })))
             }
         }
-        
+
         return String(result.prefix(AppConstants.UI.maxPinLength))
     }
     
+    /// Resolves which Firebase Realtime Database the upcoming host/join session should use and
+    /// applies it to `firebaseManager`. Precedence: an explicit `databaseURL` (e.g. decoded from
+    /// a scanned QR code) always wins, regardless of `isCustomDatabaseURLEnabled` — that toggle
+    /// only governs this device's own persisted `customDatabaseURL` setting, not a URL handed to
+    /// it by a host's join code. Otherwise, if the custom URL feature is enabled, the persisted
+    /// `customDatabaseURL` setting is used; otherwise (or if it's empty) the shared default, so a
+    /// session started with no override never inherits a stale one from a previous session.
+    /// Returns `false` (and sets `databaseURLError`) when a non-empty custom URL fails
+    /// `AppConstants.Network.isValidDatabaseURL` — callers must not proceed to host/join in that
+    /// case, since an unvalidated string would otherwise reach `Database.database(url:)`, which
+    /// terminates the app with an uncaught exception rather than failing gracefully.
     @discardableResult
-    public func hostRoom(name: String, pin: String? = nil, completion: ((Bool) -> Void)? = nil) -> Bool {
-        let cleanedName = name.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    private func applyDatabaseURL(_ explicit: String?) -> Bool {
+        let trimmedExplicit = explicit?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedExplicit.isEmpty {
+            guard AppConstants.Network.isValidDatabaseURL(trimmedExplicit) else {
+                databaseURLError = true
+                return false
+            }
+            firebaseManager.databaseURL = trimmedExplicit
+            rememberRecentDatabaseURL(trimmedExplicit)
+            return true
+        }
+        guard isCustomDatabaseURLEnabled else {
+            firebaseManager.databaseURL = AppConstants.Network.defaultDatabaseURL
+            return true
+        }
+        let trimmedSaved = customDatabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedSaved.isEmpty || AppConstants.Network.isValidDatabaseURL(trimmedSaved) else {
+            databaseURLError = true
+            return false
+        }
+        firebaseManager.databaseURL = trimmedSaved.isEmpty ? AppConstants.Network.defaultDatabaseURL : trimmedSaved
+        if !trimmedSaved.isEmpty {
+            rememberRecentDatabaseURL(trimmedSaved)
+        }
+        return true
+    }
+
+    @discardableResult
+    public func hostRoom(name: String, pin: String? = nil, databaseURL: String? = nil, completion: ((Bool) -> Void)? = nil) -> Bool {
+        let cleanedName = GameStateManager.sanitizeRoomNameInput(name)
         let cleanedCallsign = myCallsign.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         clearFieldErrors()
-        
+        guard applyDatabaseURL(databaseURL) else {
+            let err = FirebaseSyncError.invalidDatabaseURL
+            errorMessage = err.localizedDescription
+            completion?(false)
+            return false
+        }
+
         if cleanedName.isEmpty {
             squadNameError = true
             let err = FirebaseSyncError.emptyRoomName
@@ -1040,7 +1245,7 @@ public final class GameStateManager: ObservableObject {
             completion?(false)
             return false
         }
-        
+
         if cleanedCallsign.isEmpty {
             callsignError = true
             let err = FirebaseSyncError.emptyCallsign
@@ -1048,29 +1253,37 @@ public final class GameStateManager: ObservableObject {
             completion?(false)
             return false
         }
-        
+
         self.savedRoomName = cleanedName
-        let squadId = cleanedName
-        let hostMember = makeCurrentSquadMember(isHost: true)
-        
+
         let cleanedPin = pin.map { GameStateManager.sanitizePinInput($0) }
         if let cp = cleanedPin, !cp.isEmpty {
             self.savedPin = cp
         }
-        let hasPass = (cleanedPin?.isEmpty == false)
-        let passHash = hasPass ? FirebaseSyncManager.hashPin(cleanedPin!, salt: squadId) : nil
-        
+        guard let cleanedPin, !cleanedPin.isEmpty else {
+            pinError = true
+            let err = FirebaseSyncError.incorrectPin
+            errorMessage = err.localizedDescription
+            completion?(false)
+            return false
+        }
+
+        let squadId = cleanedName + FirebaseSyncManager.deriveRoomPadding(pin: cleanedPin, name: cleanedName)
+        let hostMember = makeCurrentSquadMember(role: .leader)
+        let passHash = FirebaseSyncManager.hashPin(cleanedPin, salt: squadId)
+
         let capacity = subscriptionManager.hasUnlimitedSquadUnlock ? AppConstants.Subscription.proTierMaxCapacity : AppConstants.Subscription.freeTierMaxCapacity
-        
+        let maxTactical = subscriptionManager.hasUnlimitedSquadUnlock ? AppConstants.Subscription.proTierMaxTacticalIndicators : AppConstants.Subscription.freeTierMaxTacticalIndicators
+
         let room = SquadRoom(
             id: squadId,
             hostId: myMemberId,
             maxCapacity: capacity,
-            hasPin: hasPass,
+            maxTacticalIndicators: maxTactical,
             pinHash: passHash,
             members: [myMemberId: hostMember]
         )
-        
+
         sendSessionAction(.startHost(name: cleanedName, pin: cleanedPin))
         errorMessage = nil
         purgeLocalSessionAndIcons()
@@ -1099,20 +1312,31 @@ public final class GameStateManager: ObservableObject {
         return true
     }
     
-    public func joinRoom(id: String, name: String? = nil, pin: String? = nil, onResult: ((Result<SquadRoom, FirebaseSyncError>) -> Void)?) {
-        let cleanId = id.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    /// - Parameter isPreDerivedId: true when `id` already *is* the full derived room id. false
+    ///   (default — manual entry, and also QR-scanned joins, whose payload carries the plain
+    ///   room name rather than the derived id) means `id` is the plain (<=12-char) name to
+    ///   truncate and re-derive the full id from.
+    public func joinRoom(id: String, name: String? = nil, pin: String? = nil, databaseURL: String? = nil, isPreDerivedId: Bool = false, onResult: ((Result<SquadRoom, FirebaseSyncError>) -> Void)?) {
+        let truncatedName = GameStateManager.sanitizeRoomNameInput(
+            id,
+            maxLength: isPreDerivedId ? AppConstants.UI.maxRoomNameLength : AppConstants.UI.maxRoomNameEntryLength
+        )
         let cleanCallsign = myCallsign.trimmingCharacters(in: .whitespacesAndNewlines)
-        
+
         clearFieldErrors()
-        
-        if cleanId.isEmpty {
+        guard applyDatabaseURL(databaseURL) else {
+            onResult?(.failure(.invalidDatabaseURL))
+            return
+        }
+
+        if truncatedName.isEmpty {
             self.squadNameError = true
             let err = FirebaseSyncError.emptyRoomName
             self.errorMessage = err.localizedDescription
             onResult?(.failure(err))
             return
         }
-        
+
         if cleanCallsign.isEmpty {
             self.callsignError = true
             let err = FirebaseSyncError.emptyCallsign
@@ -1120,20 +1344,37 @@ public final class GameStateManager: ObservableObject {
             onResult?(.failure(err))
             return
         }
-        
-        self.savedRoomName = cleanId
-        
+
+        // truncatedName is the plain typed name only when isPreDerivedId is false. For a
+        // QR-scanned join it's the full derived (salted+padded) room id instead — persisting
+        // that into savedRoomName (the "name I last typed to host/join with", reused to prefill
+        // the Create/Settings name field) would surface a garbage string next time, and if
+        // re-hosted, get re-salted into a nonsense QR code. Only save it when it's actually a
+        // plain name the user typed.
+        if !isPreDerivedId {
+            self.savedRoomName = truncatedName
+        }
+
         let cleanedPin = pin.map { GameStateManager.sanitizePinInput($0) }
         if let cp = cleanedPin, !cp.isEmpty {
             self.savedPin = cp
         }
-        
+        guard let cleanedPin, !cleanedPin.isEmpty else {
+            self.pinError = true
+            let err = FirebaseSyncError.incorrectPin
+            self.errorMessage = err.localizedDescription
+            onResult?(.failure(err))
+            return
+        }
+
+        let cleanId = isPreDerivedId ? truncatedName : (truncatedName + FirebaseSyncManager.deriveRoomPadding(pin: cleanedPin, name: truncatedName))
+
         sendSessionAction(.startJoin(id: cleanId, pin: cleanedPin))
         errorMessage = nil
         purgeLocalSessionAndIcons()
-        
-        let localMember = makeCurrentSquadMember(isHost: false)
-        
+
+        let localMember = makeCurrentSquadMember(role: .player)
+
         firebaseManager.joinRoom(id: cleanId, member: localMember, pin: cleanedPin) { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -1159,8 +1400,8 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
-    public func joinRoom(id: String, name: String? = nil, pin: String? = nil, completion: ((Bool) -> Void)? = nil) {
-        joinRoom(id: id, name: name, pin: pin) { (result: Result<SquadRoom, FirebaseSyncError>) in
+    public func joinRoom(id: String, name: String? = nil, pin: String? = nil, databaseURL: String? = nil, isPreDerivedId: Bool = false, completion: ((Bool) -> Void)? = nil) {
+        joinRoom(id: id, name: name, pin: pin, databaseURL: databaseURL, isPreDerivedId: isPreDerivedId) { (result: Result<SquadRoom, FirebaseSyncError>) in
             switch result {
             case .success:
                 completion?(true)
@@ -1173,8 +1414,10 @@ public final class GameStateManager: ObservableObject {
     public func adoptCompanionSession(roomName: String, isHosting: Bool, pin: String? = nil) {
         let cleanId = roomName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !cleanId.isEmpty else { return }
-        
-        self.savedRoomName = cleanId
+
+        if self.savedRoomName != cleanId {
+            self.savedRoomName = cleanId
+        }
         if let pin = pin, !pin.isEmpty {
             self.savedPin = pin
         }
@@ -1259,7 +1502,7 @@ public final class GameStateManager: ObservableObject {
     
     // MARK: - Telemetry Dispatch
     
-    private func makeCurrentSquadMember(isHost: Bool) -> SquadMember {
+    private func makeCurrentSquadMember(role: MemberRole) -> SquadMember {
         let loc = locationHeadingManager.userLocation?.coordinate ?? (firebaseManager.activeRoom?.members[myMemberId]?.coordinate ?? AppConstants.Location.fallbackCoordinate)
         let heading = locationHeadingManager.blendedHeading
         let hr = isDead ? AppConstants.Health.flatlineHeartRate : (healthKitManager.currentHeartRate > 0 ? healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
@@ -1275,10 +1518,10 @@ public final class GameStateManager: ObservableObject {
             lastUpdatedTimestamp: Date().timeIntervalSince1970,
             sequenceNumber: localSequenceCounter,
             status: isDead ? .downed : .active,
-            isHost: isHost
+            role: role
         )
     }
-    
+
     private func updateLocalMember(oldId: String? = nil) {
         guard let room = firebaseManager.activeRoom else { return }
         let lookupId = oldId ?? myMemberId
@@ -1318,17 +1561,38 @@ public final class GameStateManager: ObservableObject {
         if (currentTime - lastSentTimestamp) >= heartbeatFallback {
             return true
         }
-        
-        let distanceMoved = currentLocation.distance(from: prevLocation)
-        if distanceMoved >= AppConstants.Timing.DeltaGating.minMovementDeltaMeters {
+
+        if AppConstants.Timing.DeltaGating.heartRateDeltaGatingEnabled,
+           abs(currentHeartRate - prevHeartRate) >= AppConstants.Timing.DeltaGating.minHeartRateDeltaBpm {
             return true
         }
-        
-        if abs(currentHeartRate - prevHeartRate) >= AppConstants.Timing.DeltaGating.minHeartRateDeltaBpm {
-            return true
+
+        let predictionError = predictedPositionError(currentLocation: currentLocation, currentTime: currentTime, prevLocation: prevLocation)
+        return predictionError >= AppConstants.Timing.DeltaGating.maxPredictedPositionErrorMeters
+    }
+
+    /// Predicts where a peer's dead-reckoning model would place us right now, using only the last
+    /// two *sent* samples — the same two points any peer already received — then returns the
+    /// distance between that prediction and our actual current location. Peers extrapolate our
+    /// position with simple constant-velocity dead reckoning between updates; if our real position
+    /// still matches what that extrapolation would show, sending an update teaches peers nothing new.
+    /// With fewer than two prior samples (or a degenerate interval between them), falls back to raw
+    /// displacement from the last sent position, since no velocity can be derived yet.
+    private func predictedPositionError(currentLocation: CLLocation, currentTime: TimeInterval, prevLocation: CLLocation) -> Double {
+        guard let prevPrevLocation = secondLastSentLocation else {
+            return currentLocation.distance(from: prevLocation)
         }
-        
-        return false
+
+        guard let predictedCoordinate = DeadReckoning.predictedCoordinate(
+            sampleA: (prevPrevLocation.coordinate, secondLastSentTimestamp),
+            sampleB: (prevLocation.coordinate, lastSentTimestamp),
+            atTime: currentTime
+        ) else {
+            return currentLocation.distance(from: prevLocation)
+        }
+
+        let predictedLocation = CLLocation(latitude: predictedCoordinate.latitude, longitude: predictedCoordinate.longitude)
+        return currentLocation.distance(from: predictedLocation)
     }
     
     public func broadcastLocalTelemetry(
@@ -1383,6 +1647,8 @@ public final class GameStateManager: ObservableObject {
         
         lastUploadTimestamp = now
         totalTelemetryUploadsEmitted += 1
+        secondLastSentLocation = lastSentLocation
+        secondLastSentTimestamp = lastSentTimestamp
         lastSentLocation = currentLoc
         lastSentHeading = currentHeading
         lastSentHeartRate = currentHr
@@ -1460,12 +1726,14 @@ public final class GameStateManager: ObservableObject {
         deletedIndicatorTombstones.removeValue(forKey: newIndicator.id)
         localIndicators[newIndicator.id] = newIndicator
         
-        // Rule 2: Enemy indicators FIFO eviction beyond max capacity
-        if type.category == .enemyIndicator {
-            let localEnemies = localIndicators.values.filter { $0.category == .enemyIndicator }.sorted { $0.timestamp < $1.timestamp }
-            if localEnemies.count > AppConstants.Subscription.maxEnemyIndicatorsCount {
-                let overflow = localEnemies.count - AppConstants.Subscription.maxEnemyIndicatorsCount
-                for old in localEnemies.prefix(overflow) {
+        // Rule 2: enemy + environment indicators share one cap (mti) — local FIFO eviction here
+        // is just for instant feedback; the Cloud Function is authoritative (see §6).
+        if type.category != .squadOrder {
+            let cap = subscriptionManager.hasUnlimitedSquadUnlock ? AppConstants.Subscription.proTierMaxTacticalIndicators : AppConstants.Subscription.freeTierMaxTacticalIndicators
+            let localCapped = localIndicators.values.filter { $0.category != .squadOrder }.sorted { $0.timestamp < $1.timestamp }
+            if localCapped.count > cap {
+                let overflow = localCapped.count - cap
+                for old in localCapped.prefix(overflow) {
                     localIndicators.removeValue(forKey: old.id)
                     deletedIndicatorTombstones[old.id] = Date().timeIntervalSince1970
                 }

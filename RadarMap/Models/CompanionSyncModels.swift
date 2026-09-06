@@ -14,20 +14,23 @@ public struct ConfigSnapshot: Codable, Equatable {
     public var callsign: String
     public var roomName: String
     public var pin: String
+    /// Raw custom Firebase RTDB URL textbox value. Empty is meaningful here (means "use the
+    /// shared default project"), unlike callsign/roomName/pin below where empty means "not set
+    /// yet" — so this field is adopted unconditionally on the receiving side, empty included.
+    public var databaseURL: String
     public var theme: String
     public var isPro: Bool
-    public var memberId: String
     public var isUploadHeartRateEnabled: Bool
     public var isUploadLocationEnabled: Bool
     public var configTs: TimeInterval
-    
+
     public init(
         callsign: String = "",
         roomName: String = "",
         pin: String = "",
+        databaseURL: String = "",
         theme: String = "Green",
         isPro: Bool = false,
-        memberId: String = "",
         isUploadHeartRateEnabled: Bool = true,
         isUploadLocationEnabled: Bool = true,
         configTs: TimeInterval = 0
@@ -35,40 +38,40 @@ public struct ConfigSnapshot: Codable, Equatable {
         self.callsign = callsign
         self.roomName = roomName
         self.pin = pin
+        self.databaseURL = databaseURL
         self.theme = theme
         self.isPro = isPro
-        self.memberId = memberId
         self.isUploadHeartRateEnabled = isUploadHeartRateEnabled
         self.isUploadLocationEnabled = isUploadLocationEnabled
         self.configTs = configTs
     }
-    
+
     enum CodingKeys: String, CodingKey {
-        case callsign, roomName, pin, theme, isPro, memberId
+        case callsign, roomName, pin, databaseURL, theme, isPro
         case isUploadHeartRateEnabled, isUploadLocationEnabled
         case configTs
     }
-    
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.callsign = try container.decodeIfPresent(String.self, forKey: .callsign) ?? ""
         self.roomName = try container.decodeIfPresent(String.self, forKey: .roomName) ?? ""
         self.pin = try container.decodeIfPresent(String.self, forKey: .pin) ?? ""
+        self.databaseURL = try container.decodeIfPresent(String.self, forKey: .databaseURL) ?? ""
         self.theme = try container.decodeIfPresent(String.self, forKey: .theme) ?? "Green"
         self.isPro = try container.decodeIfPresent(Bool.self, forKey: .isPro) ?? false
-        self.memberId = try container.decodeIfPresent(String.self, forKey: .memberId) ?? ""
         self.isUploadHeartRateEnabled = try container.decodeIfPresent(Bool.self, forKey: .isUploadHeartRateEnabled) ?? true
         self.isUploadLocationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isUploadLocationEnabled) ?? true
         self.configTs = try container.decodeIfPresent(TimeInterval.self, forKey: .configTs) ?? 0.0
     }
-    
+
     public func isEquivalent(to other: ConfigSnapshot) -> Bool {
         return callsign == other.callsign &&
                roomName == other.roomName &&
                pin == other.pin &&
+               databaseURL == other.databaseURL &&
                theme == other.theme &&
                isPro == other.isPro &&
-               memberId == other.memberId &&
                isUploadHeartRateEnabled == other.isUploadHeartRateEnabled &&
                isUploadLocationEnabled == other.isUploadLocationEnabled &&
                configTs == other.configTs

@@ -56,14 +56,21 @@ public struct PolicyView: View {
                         title: "Ephemeral Storage",
                         description: AppConstants.Policy.dataRetentionDescription
                     )
+                    
+                    PolicyItemRow(
+                        icon: "battery.50",
+                        iconColor: .orange,
+                        title: "Battery & Background Use",
+                        description: AppConstants.Policy.batteryDisclaimer
+                    )
                 }
                 .padding(8)
                 .background(Color.white.opacity(0.06))
                 .cornerRadius(8)
                 
-                // Privacy URL Section
+                // Legal Agreements Section
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Online Policy")
+                    Text("Legal Agreements")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.cyan)
                     
@@ -74,7 +81,34 @@ public struct PolicyView: View {
                                     .font(.system(size: 11))
                                     .foregroundColor(.cyan)
                                 
-                                Text(AppConstants.Policy.privacyPolicyURL)
+                                Text("Privacy Policy")
+                                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.cyan)
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.8)
+                                
+                                Spacer()
+                                
+                                Image(systemName: "arrow.up.right")
+                                    .font(.system(size: 8, weight: .bold))
+                                    .foregroundColor(.gray)
+                            }
+                            .padding(.vertical, 6)
+                            .padding(.horizontal, 8)
+                            .background(Color.cyan.opacity(0.12))
+                            .cornerRadius(6)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    
+                    if let eulaUrl = URL(string: AppConstants.Policy.termsOfServiceURL) {
+                        Link(destination: eulaUrl) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "doc.text.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.cyan)
+                                
+                                Text("Terms of Use (EULA)")
                                     .font(.system(size: 9, weight: .medium, design: .monospaced))
                                     .foregroundColor(.cyan)
                                     .lineLimit(1)

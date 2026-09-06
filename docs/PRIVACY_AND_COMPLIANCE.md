@@ -19,17 +19,16 @@ This document establishes the mandatory privacy, policy, and Apple App Store com
 
 ## ⚡ Key Compliance & Privacy Constants
 
-The following centralized constants from [`AppConstants.swift`](RadarMap/AppConstants.swift) govern legal disclaimers, data retention windows, biometric sampling limits, and opt-out storage keys:
+The following centralized constants from [`AppConstants.swift`](../RadarMap/AppConstants.swift) govern legal disclaimers, data retention windows, biometric sampling limits, and opt-out storage keys:
 
 | Section & Domain | Constant / Identifier | Value | Legal Purpose & Compliance Scope |
 | :--- | :--- | :--- | :--- |
-| **§1 Legal Links** | `privacyPolicyURL` | `"https://radarmap.app/privacy"` | Publicly accessible privacy policy link (Guideline 5.1.1) |
+| **§1 Legal Links** | `privacyPolicyURL` | `"https://www.privacypolicies.com/live/ffdebf4f-ec87-4552-aa22-f438f6fabc94"` | Publicly accessible privacy policy link (Guideline 5.1.1) |
 | **§1 Support** | `contactEmail` | `"sweetdreamsdeveloper@gmail.com"` | Developer support contact email (`Policy.contactEmail`) |
 | **§1 Support** | `contactFormURL` | `"https://forms.gle/pCuy2zJtSfLoyqj16"` | In-app Google Forms feedback / support link |
 | **§1 Retention** | `idleCutoffHours` | `12.0` hours (43,200s) | Ephemeral room expiration TTL (`Timing.Inactivity`) |
 | **§1 Retention** | Cloud Functions Purge | Hourly sweep (`cleanExpiredRooms`) | Purges rooms past 12h idle TTL across `/r`, `/p`, `/t` |
-| **§2 Biometrics** | `defaultRestingHeartRate` | `75.0 BPM` | Baseline default player heart rate (`Health.defaultRestingHeartRate`) |
-| **§2 Biometrics** | `flatlineHeartRate` | `0.0 BPM` | KIA / Downed status indicator (`Health.flatlineHeartRate`) |
+| **§2 Biometrics** | `flatlineHeartRate` | `0.0 BPM` | Tag Out / Downed status indicator (`Health.flatlineHeartRate`) |
 | **§2 Biometrics** | `lowPowerPPGActiveDurationSeconds` | `4.0s` | Active optical PPG sensor sampling burst (`HealthKitManager`) |
 | **§2 Biometrics** | `lowPowerPPGSleepDurationSeconds` | `16.0s` | Optical LED power-save sleep window (80% battery conservation) |
 | **§2 Stress Zones** | Biometric Zones | `<60` (Blue), `60-99` (Green), `100-139` (Yellow), `140-174` (Orange), `≥175` (Red) | Heart rate color stress categorization (`Health.Zones`) |
@@ -39,7 +38,7 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 | **§4 Opt-Out Keys** | `isUploadHeartRateEnabledKey` | `"is_upload_heart_rate_enabled"` | UserDefaults key for HealthKit uploading opt-out (`Storage`) |
 | **§5 Paywall** | `freeTierMaxCapacity` / `proTierMaxCapacity` | `4` free / `12` pro | Disclosed squad capacity tiers (Guideline 3.1.2) |
 | **§5 Paywall** | `lifetimePriceString` | `"$29.99"` | Non-consumable lifetime unlock price disclosure |
-| **§5 Paywall** | Standard Apple EULA URL | `https://www.apple.com/legal/internet-services/itunes/dev/stdeula/` | Mandatory terms of service link on all purchase views |
+| **§5 Paywall** | Standard Apple EULA URL | `https://www.apple.com/legal/internet-services/itunes/dev/stdeula/` | Mandatory terms of service link on all purchase views (`Policy.termsOfServiceURL`) |
 
 ---
 
@@ -60,7 +59,7 @@ Whenever creating or modifying settings views, paywalls, or policy documentation
 * **Ephemeral Data Retention & Automatic Purge**:
   * Clearly declare that room telemetry (coordinates, heading, markers, vitals) is temporary:
     * Purged immediately upon manual room disbandment.
-    * Automatically pruned after **12 hours of inactivity** (`AppConstants.Timing.Inactivity.idleCutoffHours = 12.0`), with active hosts extending expiration hourly via `refreshRoomExpiry`.
+    * Automatically pruned after **12 hours of inactivity** in the backend (`AppConstants.Timing.Inactivity.idleCutoffHours = 12.0`), with public policy text disclosing up to **24 hours** for operational design margin, and active hosts extending expiration hourly via `refreshRoomExpiry`.
   * Explicitly state that no permanent user accounts or passwords are created.
 * **Developer Contact & Support**:
   * Contact Email: `sweetdreamsdeveloper@gmail.com`
@@ -146,19 +145,29 @@ Background location is architected differently across the two platforms:
 * Once a user selects "Don't Allow" on a system dialog, iOS/watchOS **permanently suppresses** future system prompts.
 * Calling `requestWhenInUseAuthorization()` or `requestAuthorization()` when `.denied` is a silent no-op.
 
-### C. In-App Opt-Out Toggles ("Upload Location", "Upload HR")
-Located in `SettingsView.swift`:
-* If the user flips an upload toggle ON after having previously denied system hardware permissions:
-  * The app must detect that hardware access is unauthorized.
-  * The app must display an informational alert directing the user to Apple Watch / iPhone Settings:
-    * *Location:* `"Location Permission Required: You previously disabled location access. To broadcast tactical coordinates, open Apple Watch Settings > Privacy & Security > Location Services > Radar Map."`
-    * *HealthKit:* `"Health Access Required: To share live heart rate, open Apple Watch Settings > Privacy & Security > Health > Radar Map and enable Heart Rate."`
+### C. In-App Opt-Out Toggles ("Location", "Health data")
+Located in `SettingsView.swift`, as the last two rows of the top squad section — right after the Database URL field, with no section header (backed by the same `isUploadLocationEnabledKey` / `isUploadHeartRateEnabledKey` UserDefaults keys — only the on-screen labels/position changed, not the storage keys). Both toggles are **permission-aware**, not plain preference switches:
+
+* **Displayed position** = `storedPreference && systemPermissionIsGranted`. If the OS permission is `.denied`/`.restricted`/`.sharingDenied`, the toggle shows OFF regardless of the stored preference — the user cannot be shown an "enabled" switch for a capability the OS is actually blocking.
+* **Sliding OFF** just clears the stored preference (`isUploadLocationEnabled` / `isUploadHeartRateEnabled` = `false`); never touches the OS permission (apps cannot revoke it programmatically).
+* **Sliding ON** branches on the current authorization state (`SettingsView.handlePermissionBackedToggle`):
+  * **Not yet determined** — this is a genuine, still-unanswered system permission: calls `locationHeadingManager.requestPermissions()` / `healthKitManager.requestAuthorization()` directly, which shows the real one-time OS dialog, then sets the preference to `true`.
+  * **Denied or restricted** — iOS/watchOS will never re-show the system dialog once denied (see §4.B), so instead of a no-op the app surfaces an alert (reusing the existing error-alert plumbing: `currentErrorText` / `showErrorAlert`) with the actual manual remediation path:
+    * *Location:* `"Location access was denied. On your Watch, open Settings → Privacy & Security → Location Services → RadarMap, or manage it from the Watch app on your iPhone."`
+    * *HealthKit:* `"Health access was denied. On your iPhone, open the Health app → your profile icon → Apps → RadarMap, then enable Heart Rate and Workouts."`
+  * **Already authorized** — just sets the preference to `true`.
+
+**HealthKit caveat:** Apple deliberately never exposes read-authorization status (heart rate is read-only) — only share-authorization status is introspectable. `HealthKitManager.authorizationStatus` therefore tracks `HKHealthStore.authorizationStatus(for: HKObjectType.workoutType())` (the paired share type, requested in the same call as heart-rate read) as the best available proxy, refreshed after `init` and after every `requestAuthorization` completion. This is watchOS-only — on iOS (Companion), the app never touches HealthKit directly, so `authorizationStatus` is hardcoded to `.sharingAuthorized` and the "Health data" toggle there behaves as a plain preference switch.
+
+**Platform caveat:** there is no public watchOS API to deep-link into a specific Settings page (unlike iOS's `openSettingsURLString`), so the denied-state alert can only give instructions, not an actual jump-to-Settings button, on either platform (HealthKit access is managed via the Health app rather than Settings anyway).
+
+**Locked mid-session:** both toggles dim to 60% opacity and `.disabled(isConnected)` — `isConnected` meaning hosting or already joined as a client with an active room, not merely mid-connect (`isJoining`/`isInitiatingHost` alone don't lock them). This is deliberate: flipping data-sharing while already in a live squad session would cause a client's telemetry stream to silently start/stop broadcasting real position or heart rate mid-game, which is exactly the kind of confusing behavior (to the flipping user and to squadmates watching their marker/HR suddenly change) this lock exists to prevent. The toggles become editable again the moment the user leaves or disbands the room.
 
 ---
 
 ## 5. In-App Purchase & Paywall Compliance (Guidelines 3.1.1 & 3.1.2)
 
-Radar Map offers a $29.99 lifetime unlock for squads up to 12 operators and custom tactical marker placement (`com.radarmap.watch.pro`).
+Radar Map offers a $29.99 lifetime unlock for squads up to 12 players and custom field marker placement (`com.radarmap.watch.pro`).
 
 ### Compliance Rules for Paywalls:
 1. **Functional Restore Purchases:** Must offer a working "Restore Purchases" flow with animated loading and clear user feedback.
@@ -182,14 +191,14 @@ To generate a fully compliant privacy policy hosted on [PrivacyPolicies.com](htt
 | | Health & Biometrics | **Yes** (Heart rate via Apple HealthKit) |
 | | Other Data | `User-defined callsigns and temporary squad room IDs` |
 | | Email / Name / Phone | **No** (uncheck unless used for direct support) |
-| **3. Purpose of Use** | Service Delivery | **Yes** (live tactical squad coordination) |
+| **3. Purpose of Use** | Service Delivery | **Yes** (live squad coordination) |
 | | Communications | **Yes** (in-squad coordination) |
 | | Marketing / Ads | **No** (HealthKit strictly prohibits marketing/ads) |
 | **4. Third Parties** | Tracking / Cookies | **No** |
 | | Advertisements | **No** |
 | | Third-Party Services | **Yes**:<br>• **Google Firebase Realtime Database** (real-time sync)<br>• **Apple HealthKit** (biometrics & workout tracking)<br>• **RevenueCat / StoreKit** (IAP entitlements) |
 | | Data Selling | **No** |
-| **5. Retention & Purge** | Retention Duration | **Temporary / Ephemeral** (purged upon disbandment or 12-hour inactivity cutoff) |
+| **5. Retention & Purge** | Retention Duration | **Temporary / Ephemeral** (purged upon disbandment or 24-hour inactivity cutoff) |
 | | Contact / Deletion | Support Email (`sweetdreamsdeveloper@gmail.com`) and Contact Form |
 | **6. Children's Privacy** | Under 13 Target | **No** (service is not directed to children under 13) |
 

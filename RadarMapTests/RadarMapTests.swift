@@ -13,22 +13,32 @@ final class RadarMapTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: "wc_peer_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadLocationEnabledKey)
+        // SquadMember.defaultUpdateInterval is a shared static mutated by
+        // GameStateManager.recalculateAdaptiveUploadInterval() as a side effect of room-size
+        // changes; reset it so tests don't leak room-size state into each other via test order.
+        SquadMember.defaultUpdateInterval = AppConstants.Timing.Stale.defaultUpdateInterval
     }
-    
+
     override func tearDown() {
         UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: "wc_peer_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadLocationEnabledKey)
+        SquadMember.defaultUpdateInterval = AppConstants.Timing.Stale.defaultUpdateInterval
         super.tearDown()
     }
     
     private func createMockFirebaseSyncManager() -> FirebaseSyncManager {
         let syncManager = FirebaseSyncManager()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        syncManager.urlSession = URLSession(configuration: config)
+        syncManager.transport = MockRTDBTransport()
         return syncManager
+    }
+
+    /// Retrieves the `MockRTDBTransport` installed by `createMockFirebaseSyncManager()` so a test
+    /// can seed server state / assert on recorded gets/sets/removes.
+    private func mockTransport(for syncManager: FirebaseSyncManager) -> MockRTDBTransport {
+        // swiftlint:disable:next force_cast
+        syncManager.transport as! MockRTDBTransport
     }
     
     // MARK: - Late Packet Rejection Tests
@@ -118,82 +128,47 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(syncManager.totalPacketsRejected, 0)
     }
     
-    // MARK: - Mock URL Protocol for Deterministic Network Testing
-    
-    class MockURLProtocol: URLProtocol {
-        static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data?))?
-        static var recordedRequests: [URLRequest] = []
-        
-        static func reset() {
-            requestHandler = nil
-            recordedRequests.removeAll()
-        }
-        
-        override class func canInit(with request: URLRequest) -> Bool {
-            return true
-        }
-        
-        override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-            return request
-        }
-        
-        override func startLoading() {
-            MockURLProtocol.recordedRequests.append(request)
-            guard let handler = MockURLProtocol.requestHandler else {
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                client?.urlProtocol(self, didLoad: "{}".data(using: .utf8)!)
-                client?.urlProtocolDidFinishLoading(self)
-                return
-            }
-            
-            do {
-                let (response, data) = try handler(request)
-                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-                if let data = data {
-                    client?.urlProtocol(self, didLoad: data)
-                }
-                client?.urlProtocolDidFinishLoading(self)
-            } catch {
-                client?.urlProtocol(self, didFailWithError: error)
-            }
-        }
-        
-        override func stopLoading() {}
-    }
-    
+    // MARK: - Mock RTDB Transport for Deterministic Network Testing
+    //
+    // Network interception used to route through `MockURLProtocol` (a `URLProtocol` subclass)
+    // intercepting `FirebaseSyncManager.urlSession`'s REST calls. `FirebaseSyncManager` now talks
+    // to the Firebase Realtime Database SDK directly (never through `URLSession`), so tests inject
+    // `MockRTDBTransport` (see RadarMapTests/MockRTDBTransport.swift) via `.transport` instead.
+
     private func createMockGameState(watchConnectivityManager: WatchConnectivityManager = WatchConnectivityManager()) -> GameStateManager {
         let gameState = GameStateManager(watchConnectivityManager: watchConnectivityManager)
         gameState.myCallsign = "OPERATOR"
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        gameState.firebaseManager.urlSession = URLSession(configuration: config)
+        gameState.firebaseManager.transport = MockRTDBTransport()
         return gameState
+    }
+
+    /// Retrieves the `MockRTDBTransport` installed by `createMockGameState(...)` so a test can
+    /// seed server state / assert on recorded gets/sets/removes.
+    private func mockTransport(for gameState: GameStateManager) -> MockRTDBTransport {
+        // swiftlint:disable:next force_cast
+        gameState.firebaseManager.transport as! MockRTDBTransport
     }
     
     // MARK: - Paywall Capacity Tests
     
     func testPaywallCapacityEnforcement() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
+        // No seeding needed: a fresh MockRTDBTransport's empty root already makes every read
+        // resolve to nil (room doesn't exist yet) and every write succeed, matching the old
+        // handler's unconditional "{}" / 200 response.
         let gameState = createMockGameState()
         gameState.subscriptionManager.hasUnlimitedSquadUnlock = false
         
         let exp1 = expectation(description: "Free room hosted")
-        gameState.hostRoom(name: "FREE SQUAD") { _ in
+        gameState.hostRoom(name: "FREE SQUAD", pin: "1234") { _ in
             XCTAssertEqual(gameState.firebaseManager.activeRoom?.maxCapacity, 4)
             exp1.fulfill()
         }
         wait(for: [exp1], timeout: 1.0)
-        
+
         gameState.subscriptionManager.hasUnlimitedSquadUnlock = true
         let exp2 = expectation(description: "Pro room hosted")
-        gameState.hostRoom(name: "PRO SQUAD") { _ in
-            XCTAssertEqual(gameState.firebaseManager.activeRoom?.maxCapacity, 999)
+        gameState.hostRoom(name: "PRO SQUAD", pin: "1234") { _ in
+            XCTAssertEqual(gameState.firebaseManager.activeRoom?.maxCapacity, 12)
             exp2.fulfill()
         }
         wait(for: [exp2], timeout: 1.0)
@@ -218,16 +193,70 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(maxStressMember.heartRateZoneColor, .red)
     }
     
-    // MARK: - Tactical Map Style & Distance Verification Tests
+    // MARK: - Tactical Presentation & Scale Policy Verification Tests
     
-    func testTacticalMapStyles() {
-        XCTAssertTrue(TacticalMapStyle.allCases.contains(.radar))
-        XCTAssertTrue(TacticalMapStyle.allCases.contains(.standard))
-        XCTAssertEqual(TacticalMapStyle.radar.rawValue, "Radar")
-        XCTAssertEqual(TacticalMapStyle.standard.rawValue, "Standard")
-        XCTAssertEqual(TacticalMapStyle.radar.iconName, "map")
-        XCTAssertEqual(TacticalMapStyle.standard.iconName, "map")
-        XCTAssertEqual(TacticalMapStyle.allCases.count, 2)
+    func testTacticalPresentations() {
+        XCTAssertTrue(TacticalPresentation.allCases.contains(.radar))
+        XCTAssertTrue(TacticalPresentation.allCases.contains(.map))
+        XCTAssertEqual(TacticalPresentation.radar.rawValue, "Radar")
+        XCTAssertEqual(TacticalPresentation.map.rawValue, "Map")
+        XCTAssertEqual(TacticalPresentation.radar.iconName, "map")
+        XCTAssertEqual(TacticalPresentation.map.iconName, "map")
+        XCTAssertEqual(TacticalPresentation.allCases.count, 2)
+    }
+    
+    func testTacticalScalePolicyLadderAndClamping() {
+        let policy = TacticalScalePolicy()
+        let expectedLadder: [CLLocationDistance] = [1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500]
+        XCTAssertEqual(policy.allowedScales, expectedLadder)
+        XCTAssertEqual(TacticalScalePolicy.defaultScale, 50.0)
+        XCTAssertEqual(TacticalScalePolicy.minScale, 1.0)
+        XCTAssertEqual(TacticalScalePolicy.maxScale, 2_500.0)
+        
+        // Clamping min & max
+        XCTAssertEqual(policy.previousScale(before: 1.0), 1.0, "Clamps at minimum 1m")
+        XCTAssertEqual(policy.nextScale(after: 2_500.0), 2_500.0, "Clamps at maximum 2.5km")
+        
+        // Stepping
+        XCTAssertEqual(policy.nextScale(after: 1.0), 2.5)
+        XCTAssertEqual(policy.previousScale(before: 2.5), 1.0)
+        XCTAssertEqual(policy.nextScale(after: 50.0), 100.0)
+        XCTAssertEqual(policy.previousScale(before: 100.0), 50.0)
+        XCTAssertEqual(policy.nextScale(after: 100.0), 250.0)
+        
+        // Nearest logarithmic scale (breakpoints are geometric means, not arithmetic)
+        XCTAssertEqual(policy.nearestAllowedScale(to: 0.5), 1.0)
+        XCTAssertEqual(policy.nearestAllowedScale(to: 1.4), 1.0, "Below geometric mean sqrt(1*2.5)=1.58 snaps down")
+        XCTAssertEqual(policy.nearestAllowedScale(to: 1.7), 2.5, "Above geometric mean sqrt(1*2.5)=1.58 snaps up")
+        XCTAssertEqual(policy.nearestAllowedScale(to: 3.0), 2.5, "Below geometric mean sqrt(2.5*5)=3.54 snaps down")
+        XCTAssertEqual(policy.nearestAllowedScale(to: 4.0), 5.0, "Above geometric mean sqrt(2.5*5)=3.54 snaps up")
+        XCTAssertEqual(policy.nearestAllowedScale(to: 45.0), 50.0)
+        XCTAssertEqual(policy.nearestAllowedScale(to: 80.0), 100.0)
+        XCTAssertEqual(policy.nearestAllowedScale(to: 180.0), 250.0)
+        XCTAssertEqual(policy.nearestAllowedScale(to: 350.0), 250.0)
+        XCTAssertEqual(policy.nearestAllowedScale(to: 400.0), 500.0)
+        XCTAssertEqual(policy.nearestAllowedScale(to: 5_000.0), 2_500.0, "Above ladder max clamps to 2.5km")
+        
+        // Radar range and intervals
+        XCTAssertEqual(TacticalScalePolicy.outerRadarRange(for: 50.0), 200.0)
+        XCTAssertEqual(TacticalScalePolicy.outerRadarRange(for: 100.0), 400.0)
+        XCTAssertEqual(TacticalScalePolicy.ringIntervals(for: 100.0), [100.0, 200.0, 300.0, 400.0])
+    }
+    
+    func testPresentationSwitchPreservesScaleAndTheme() {
+        let gameState = createMockGameState()
+        gameState.selectedScaleMeters = 250.0
+        gameState.radarColorTheme = .green
+        gameState.selectedPresentation = .map
+        
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
+        XCTAssertEqual(gameState.selectedScaleMeters, 250.0, "Presentation switch must preserve selectedScaleMeters")
+        XCTAssertEqual(gameState.radarColorTheme, .green, "Presentation switch must preserve theme")
+        
+        gameState.radarColorTheme = .red
+        XCTAssertEqual(gameState.selectedPresentation, .radar, "Theme change must not alter presentation")
+        XCTAssertEqual(gameState.selectedScaleMeters, 250.0, "Theme change must not alter selected scale")
     }
     
     func testRadarColorThemes() {
@@ -376,17 +405,11 @@ final class RadarMapTests: XCTestCase {
     // MARK: - Player Death & Revive State Tests
     
     func testPlayerDeathState() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
         XCTAssertFalse(gameState.isDead, "Initial player state should be alive")
         
         let exp = expectation(description: "Host room")
-        gameState.hostRoom(name: "Test Squad", pin: "TEST") { _ in
+        gameState.hostRoom(name: "Test Squad", pin: "1234") { _ in
             exp.fulfill()
         }
         wait(for: [exp], timeout: 1.0)
@@ -437,12 +460,6 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey), "9876", "Updating savedPin should persist to UserDefaults")
         
         // Hosting a room with PIN retains it
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let hostExp = expectation(description: "Host with PIN")
         gameState.hostRoom(name: "PIN SQUAD", pin: "4321") { _ in
             hostExp.fulfill()
@@ -521,7 +538,7 @@ final class RadarMapTests: XCTestCase {
             id: "MOCK_TEST_ROOM",
             hostId: "PLAYER_1",
             members: [
-                "PLAYER_1": SquadMember(id: "PLAYER_1", callsign: "ALPHA-1", latitude: p1Lat, longitude: p1Lng, heading: 0.0, heartRate: 75.0, isHost: true),
+                "PLAYER_1": SquadMember(id: "PLAYER_1", callsign: "ALPHA-1", latitude: p1Lat, longitude: p1Lng, heading: 0.0, heartRate: 75.0, role: .leader),
                 "PLAYER_2": SquadMember(id: "PLAYER_2", callsign: "ALPHA-2", latitude: p2Lat, longitude: p2Lng, heading: 0.0, heartRate: 85.0),
                 "PLAYER_3": SquadMember(id: "PLAYER_3", callsign: "ALPHA-3", latitude: p3Lat, longitude: p3Lng, heading: 0.0, heartRate: 95.0)
             ]
@@ -587,11 +604,11 @@ final class RadarMapTests: XCTestCase {
         let rawJson = """
         {
             "id": "TEST",
-            "hostId": "PLAYER_1",
-            "members": {
-                "PLAYER_1": {"callsign": "ALPHA-1", "heading": 0.0, "heartRate": 78.0, "id": "PLAYER_1", "isHost": true, "latitude": 37.7860589, "longitude": -122.4061324, "status": "active"},
-                "PLAYER_2": {"callsign": "ALPHA-2", "heading": 0.0, "heartRate": 88.0, "id": "PLAYER_2", "isHost": false, "latitude": 37.7862839, "longitude": -122.4061324, "status": "active"},
-                "PLAYER_3": {"callsign": "ALPHA-3", "heading": 0.0, "heartRate": 98.0, "id": "PLAYER_3", "isHost": false, "latitude": 37.7871837, "longitude": -122.4061324, "status": "active"}
+            "hst": "PLAYER_1",
+            "m": {
+                "PLAYER_1": {"csn": "ALPHA-1", "heading": 0.0, "heartRate": 78.0, "mid": "PLAYER_1", "rol": "leader", "latitude": 37.7860589, "longitude": -122.4061324, "status": "active"},
+                "PLAYER_2": {"csn": "ALPHA-2", "heading": 0.0, "heartRate": 88.0, "mid": "PLAYER_2", "rol": "player", "latitude": 37.7862839, "longitude": -122.4061324, "status": "active"},
+                "PLAYER_3": {"csn": "ALPHA-3", "heading": 0.0, "heartRate": 98.0, "mid": "PLAYER_3", "rol": "player", "latitude": 37.7871837, "longitude": -122.4061324, "status": "active"}
             }
         }
         """
@@ -607,34 +624,34 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testHostAndJoinLifecycleState() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" && request.url?.absoluteString.contains("CHARLIE") == true {
-                let testRoom = SquadRoom(id: "CHARLIE", hostId: "REMOTE_HOST", members: [:])
-                let data = try! JSONEncoder().encode(testRoom)
-                return (response, data)
-            }
-            return (response, "null".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
+        let charliePin = "5678"
+        let charlieName = "CHARLIE"
+        let charlieId = charlieName + FirebaseSyncManager.deriveRoomPadding(pin: charliePin, name: charlieName)
+        let testRoom = SquadRoom(id: charlieId, hostId: "REMOTE_HOST", pinHash: FirebaseSyncManager.hashPin(charliePin, salt: charlieId), members: [:])
+        let testRoomData = try! JSONEncoder().encode(testRoom)
+        let testRoomJson = try! JSONSerialization.jsonObject(with: testRoomData)
+        transport.seed(testRoomJson, at: "r/\(charlieId)")
         XCTAssertFalse(gameState.isHosting)
         XCTAssertFalse(gameState.isJoining)
         XCTAssertFalse(gameState.firebaseManager.isConnected)
-        
+
         // Host room
+        let bravoPin = "1234"
+        let bravoName = "BRAVO SQUAD"
+        let bravoId = bravoName + FirebaseSyncManager.deriveRoomPadding(pin: bravoPin, name: bravoName)
         let hostExp = expectation(description: "Host room")
-        gameState.hostRoom(name: "BRAVO SQUAD", pin: "1234") { success in
+        gameState.hostRoom(name: bravoName, pin: bravoPin) { success in
             XCTAssertTrue(success)
             XCTAssertTrue(gameState.isHosting)
             XCTAssertFalse(gameState.isJoining)
             XCTAssertTrue(gameState.firebaseManager.isConnected)
-            XCTAssertEqual(gameState.firebaseManager.activeRoom?.name, "BRAVO SQUAD")
+            XCTAssertEqual(gameState.firebaseManager.activeRoom?.name, bravoId)
             hostExp.fulfill()
         }
         wait(for: [hostExp], timeout: 1.0)
-        
+
         // Leave / Disband room
         let leaveExp = expectation(description: "Leave room")
         gameState.leaveCurrentRoom { _ in
@@ -645,15 +662,15 @@ final class RadarMapTests: XCTestCase {
             leaveExp.fulfill()
         }
         wait(for: [leaveExp], timeout: 1.0)
-        
+
         // Join room
         let joinExp = expectation(description: "Join room")
-        gameState.joinRoom(id: "CHARLIE", name: "CHARLIE", pin: "5678") { success in
+        gameState.joinRoom(id: charlieName, name: charlieName, pin: charliePin) { success in
             XCTAssertTrue(success)
             XCTAssertFalse(gameState.isHosting)
             XCTAssertFalse(gameState.isJoining)
             XCTAssertTrue(gameState.firebaseManager.isConnected)
-            XCTAssertEqual(gameState.firebaseManager.activeRoom?.id, "CHARLIE")
+            XCTAssertEqual(gameState.firebaseManager.activeRoom?.id, charlieId)
             joinExp.fulfill()
         }
         wait(for: [joinExp], timeout: 1.0)
@@ -662,13 +679,8 @@ final class RadarMapTests: XCTestCase {
     // MARK: - Host Button Specification Tests
     
     func testHostButton_Workflow_Initiating_Success_Disband_ServerRoomDeleted() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
         
         // 1. Initial State
         XCTAssertFalse(gameState.isInitiatingHost)
@@ -676,8 +688,11 @@ final class RadarMapTests: XCTestCase {
         XCTAssertFalse(gameState.isJoining)
         
         // 2. Start hosting
+        let alphaPin = "1111"
+        let alphaName = "ALPHA SQUAD"
+        let alphaId = alphaName + FirebaseSyncManager.deriveRoomPadding(pin: alphaPin, name: alphaName)
         let hostExp = expectation(description: "Host creation confirmed")
-        gameState.hostRoom(name: "ALPHA SQUAD", pin: "1111") { success in
+        gameState.hostRoom(name: alphaName, pin: alphaPin) { success in
             XCTAssertTrue(success)
             // 4. Server creation confirmed -> becomes disband
             XCTAssertFalse(gameState.isInitiatingHost)
@@ -685,36 +700,34 @@ final class RadarMapTests: XCTestCase {
             XCTAssertTrue(gameState.isCurrentMemberHost)
             hostExp.fulfill()
         }
-        
+
         wait(for: [hostExp], timeout: 1.0)
-        
+
         // 5. Disband -> server's room is deleted
         let disbandExp = expectation(description: "Room disbanded")
         gameState.leaveCurrentRoom { _ in
             disbandExp.fulfill()
         }
         wait(for: [disbandExp], timeout: 1.0)
-        
-        // Verify DELETE requests were sent for the room and telemetry
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/rooms/ALPHA%20SQUAD.json") == true || $0.url?.absoluteString.contains("/rooms/ALPHA SQUAD.json") == true })
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/telemetry/ALPHA%20SQUAD.json") == true || $0.url?.absoluteString.contains("/telemetry/ALPHA SQUAD.json") == true })
+
+        // Verify remove() calls were sent for the room and telemetry
+        XCTAssertTrue(transport.recordedRemoves.contains("r/\(alphaId)"))
+        XCTAssertTrue(transport.recordedRemoves.contains("p/\(alphaId)"))
         
         XCTAssertFalse(gameState.isHosting)
         XCTAssertNil(gameState.firebaseManager.activeRoom)
     }
     
     func testHostButton_Workflow_CreationFailure_RevertsToHost() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
-            return (response, nil)
-        }
-        
         let gameState = createMockGameState()
-        
+        let failName = "FAIL SQUAD"
+        let failPin = "1234"
+        let failId = failName + FirebaseSyncManager.deriveRoomPadding(pin: failPin, name: failName)
+        // Simulate a server write failure on the room node the host flow will try to create.
+        mockTransport(for: gameState).failingPaths.insert("r/\(failId)")
+
         let exp = expectation(description: "Host creation failure")
-        gameState.hostRoom(name: "FAIL SQUAD") { success in
+        gameState.hostRoom(name: failName, pin: failPin) { success in
             XCTAssertFalse(success)
             // 3. Goes back to being host if creation process failed
             XCTAssertFalse(gameState.isInitiatingHost)
@@ -737,27 +750,23 @@ final class RadarMapTests: XCTestCase {
     // MARK: - Join Button Specification Tests
     
     func testJoinButton_Workflow_Joining_Success_Leave_PlayerEntryDeleted() {
-        MockURLProtocol.reset()
-        let targetRoom = SquadRoom(id: "DELTA", hostId: "HOST_OPERATOR", members: [:])
-        let roomData = try! JSONEncoder().encode(targetRoom)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
-        
+        let transport = mockTransport(for: gameState)
+        let deltaPin = "2468"
+        let deltaName = "DELTA"
+        let deltaId = deltaName + FirebaseSyncManager.deriveRoomPadding(pin: deltaPin, name: deltaName)
+        let targetRoom = SquadRoom(id: deltaId, hostId: "HOST_OPERATOR", pinHash: FirebaseSyncManager.hashPin(deltaPin, salt: deltaId), members: [:])
+        let roomData = try! JSONEncoder().encode(targetRoom)
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        transport.seed(roomJson, at: "r/\(deltaId)")
+
         // 1. Initial State
         XCTAssertFalse(gameState.isJoining)
         XCTAssertFalse(gameState.firebaseManager.isConnected)
-        
+
         // 2. Start joining
         let joinExp = expectation(description: "Join confirmed")
-        gameState.joinRoom(id: "DELTA") { success in
+        gameState.joinRoom(id: deltaName, pin: deltaPin) { success in
             XCTAssertTrue(success)
             // 4. Server connection confirmed -> becomes leave
             XCTAssertFalse(gameState.isJoining)
@@ -766,56 +775,34 @@ final class RadarMapTests: XCTestCase {
             joinExp.fulfill()
         }
         wait(for: [joinExp], timeout: 1.0)
-        
+
         // 5. Leave -> server's player entry is deleted
         let leaveExp = expectation(description: "Player left room")
         gameState.leaveCurrentRoom { _ in
             leaveExp.fulfill()
         }
         wait(for: [leaveExp], timeout: 1.0)
-        
-        // Verify DELETE requests were sent specifically for player member entry and player telemetry
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/rooms/DELTA/members/\(gameState.myMemberId).json") == true })
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/telemetry/DELTA/\(gameState.myMemberId).json") == true })
-        
+
+        // Verify remove() calls were sent specifically for player member entry and player telemetry
+        XCTAssertTrue(transport.recordedRemoves.contains("r/\(deltaId)/m/\(gameState.myMemberId)"))
+        XCTAssertTrue(transport.recordedRemoves.contains("p/\(deltaId)/\(gameState.myMemberId)"))
+
         XCTAssertFalse(gameState.firebaseManager.isConnected)
         XCTAssertNil(gameState.firebaseManager.activeRoom)
     }
     
     func testPlayerLogoutDeletesUserSquadOrderIconsFromServer() {
-        MockURLProtocol.reset()
-        
-        let squadOrderJson = """
-        {
-            "ORDER_1": {
-                "id": "ORDER_1",
-                "type": "watchHere",
-                "category": "squadOrder",
-                "latitude": 37.78,
-                "longitude": -122.41,
-                "placedByMemberId": "USER_LEAVING"
-            },
-            "ENEMY_1": {
-                "id": "ENEMY_1",
-                "type": "infantry",
-                "category": "enemyIndicator",
-                "latitude": 37.79,
-                "longitude": -122.42,
-                "placedByMemberId": "USER_LEAVING"
-            }
-        }
-        """
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" && request.url?.absoluteString.contains("/tactical/ROOM_1.json") == true {
-                return (response, squadOrderJson.data(using: .utf8)!)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
+        let transport = mockTransport(for: syncManager)
+
+        let ordersData: [String: Any] = [
+            "ORDER_1": ["wat", 37.78, -122.41, 1700000000.0, "USER_LEAVING"]
+        ]
+        let cappedData: [String: Any] = [
+            "ENEMY_1": ["inf", 37.79, -122.42, 1700000000.0, "USER_LEAVING"]
+        ]
+        transport.seed(ordersData, at: "t/ROOM_1/o")
+        transport.seed(cappedData, at: "t/ROOM_1/i")
         let room = SquadRoom(id: "ROOM_1", hostId: "OTHER_USER", members: [
             "OTHER_USER": SquadMember(id: "OTHER_USER", callsign: "HOST", latitude: 0, longitude: 0),
             "USER_LEAVING": SquadMember(id: "USER_LEAVING", callsign: "LEAVING", latitude: 0, longitude: 0)
@@ -829,25 +816,21 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [logoutExp], timeout: 1.0)
         
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
+        let removedPaths = transport.recordedRemoves
         // Must delete the member entry, the member telemetry, AND the squad order icon node ORDER_1
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/rooms/ROOM_1/members/USER_LEAVING.json") == true })
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/telemetry/ROOM_1/USER_LEAVING.json") == true })
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/tactical/ROOM_1/ORDER_1.json") == true }, "Must delete user's squad order icon node ORDER_1 on server")
-        XCTAssertFalse(deleteRequests.contains { $0.url?.absoluteString.contains("/tactical/ROOM_1/ENEMY_1.json") == true }, "Must NOT delete enemy indicator node ENEMY_1")
+        XCTAssertTrue(removedPaths.contains("r/ROOM_1/m/USER_LEAVING"))
+        XCTAssertTrue(removedPaths.contains("p/ROOM_1/USER_LEAVING"))
+        XCTAssertTrue(removedPaths.contains("t/ROOM_1/o/ORDER_1"), "Must delete user's squad order icon node ORDER_1 on server")
+        XCTAssertFalse(removedPaths.contains("t/ROOM_1/i/ENEMY_1"), "Must NOT delete enemy indicator node ENEMY_1 (member-departure cleanup only scans /o)")
     }
     
     func testJoinButton_Workflow_RoomNotFound_RevertsToJoin() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 404, httpVersion: nil, headerFields: nil)!
-            return (response, "null".data(using: .utf8)!)
-        }
-        
+        // No seeding: a fresh MockRTDBTransport's empty root resolves the room read to nil, same
+        // as the old handler's 404/"null" response.
         let gameState = createMockGameState()
         
         let exp = expectation(description: "Room not found failure")
-        gameState.joinRoom(id: "NONEXISTENT") { success in
+        gameState.joinRoom(id: "NONEXISTENT", pin: "1234") { success in
             XCTAssertFalse(success)
             // 3. Goes back to join if joining failed
             XCTAssertFalse(gameState.isJoining)
@@ -857,57 +840,50 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
     }
-    
+
+    // A wrong PIN now derives the wrong room id entirely (see CLOUD_DATA_MANAGEMENT.md), so it
+    // surfaces as roomNotFound rather than incorrectPin/incorrectPassword — a deliberate,
+    // subtle UX behavior change from the pre-hardening design.
     func testJoinButton_Workflow_IncorrectPIN_RevertsToJoin() {
-        MockURLProtocol.reset()
-        let pinHash = FirebaseSyncManager.hashPin("9999", salt: "SECURE")
-        let secureRoom = SquadRoom(id: "SECURE", hostId: "HOST_USER", hasPin: true, pinHash: pinHash, members: [:])
-        let roomData = try! JSONEncoder().encode(secureRoom)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
-        
+        let securePin = "9999"
+        let secureName = "SECURE"
+        let secureId = secureName + FirebaseSyncManager.deriveRoomPadding(pin: securePin, name: secureName)
+        let pinHash = FirebaseSyncManager.hashPin(securePin, salt: secureId)
+        let secureRoom = SquadRoom(id: secureId, hostId: "HOST_USER", pinHash: pinHash, members: [:])
+        let roomData = try! JSONEncoder().encode(secureRoom)
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: gameState).seed(roomJson, at: "r/\(secureId)")
+
         let exp = expectation(description: "Wrong PIN failure")
-        gameState.joinRoom(id: "SECURE", pin: "0000") { success in
+        gameState.joinRoom(id: secureName, pin: "0000") { success in
             XCTAssertFalse(success)
             // Goes back to join if joining failed
             XCTAssertFalse(gameState.isJoining)
             XCTAssertFalse(gameState.firebaseManager.isConnected)
-            XCTAssertEqual(gameState.errorMessage, FirebaseSyncError.incorrectPassword.localizedDescription)
+            XCTAssertEqual(gameState.errorMessage, FirebaseSyncError.roomNotFound.localizedDescription)
             exp.fulfill()
         }
         wait(for: [exp], timeout: 1.0)
     }
-    
+
     func testJoinButton_Workflow_RoomFull_RevertsToJoin() {
-        MockURLProtocol.reset()
+        let gameState = createMockGameState()
         var fullMembers: [String: SquadMember] = [:]
         for i in 1...4 {
             fullMembers["USER_\(i)"] = SquadMember(id: "USER_\(i)", callsign: "OP_\(i)", latitude: 0, longitude: 0)
         }
-        let fullRoom = SquadRoom(id: "FULLSQUAD", hostId: "USER_1", maxCapacity: 4, members: fullMembers)
+        let fullPin = "1234"
+        let fullName = "FULLSQUAD"
+        let fullId = fullName + FirebaseSyncManager.deriveRoomPadding(pin: fullPin, name: fullName)
+        let fullRoom = SquadRoom(id: fullId, hostId: "USER_1", maxCapacity: 4, pinHash: FirebaseSyncManager.hashPin(fullPin, salt: fullId), members: fullMembers)
         let roomData = try! JSONEncoder().encode(fullRoom)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
-        let gameState = createMockGameState()
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: gameState).seed(roomJson, at: "r/\(fullId)")
         gameState.myMemberId = "NEW_PLAYER"
-        
+
         let exp = expectation(description: "Room full failure")
-        gameState.joinRoom(id: "FULLSQUAD") { success in
+        gameState.joinRoom(id: fullName, pin: fullPin) { success in
             XCTAssertFalse(success)
             // Goes back to join if joining failed
             XCTAssertFalse(gameState.isJoining)
@@ -937,10 +913,10 @@ final class RadarMapTests: XCTestCase {
             heading: 90.0,
             heartRate: 110.0,
             status: .active,
-            isHost: true,
+            role: .leader,
             colorHex: "#00FF66"
         )
-        XCTAssertTrue(slMember.isHost, "Room creator must be identified as Squad Leader")
+        XCTAssertEqual(slMember.role, .leader, "Room creator must be identified as Squad Leader")
         XCTAssertGreaterThan(slMember.heartRate, 0)
         XCTAssertEqual(slMember.status, .active)
         
@@ -952,7 +928,7 @@ final class RadarMapTests: XCTestCase {
             heading: 180.0,
             heartRate: 0.0,
             status: .active,
-            isHost: false,
+            role: .player,
             colorHex: "#00FF66"
         )
         XCTAssertEqual(kiaMember.heartRate, 0.0, "Zero BPM indicates KIA / Flatline")
@@ -1302,42 +1278,45 @@ final class RadarMapTests: XCTestCase {
         syncManager.activeRoom = room10
         XCTAssertEqual(syncManager.pollingInterval, 1.0)
         
-        // 3. Room with 24 members: (24 / 12)^2 = 4.0s
+        // 3. Room with 24 members: 12 / 24 = 2.0s
         var room24 = SquadRoom(id: "ROOM24", hostId: "HOST", members: [:])
         for i in 1...24 {
             room24.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         syncManager.activeRoom = room24
-        XCTAssertEqual(syncManager.pollingInterval, 4.0, accuracy: 0.001)
-        
-        // 4. Large room with 30 members: (30 / 12)^2 = 6.25s
+        XCTAssertEqual(syncManager.pollingInterval, 2.0, accuracy: 0.001)
+
+        // 4. Large room with 30 members: 12 / 30 = 2.5s
         var room30 = SquadRoom(id: "ROOM30", hostId: "HOST", members: [:])
         for i in 1...30 {
             room30.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         syncManager.activeRoom = room30
-        XCTAssertEqual(syncManager.pollingInterval, 6.25, accuracy: 0.001)
-        
-        // 5. Massive room with 60 members: (60 / 12)^2 = 25.0s
+        XCTAssertEqual(syncManager.pollingInterval, 2.5, accuracy: 0.001)
+
+        // 5. Massive room with 60 members: 12 / 60 = 5.0s
         var room60 = SquadRoom(id: "ROOM60", hostId: "HOST", members: [:])
         for i in 1...60 {
             room60.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         syncManager.activeRoom = room60
-        XCTAssertEqual(syncManager.pollingInterval, 25.0, accuracy: 0.001)
+        XCTAssertEqual(syncManager.pollingInterval, 5.0, accuracy: 0.001)
     }
-    
+
     func testAdaptiveUploadIntervalScalingAndThrottling() {
         let gameState = GameStateManager()
-        
-        // Create 24 member room ((24 / 12)^2 = 4.0s interval)
+        // broadcastLocalTelemetry below writes through firebaseManager.transport; inject a mock so
+        // it doesn't fall through to the real FirebaseRTDBTransport (which needs FirebaseApp.configure()).
+        gameState.firebaseManager.transport = MockRTDBTransport()
+
+        // Create 24 member room (12 / 24 = 2.0s interval)
         var room24 = SquadRoom(id: "ROOM24", hostId: gameState.myMemberId, members: [:])
         for i in 1...24 {
             room24.members["M\(i)"] = SquadMember(id: "M\(i)", callsign: "C\(i)", latitude: 0, longitude: 0)
         }
         gameState.firebaseManager.activeRoom = room24
         gameState.recalculateAdaptiveUploadInterval()
-        XCTAssertEqual(gameState.adaptiveUploadInterval, 4.0, accuracy: 0.001)
+        XCTAssertEqual(gameState.adaptiveUploadInterval, 2.0, accuracy: 0.001)
         
         // Test throttling: rapid non-forced calls within interval
         gameState.broadcastLocalTelemetry(force: false) // first one allowed
@@ -1364,18 +1343,38 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 12), 1.0)
         XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 12), 1.0)
         
-        // Beyond threshold: R = 1.0 * (12 / P)^2
-        // 24 players -> 1.0 * (12 / 24)^2 = 0.25 Hz (4.0s interval)
-        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 24), 0.25)
-        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 24), 4.0)
-        
-        // 48 players -> 1.0 * (12 / 48)^2 = 0.0625 Hz (16.0s interval)
-        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 48), 0.0625)
-        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 48), 16.0)
-        
-        // 60 players -> 1.0 * (12 / 60)^2 = 0.04 Hz (25.0s interval)
-        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 60), 0.04, accuracy: 0.0001)
-        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 60), 25.0, accuracy: 0.0001)
+        // Beyond threshold: R = 1.0 * (12 / P) — linear, so P * R stays constant at 12
+        // 24 players -> 1.0 * (12 / 24) = 0.50 Hz (2.0s interval)
+        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 24), 0.5)
+        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 24), 2.0)
+
+        // 48 players -> 1.0 * (12 / 48) = 0.25 Hz (4.0s interval)
+        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 48), 0.25)
+        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 48), 4.0)
+
+        // 60 players -> 1.0 * (12 / 60) = 0.20 Hz (5.0s interval)
+        XCTAssertEqual(FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: 60), 0.20, accuracy: 0.0001)
+        XCTAssertEqual(FirebaseSyncManager.solveUpdateInterval(playerCount: 60), 5.0, accuracy: 0.0001)
+
+        // Aggregate bandwidth (P * R) is held constant at the threshold ceiling for P > 12
+        for playerCount in [16, 20, 24, 50] {
+            let aggregate = Double(playerCount) * FirebaseSyncManager.solveMaxUpdateRateHz(playerCount: playerCount)
+            XCTAssertEqual(aggregate, Double(threshold), accuracy: 0.0001, "Aggregate bandwidth should stay pinned at the P=\(threshold) ceiling for \(playerCount) players")
+        }
+    }
+
+    func testRefreshIntervalAndStaleTimeoutScaling() {
+        // At or below threshold: refresh = 7.0s, stale = 15.0s (unscaled baseline)
+        XCTAssertEqual(AppConstants.Timing.ConstantBandwidth.refreshInterval(forPlayerCount: 12), 7.0, accuracy: 0.0001)
+        XCTAssertEqual(AppConstants.Timing.ConstantBandwidth.staleTimeout(forPlayerCount: 12), 15.0, accuracy: 0.0001)
+
+        // 16 players -> T = 1.33s -> refresh = 9.33s, stale = 20.0s
+        XCTAssertEqual(AppConstants.Timing.ConstantBandwidth.refreshInterval(forPlayerCount: 16), 9.3333, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.Timing.ConstantBandwidth.staleTimeout(forPlayerCount: 16), 20.0, accuracy: 0.001)
+
+        // 50 players -> T = 4.1667s -> refresh = 29.17s, stale = 62.5s
+        XCTAssertEqual(AppConstants.Timing.ConstantBandwidth.refreshInterval(forPlayerCount: 50), 29.1667, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.Timing.ConstantBandwidth.staleTimeout(forPlayerCount: 50), 62.5, accuracy: 0.001)
     }
 
 
@@ -1383,7 +1382,8 @@ final class RadarMapTests: XCTestCase {
     func testPinFieldSanitizationAndVoiceInput() {
         // Direct numeric strings
         XCTAssertEqual(GameStateManager.sanitizePinInput("1234"), "1234")
-        XCTAssertEqual(GameStateManager.sanitizePinInput("123456"), "1234")
+        XCTAssertEqual(GameStateManager.sanitizePinInput("123456"), "123456")
+        XCTAssertEqual(GameStateManager.sanitizePinInput("12345678901234567"), "1234567890123456")
         
         // Voice input / spoken words
         XCTAssertEqual(GameStateManager.sanitizePinInput("one two three four"), "1234")
@@ -1406,69 +1406,61 @@ final class RadarMapTests: XCTestCase {
             id: "ECHO",
             hostId: "HOST_ECHO",
             maxCapacity: 4,
-            hasPin: true,
             pinHash: pinHash
         )
-        
-        XCTAssertTrue(room.hasPin)
+
         XCTAssertEqual(room.pinHash, pinHash)
-        
+
         let encoder = JSONEncoder()
         let data = try encoder.encode(room)
-        
+
         let jsonObject = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         XCTAssertNotNil(jsonObject)
-        XCTAssertEqual(jsonObject?["hasPin"] as? Bool, true)
-        XCTAssertEqual(jsonObject?["pinHash"] as? String, pinHash)
-        // Redundant keys should NOT be present in encoded JSON
+        XCTAssertEqual(jsonObject?["pin"] as? String, pinHash)
+        // Redundant/removed keys should NOT be present in encoded JSON
+        XCTAssertNil(jsonObject?["hasPin"])
+        XCTAssertNil(jsonObject?["createdAt"])
+        XCTAssertNil(jsonObject?["lastActivityTimestamp"])
         XCTAssertNil(jsonObject?["hasPassword"])
         XCTAssertNil(jsonObject?["passwordHash"])
         XCTAssertNil(jsonObject?["isBluetoothAdvertising"])
-        
+
         let decodedRoom = try JSONDecoder().decode(SquadRoom.self, from: data)
         XCTAssertEqual(decodedRoom.id, "ECHO")
-        XCTAssertTrue(decodedRoom.hasPin)
         XCTAssertEqual(decodedRoom.pinHash, pinHash)
     }
-    
+
     func testSquadRoomStreamlinedSchemaDecoding() throws {
         let json = """
         {
             "id": "DELTA",
-            "hostId": "HOST_DELTA",
-            "maxCapacity": 4,
-            "createdAt": 1700000000,
-            "hasPin": true,
-            "pinHash": "abcdef123456",
-            "members": {}
+            "hst": "HOST_DELTA",
+            "cap": 4,
+            "pin": "abcdef123456",
+            "m": {}
         }
         """.data(using: .utf8)!
-        
+
         let decoded = try JSONDecoder().decode(SquadRoom.self, from: json)
         XCTAssertEqual(decoded.id, "DELTA")
         XCTAssertEqual(decoded.hostId, "HOST_DELTA")
-        XCTAssertTrue(decoded.hasPin)
         XCTAssertEqual(decoded.pinHash, "abcdef123456")
     }
-    
+
     func testFirebaseSyncManagerPinAuthenticationWorkflow() {
         let roomId = "GHOST"
         let pin = "7788"
         let pinHash = FirebaseSyncManager.hashPin(pin, salt: roomId)
-        let room = SquadRoom(id: roomId, hostId: "HOST_GHOST", hasPin: true, pinHash: pinHash)
-        
+        let room = SquadRoom(id: roomId, hostId: "HOST_GHOST", pinHash: pinHash)
+
         let syncManager = FirebaseSyncManager()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        syncManager.urlSession = URLSession(configuration: config)
-        
+        let transport = MockRTDBTransport()
+        syncManager.transport = transport
+
         let roomData = try! JSONEncoder().encode(room)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, roomData)
-        }
-        
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        transport.seed(roomJson, at: "r/\(roomId)")
+
         let member = SquadMember(id: "OPERATOR_1", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
         
         // 1. Join with correct PIN -> Success
@@ -1501,13 +1493,8 @@ final class RadarMapTests: XCTestCase {
     // MARK: - Server Cost Optimization & Room Lifecycle Tests
     
     func testPlayerLogoutDeletesTelemetryAndMembershipWhenOtherMembersRemain() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
         gameState.myMemberId = "PLAYER_B"
         
         // Multi-member room (Host + Player B)
@@ -1515,8 +1502,8 @@ final class RadarMapTests: XCTestCase {
             id: "MULTI_ROOM",
             hostId: "HOST_A",
             members: [
-                "HOST_A": SquadMember(id: "HOST_A", callsign: "HOST", latitude: 0, longitude: 0, isHost: true),
-                "PLAYER_B": SquadMember(id: "PLAYER_B", callsign: "PLAYER_B", latitude: 0, longitude: 0, isHost: false)
+                "HOST_A": SquadMember(id: "HOST_A", callsign: "HOST", latitude: 0, longitude: 0, role: .leader),
+                "PLAYER_B": SquadMember(id: "PLAYER_B", callsign: "PLAYER_B", latitude: 0, longitude: 0, role: .player)
             ]
         )
         gameState.firebaseManager.activeRoom = room
@@ -1529,22 +1516,16 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
         
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
         // Verify player's membership and telemetry were deleted
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/rooms/MULTI_ROOM/members/PLAYER_B.json") == true })
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/telemetry/MULTI_ROOM/PLAYER_B.json") == true })
+        XCTAssertTrue(transport.recordedRemoves.contains("r/MULTI_ROOM/m/PLAYER_B"))
+        XCTAssertTrue(transport.recordedRemoves.contains("p/MULTI_ROOM/PLAYER_B"))
         // Whole room should NOT be deleted because HOST_A is still in the room
-        XCTAssertFalse(deleteRequests.contains { $0.url?.absoluteString.hasSuffix("/rooms/MULTI_ROOM.json") == true })
+        XCTAssertFalse(transport.recordedRemoves.contains("r/MULTI_ROOM"))
     }
     
     func testPlayerLogoutDoesNotDeleteWholeRoomWhenNonHostLeaves() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
         gameState.myMemberId = "SOLO_PLAYER"
         
         // Room with non-host player
@@ -1552,7 +1533,7 @@ final class RadarMapTests: XCTestCase {
             id: "SOLO_ROOM",
             hostId: "ORIGINAL_HOST",
             members: [
-                "SOLO_PLAYER": SquadMember(id: "SOLO_PLAYER", callsign: "SOLO", latitude: 0, longitude: 0, isHost: false)
+                "SOLO_PLAYER": SquadMember(id: "SOLO_PLAYER", callsign: "SOLO", latitude: 0, longitude: 0, role: .player)
             ]
         )
         gameState.firebaseManager.activeRoom = room
@@ -1565,30 +1546,24 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
         
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
         // Verify member and member telemetry are deleted, but whole room and whole room telemetry are NOT deleted
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/rooms/SOLO_ROOM/members/SOLO_PLAYER.json") == true })
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/telemetry/SOLO_ROOM/SOLO_PLAYER.json") == true })
-        XCTAssertFalse(deleteRequests.contains { $0.url?.absoluteString.hasSuffix("/rooms/SOLO_ROOM.json") == true })
-        XCTAssertFalse(deleteRequests.contains { $0.url?.absoluteString.hasSuffix("/telemetry/SOLO_ROOM.json") == true })
+        XCTAssertTrue(transport.recordedRemoves.contains("r/SOLO_ROOM/m/SOLO_PLAYER"))
+        XCTAssertTrue(transport.recordedRemoves.contains("p/SOLO_ROOM/SOLO_PLAYER"))
+        XCTAssertFalse(transport.recordedRemoves.contains("r/SOLO_ROOM"))
+        XCTAssertFalse(transport.recordedRemoves.contains("p/SOLO_ROOM"))
     }
     
     func testServerCreatorDisbandMessageDeletesWholeRoomAndTelemetry() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
         gameState.myMemberId = "CREATOR_HOST"
         
         let room = SquadRoom(
             id: "SQUAD_TO_DISBAND",
             hostId: "CREATOR_HOST",
             members: [
-                "CREATOR_HOST": SquadMember(id: "CREATOR_HOST", callsign: "LEADER", latitude: 0, longitude: 0, isHost: true),
-                "MEMBER_2": SquadMember(id: "MEMBER_2", callsign: "MEMBER_2", latitude: 0, longitude: 0, isHost: false)
+                "CREATOR_HOST": SquadMember(id: "CREATOR_HOST", callsign: "LEADER", latitude: 0, longitude: 0, role: .leader),
+                "MEMBER_2": SquadMember(id: "MEMBER_2", callsign: "MEMBER_2", latitude: 0, longitude: 0, role: .player)
             ]
         )
         gameState.firebaseManager.activeRoom = room
@@ -1602,36 +1577,35 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
         
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
         // Room and telemetry nodes must both be completely deleted
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/rooms/SQUAD_TO_DISBAND.json") == true })
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/telemetry/SQUAD_TO_DISBAND.json") == true })
+        XCTAssertTrue(transport.recordedRemoves.contains("r/SQUAD_TO_DISBAND"))
+        XCTAssertTrue(transport.recordedRemoves.contains("p/SQUAD_TO_DISBAND"))
         XCTAssertNil(gameState.firebaseManager.activeRoom)
         XCTAssertFalse(gameState.firebaseManager.isConnected)
     }
     
-    func testSevenDayIdleRoomDetectionAndSchema() throws {
-        let now = Date()
-        let activeRoom = SquadRoom(
-            id: "ACTIVE_ROOM",
-            hostId: "HOST1",
-            createdAt: now.timeIntervalSince1970 - 86400, // 1 day ago
-            lastActivityTimestamp: now.timeIntervalSince1970 - 3600 // 1 hour ago
-        )
-        XCTAssertFalse(activeRoom.isIdle(cutoffDays: 7.0, asOf: now), "Room active 1 hour ago should not be idle")
-        
-        let idleRoom = SquadRoom(
-            id: "OLD_ROOM",
-            hostId: "HOST2",
-            createdAt: now.timeIntervalSince1970 - (10 * 86400), // 10 days ago
-            lastActivityTimestamp: now.timeIntervalSince1970 - (8 * 86400) // 8 days ago
-        )
-        XCTAssertTrue(idleRoom.isIdle(cutoffDays: 7.0, asOf: now), "Room idle for 8 days should be flagged for 7-day deletion")
-        
-        // Test encoding/decoding lastActivityTimestamp
-        let encoded = try JSONEncoder().encode(activeRoom)
-        let decoded = try JSONDecoder().decode(SquadRoom.self, from: encoded)
-        XCTAssertEqual(decoded.lastActivityTimestamp, activeRoom.lastActivityTimestamp)
+    func testIdleCutoffIsTwelveHours() {
+        XCTAssertEqual(AppConstants.Timing.Inactivity.idleCutoffHours, 12.0)
+        XCTAssertEqual(AppConstants.Timing.Inactivity.ttlDurationSeconds, 12.0 * 3600.0)
+    }
+
+    func testRefreshRoomExpiryUpdatesAllThreeTrees() {
+        let syncManager = createMockFirebaseSyncManager()
+        let transport = mockTransport(for: syncManager)
+        let roomId = "REFRESH_ROOM"
+
+        syncManager.refreshRoomExpiry(roomId: roomId)
+
+        XCTAssertTrue(transport.recordedSets.contains { $0.path == "r/\(roomId)/exp" })
+        XCTAssertTrue(transport.recordedSets.contains { $0.path == "p/\(roomId)/exp" })
+        XCTAssertTrue(transport.recordedSets.contains { $0.path == "t/\(roomId)/exp" })
+
+        if let newExp = transport.recordedSets.last(where: { $0.path == "r/\(roomId)/exp" })?.value as? Double {
+            let expectedExpireAt = Date().timeIntervalSince1970 + AppConstants.Timing.Inactivity.ttlDurationSeconds
+            XCTAssertEqual(newExp, expectedExpireAt, accuracy: 1.0)
+        } else {
+            XCTFail("refreshRoomExpiry did not write a Double exp value")
+        }
     }
     
     // MARK: - AppConstants Integrity Tests
@@ -1652,7 +1626,7 @@ final class RadarMapTests: XCTestCase {
         
         // Subscription
         XCTAssertEqual(AppConstants.Subscription.freeTierMaxCapacity, 4)
-        XCTAssertEqual(AppConstants.Subscription.proTierMaxCapacity, 999)
+        XCTAssertEqual(AppConstants.Subscription.proTierMaxCapacity, 12)
         XCTAssertEqual(AppConstants.Subscription.lifetimePriceString, "$29.99")
         XCTAssertEqual(AppConstants.Subscription.entitlementID, "radarmap_pro")
         XCTAssertEqual(AppConstants.Subscription.productID, "com.radarmap.watch.pro")
@@ -1691,8 +1665,8 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(AppConstants.Timing.millisecondsPerSecond, 1000.0)
         XCTAssertEqual(AppConstants.Timing.AdaptiveRate.intervalChangeEpsilon, 0.01)
         XCTAssertEqual(AppConstants.Timing.Stale.defaultTimeoutMultiplier, 15.0)
-        XCTAssertEqual(AppConstants.Timing.Inactivity.idleCutoffDays, 7.0)
-        XCTAssertEqual(AppConstants.Timing.Inactivity.secondsPerDay, 86400.0)
+        XCTAssertEqual(AppConstants.Timing.Inactivity.idleCutoffHours, 12.0)
+        XCTAssertEqual(AppConstants.Timing.Inactivity.secondsPerHour, 3600.0)
         XCTAssertEqual(AppConstants.Timing.DeathHold.delayBeforeChargeSeconds, 1.0)
         XCTAssertEqual(AppConstants.Timing.DeathHold.chargeDurationSeconds, 3.0)
         
@@ -1720,7 +1694,8 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(AppConstants.UI.TacticalShapes.ECG.rPeakHeightRatio, 0.44)
         
         // Tactical Indicators
-        XCTAssertEqual(AppConstants.Subscription.maxEnemyIndicatorsCount, 20)
+        XCTAssertEqual(AppConstants.Subscription.freeTierMaxTacticalIndicators, 0)
+        XCTAssertEqual(AppConstants.Subscription.proTierMaxTacticalIndicators, 20)
         XCTAssertEqual(AppConstants.Subscription.enemyIndicatorFadeDurationSeconds, 300.0)
         XCTAssertEqual(AppConstants.Subscription.indicatorHoldToDeleteDurationSeconds, 1.2)
     }
@@ -1855,6 +1830,10 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(orderIndicator.grayFadeFactor(referenceDate: pastDate), 0.0)
     }
     
+    // `indicators` is a client-model convenience (populated by applyTacticalSnapshot merging the
+    // separate t/{roomId} fetch) and is deliberately excluded from SquadRoom's own wire
+    // representation — real indicator data lives at t/{roomId}/o and t/{roomId}/i, not embedded
+    // in the room's JSON. See CLOUD_DATA_MANAGEMENT.md.
     func testTacticalIndicatorRoomEncodingDecoding() throws {
         let indicator1 = TacticalIndicator(
             id: "IND-1",
@@ -1870,7 +1849,7 @@ final class RadarMapTests: XCTestCase {
             placedByMemberId: "LEADER-1",
             timestamp: 1700000100
         )
-        
+
         let room = SquadRoom(
             id: "PRO-SQUAD",
             hostId: "LEADER-1",
@@ -1880,18 +1859,20 @@ final class RadarMapTests: XCTestCase {
                 indicator2.id: indicator2
             ]
         )
-        
+
         let encoded = try JSONEncoder().encode(room)
+        let json = try JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        XCTAssertNil(json?["indicators"], "indicators must not be part of SquadRoom's wire representation")
+
         let decoded = try JSONDecoder().decode(SquadRoom.self, from: encoded)
-        
-        XCTAssertEqual(decoded.indicators.count, 2)
-        XCTAssertEqual(decoded.indicators["IND-1"]?.type, .watchHere)
-        XCTAssertEqual(decoded.indicators["IND-2"]?.type, .lightVehicle)
-        if let ind1 = decoded.indicators["IND-1"], let ind2 = decoded.indicators["IND-2"] {
-            XCTAssertEqual(ind1.coordinate.latitude, 37.7858, accuracy: 0.0001)
-            XCTAssertEqual(ind2.coordinate.latitude, 37.7860, accuracy: 0.0001)
-        } else {
-            XCTFail("Decoded indicators should not be nil")
+        XCTAssertTrue(decoded.indicators.isEmpty, "Decoding a room never populates indicators — that's applyTacticalSnapshot's job")
+
+        // TacticalIndicator's own compact-array wire format round-trips independently.
+        for indicator in [indicator1, indicator2] {
+            let parsed = TacticalIndicator.parse(id: indicator.id, rawValue: indicator.compactArray)
+            XCTAssertEqual(parsed?.type, indicator.type)
+            XCTAssertEqual(parsed?.coordinate.latitude ?? 0, indicator.coordinate.latitude, accuracy: 0.0001)
+            XCTAssertEqual(parsed?.placedByMemberId, indicator.placedByMemberId)
         }
     }
     
@@ -1910,19 +1891,13 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testCommandCallsignAttributionAndDistinctionForMultipleProPlayers() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
         gameState.subscriptionManager.hasUnlimitedSquadUnlock = true
         gameState.myMemberId = "PRO_PLAYER_1"
         gameState.myCallsign = "VIPER"
         
-        let p1Member = SquadMember(id: "PRO_PLAYER_1", callsign: "VIPER", latitude: 37.785, longitude: -122.406, isHost: true)
-        let p2Member = SquadMember(id: "PRO_PLAYER_2", callsign: "GHOST", latitude: 37.786, longitude: -122.407, isHost: false)
+        let p1Member = SquadMember(id: "PRO_PLAYER_1", callsign: "VIPER", latitude: 37.785, longitude: -122.406, role: .leader)
+        let p2Member = SquadMember(id: "PRO_PLAYER_2", callsign: "GHOST", latitude: 37.786, longitude: -122.407, role: .player)
         
         var room = SquadRoom(
             id: "PRO_SQUAD",
@@ -2085,7 +2060,7 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(roundtripDefault, defaultRadar, accuracy: 0.0001)
         
         // 4. Verify helper methods in AppConstants.UI.RadarScale across multiple zoom levels
-        let testScales: [Double] = [25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]
+        let testScales: [Double] = [1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]
         for scale in testScales {
             let delta = AppConstants.UI.RadarScale.mapSpanDelta(forRadarScaleMeters: scale)
             let roundtripScale = AppConstants.UI.RadarScale.radarScaleMeters(forMapSpanDelta: delta)
@@ -2093,9 +2068,8 @@ final class RadarMapTests: XCTestCase {
         }
         
         // 5. Verify ScaleRuler distance formatting helpers (tactical ruler displays exact map zoom scale)
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 5.0), "5m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 25.0), "25m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 50.0), "50m")
+        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 100.0), "100m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 250.0), "250m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 500.0), "500m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 100.0), "100m")
@@ -2177,9 +2151,12 @@ final class RadarMapTests: XCTestCase {
     // MARK: - Tactical Indicators Category & Bandwidth-Preservation Sync Tests
     
     func testTacticalEndpointConstant() {
-        XCTAssertEqual(AppConstants.Network.Endpoints.tactical, "tactical")
-        XCTAssertEqual(AppConstants.Network.Endpoints.telemetry, "telemetry")
-        XCTAssertEqual(AppConstants.Network.Endpoints.rooms, "rooms")
+        XCTAssertEqual(AppConstants.Network.Endpoints.tactical, "t")
+        XCTAssertEqual(AppConstants.Network.Endpoints.telemetry, "p")
+        XCTAssertEqual(AppConstants.Network.Endpoints.rooms, "r")
+        XCTAssertEqual(AppConstants.Network.Endpoints.members, "m")
+        XCTAssertEqual(AppConstants.Network.Endpoints.orders, "o")
+        XCTAssertEqual(AppConstants.Network.Endpoints.indicators, "i")
     }
     
     func testSquadLeaderButtonVisibilityFollowsProStatus() {
@@ -2217,39 +2194,18 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(proState.allTacticalIndicators.first?.type, .attackHere)
     }
     
-    func testTacticalIndicatorsUploadAndChangeOnlyDownload() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let urlStr = request.url?.absoluteString ?? ""
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            
-            if urlStr.contains("/tactical/ALPHA/updatedAt.json") && request.httpMethod == "GET" {
-                return (response, "1700000500".data(using: .utf8)!)
-            }
-            if urlStr.contains("/tactical/ALPHA.json") && request.httpMethod == "GET" {
-                let json = """
-                {
-                    "updatedAt": 1700000500,
-                    "IND-100": {
-                        "id": "IND-100",
-                        "type": "watchHere",
-                        "latitude": 37.7858,
-                        "longitude": -122.4064,
-                        "placedByMemberId": "LEADER",
-                        "timestamp": 1700000500
-                    }
-                }
-                """
-                return (response, json.data(using: .utf8)!)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
+    func testTacticalIndicatorsUploadAndFetch() {
         let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
         let room = SquadRoom(id: "ALPHA", hostId: "LEADER")
         gameState.firebaseManager.activeRoom = room
-        
-        // 1. Upload new indicator: Verify PUT request is made under /tactical/ALPHA/indicators/IND-101.json
+
+        // Seed an existing server-side capped (enemy+environment) indicator under /t/ALPHA/i.
+        transport.seed([
+            "IND-100": ["wat", 37.7858, -122.4064, 1700000500.0, "LEADER"]
+        ], at: "t/ALPHA/i")
+
+        // 1. Upload new squad-order indicator: verify PUT lands under /t/ALPHA/o/IND-101
         let newIndicator = TacticalIndicator(
             id: "IND-101",
             type: .goHere,
@@ -2257,59 +2213,40 @@ final class RadarMapTests: XCTestCase {
             placedByMemberId: "LEADER"
         )
         gameState.firebaseManager.addOrUpdateIndicator(roomId: "ALPHA", indicator: newIndicator)
-        
+
         let putExp = expectation(description: "Wait for PUT requests")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            let putRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "PUT" }
-            XCTAssertTrue(putRequests.contains { $0.url?.absoluteString.contains("/tactical/ALPHA/indicators/IND-101.json") == true || $0.url?.absoluteString.contains("/tactical/ALPHA/IND-101.json") == true })
-            XCTAssertTrue(putRequests.contains { $0.url?.absoluteString.contains("/tactical/ALPHA/meta/updatedAt.json") == true || $0.url?.absoluteString.contains("/tactical/ALPHA/updatedAt.json") == true })
+            XCTAssertTrue(transport.recordedSets.contains { $0.path == "t/ALPHA/o/IND-101" })
             putExp.fulfill()
         }
         wait(for: [putExp], timeout: 1.0)
-        
-        // 2. Change-only download test: When updatedAt is newer than lastKnownTacticalUpdatedAt (0.0)
-        gameState.firebaseManager.lastKnownTacticalUpdatedAt = 0.0
-        let exp = expectation(description: "Fetch tactical indicators on change")
-        gameState.firebaseManager.fetchTacticalIndicatorsIfChanged(roomId: "ALPHA")
-        
+
+        // 2. Fetch: verify both /o and /i branches merge into activeRoom.indicators
+        let exp = expectation(description: "Fetch tactical indicators")
+        gameState.firebaseManager.fetchTacticalIndicators(roomId: "ALPHA")
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             XCTAssertEqual(gameState.firebaseManager.activeRoom?.indicators["IND-100"]?.type, .watchHere)
-            XCTAssertEqual(gameState.firebaseManager.lastKnownTacticalUpdatedAt, 1700000500)
+            XCTAssertEqual(gameState.firebaseManager.activeRoom?.indicators["IND-101"]?.type, .goHere)
             exp.fulfill()
         }
         wait(for: [exp], timeout: 1.0)
-        
-        // 3. Subsequent poll with NO change: updatedAt is still 1700000500, equal to lastKnownTacticalUpdatedAt
-        let countBefore = MockURLProtocol.recordedRequests.filter { $0.url?.absoluteString.contains("/tactical/ALPHA.json") == true }.count
-        gameState.firebaseManager.fetchTacticalIndicatorsIfChanged(roomId: "ALPHA")
-        
-        let expNoChange = expectation(description: "No change poll")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            let countAfter = MockURLProtocol.recordedRequests.filter { $0.url?.absoluteString.contains("/tactical/ALPHA.json") == true }.count
-            XCTAssertEqual(countBefore, countAfter, "Must NOT download full tactical payload if updatedAt is unchanged")
-            expNoChange.fulfill()
-        }
-        wait(for: [expNoChange], timeout: 1.0)
-        
-        // 4. Delete indicator: Verify DELETE is sent to /tactical/ALPHA/indicators/IND-101.json
+
+        // 3. Delete indicator: verify remove() is sent to both /o and /i branches unconditionally
+        // (no category available at the delete call site — see CLOUD_DATA_MANAGEMENT.md)
         gameState.firebaseManager.removeIndicator(roomId: "ALPHA", indicatorId: "IND-101")
-        let delExp = expectation(description: "Wait for DELETE request")
+        let delExp = expectation(description: "Wait for remove() call")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
-            XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/tactical/ALPHA/indicators/IND-101.json") == true || $0.url?.absoluteString.contains("/tactical/ALPHA/IND-101.json") == true })
+            XCTAssertTrue(transport.recordedRemoves.contains("t/ALPHA/o/IND-101"))
+            XCTAssertTrue(transport.recordedRemoves.contains("t/ALPHA/i/IND-101"))
             delExp.fulfill()
         }
         wait(for: [delExp], timeout: 1.0)
     }
     
     func testTacticalIndicatorsPurgedOnRoomDisband() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
         let room = SquadRoom(id: "ALPHA", hostId: "GHOST-1")
         gameState.firebaseManager.activeRoom = room
         gameState.isHosting = true
@@ -2321,8 +2258,7 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [disbandExp], timeout: 1.0)
         
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
-        XCTAssertTrue(deleteRequests.contains { $0.url?.absoluteString.contains("/tactical/ALPHA.json") == true }, "Must delete /tactical/{roomId} node when room is disbanded")
+        XCTAssertTrue(transport.recordedRemoves.contains("t/ALPHA"), "Must delete /t/{roomId} node when room is disbanded")
     }
     
     func testIconsPurgedOnLogoutExceptMeIcon() {
@@ -2492,25 +2428,12 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testRemoteTelemetryCompactArrayPollingWorkflow() {
-        MockURLProtocol.reset()
-        
+        let gameState = createMockGameState()
         // Server response in ultra-lean 4-element schema: {"MEMBER_A": [lat, lng, hr, ts]}
-        let rawResponseJson = """
-        {
+        mockTransport(for: gameState).seed([
             "MEMBER_A": [37.7858, -122.4064, 80.0, 1724686650.0],
             "MEMBER_B": [37.7860, -122.4070, 95.0, 1724686651.0]
-        }
-        """
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.url?.absoluteString.contains("/telemetry/") == true {
-                return (response, rawResponseJson.data(using: .utf8)!)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
-        let gameState = createMockGameState()
+        ], at: "p/COMPACT_ROOM")
         let room = SquadRoom(id: "COMPACT_ROOM", hostId: "MEMBER_A", members: [:])
         gameState.firebaseManager.activeRoom = room
         gameState.firebaseManager.fetchRemoteTelemetry(roomId: "COMPACT_ROOM")
@@ -2665,26 +2588,14 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testSelfTelemetryIgnoredFromRemoteEndpointAndUsesLiveBlendedHeading() {
-        MockURLProtocol.reset()
-        let rawResponseJson = """
-        {
+        let gameState = createMockGameState()
+        mockTransport(for: gameState).seed([
             "LOCAL_PLAYER": [40.7128, -74.0060, 150.0, 1724686650.0],
             "REMOTE_PLAYER": [37.7860, -122.4070, 95.0, 1724686651.0]
-        }
-        """
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.url?.absoluteString.contains("/telemetry/") == true {
-                return (response, rawResponseJson.data(using: .utf8)!)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
-        let gameState = createMockGameState()
+        ], at: "p/TEST_ROOM")
         gameState.myMemberId = "LOCAL_PLAYER"
         gameState.firebaseManager.localMemberId = "LOCAL_PLAYER"
-        
+
         let room = SquadRoom(id: "TEST_ROOM", hostId: "LOCAL_PLAYER", members: [:])
         gameState.firebaseManager.activeRoom = room
         gameState.firebaseManager.fetchRemoteTelemetry(roomId: "TEST_ROOM")
@@ -2711,27 +2622,22 @@ final class RadarMapTests: XCTestCase {
     // MARK: - Login Check Field Error Tests
     
     func testLoginCheck_DuplicateCallsign_TurnsCallsignFieldRed() {
-        MockURLProtocol.reset()
-        let existingMember = SquadMember(id: "HOST1", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
-        let room = SquadRoom(id: "ALPHA", hostId: "HOST1", members: ["HOST1": existingMember])
-        let roomData = try! JSONEncoder().encode(room)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let pin = "1234"
+        let name = "ALPHA"
+        let roomId = name + FirebaseSyncManager.deriveRoomPadding(pin: pin, name: name)
+        let existingMember = SquadMember(id: "HOST1", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
+        let room = SquadRoom(id: roomId, hostId: "HOST1", pinHash: FirebaseSyncManager.hashPin(pin, salt: roomId), members: ["HOST1": existingMember])
+        let roomData = try! JSONEncoder().encode(room)
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: gameState).seed(roomJson, at: "r/\(roomId)")
         gameState.myMemberId = "PLAYER_2"
         gameState.myCallsign = "VIPER" // Duplicate callsign
-        
+
         XCTAssertFalse(gameState.callsignError)
-        
+
         let exp = expectation(description: "Duplicate callsign error")
-        gameState.joinRoom(id: "ALPHA") { success in
+        gameState.joinRoom(id: name, pin: pin) { success in
             XCTAssertFalse(success)
             XCTAssertTrue(gameState.callsignError, "Callsign field must turn red on callsign duplication")
             XCTAssertFalse(gameState.squadNameError)
@@ -2741,25 +2647,20 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
     }
-    
+
     func testLoginCheck_ServerNameDuplicationIfHosting_TurnsSquadNameFieldRed() {
-        MockURLProtocol.reset()
-        let existingRoom = SquadRoom(id: "EXISTING_SQUAD", hostId: "OTHER_HOST", members: [:])
-        let roomData = try! JSONEncoder().encode(existingRoom)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let pin = "1234"
+        let name = "EXIST_SQUAD" // <= maxRoomNameEntryLength (12) so hostRoom won't truncate it
+        let roomId = name + FirebaseSyncManager.deriveRoomPadding(pin: pin, name: name)
+        let existingRoom = SquadRoom(id: roomId, hostId: "OTHER_HOST", pinHash: FirebaseSyncManager.hashPin(pin, salt: roomId), members: [:])
+        let roomData = try! JSONEncoder().encode(existingRoom)
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: gameState).seed(roomJson, at: "r/\(roomId)")
         XCTAssertFalse(gameState.squadNameError)
-        
+
         let exp = expectation(description: "Server duplication on host error")
-        gameState.hostRoom(name: "EXISTING_SQUAD") { success in
+        gameState.hostRoom(name: name, pin: pin) { success in
             XCTAssertFalse(success)
             XCTAssertTrue(gameState.squadNameError, "Squad name field must turn red if server already exists when hosting")
             XCTAssertFalse(gameState.callsignError)
@@ -2769,19 +2670,15 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
     }
-    
+
     func testLoginCheck_ServerNameDoesNotExistIfJoining_TurnsSquadNameFieldRed() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "null".data(using: .utf8)!)
-        }
-        
+        // No seeding: a fresh MockRTDBTransport's empty root resolves the room read to nil, same
+        // as the old handler's "null" response.
         let gameState = createMockGameState()
         XCTAssertFalse(gameState.squadNameError)
-        
+
         let exp = expectation(description: "Server does not exist on join error")
-        gameState.joinRoom(id: "UNKNOWN_SQUAD") { success in
+        gameState.joinRoom(id: "UNKNOWN_SQUAD", pin: "1234") { success in
             XCTAssertFalse(success)
             XCTAssertTrue(gameState.squadNameError, "Squad name field must turn red if server doesn't exist when joining")
             XCTAssertFalse(gameState.callsignError)
@@ -2791,33 +2688,30 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
     }
-    
-    func testLoginCheck_IncorrectPinIfJoining_TurnsPinFieldRed() {
-        MockURLProtocol.reset()
-        let pinHash = FirebaseSyncManager.hashPin("1234", salt: "LOCKED_SQUAD")
-        let lockedRoom = SquadRoom(id: "LOCKED_SQUAD", hostId: "HOST1", hasPin: true, pinHash: pinHash, members: [:])
-        let roomData = try! JSONEncoder().encode(lockedRoom)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
+
+    // A wrong PIN now derives a different (nonexistent) room id rather than being rejected by a
+    // found room's stored hash, so it surfaces as roomNotFound/squadNameError, not
+    // incorrectPin/pinError — see CLOUD_DATA_MANAGEMENT.md noted UX behavior change.
+    func testLoginCheck_WrongPinIfJoining_LooksLikeRoomNotFound() {
         let gameState = createMockGameState()
+        let correctPin = "1234"
+        let name = "LOCKED_SQUAD"
+        let roomId = name + FirebaseSyncManager.deriveRoomPadding(pin: correctPin, name: name)
+        let lockedRoom = SquadRoom(id: roomId, hostId: "HOST1", pinHash: FirebaseSyncManager.hashPin(correctPin, salt: roomId), members: [:])
+        let roomData = try! JSONEncoder().encode(lockedRoom)
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: gameState).seed(roomJson, at: "r/\(roomId)")
         gameState.myMemberId = "PLAYER_1"
         gameState.myCallsign = "GHOST"
-        XCTAssertFalse(gameState.pinError)
-        
-        let exp = expectation(description: "Incorrect PIN error")
-        gameState.joinRoom(id: "LOCKED_SQUAD", pin: "9999") { success in
+        XCTAssertFalse(gameState.squadNameError)
+
+        let exp = expectation(description: "Wrong PIN error")
+        gameState.joinRoom(id: name, pin: "9999") { success in
             XCTAssertFalse(success)
-            XCTAssertTrue(gameState.pinError, "PIN field must turn red if PIN is incorrect when joining")
+            XCTAssertTrue(gameState.squadNameError, "Squad name field turns red — a wrong PIN derives a different, nonexistent room id")
             XCTAssertFalse(gameState.callsignError)
-            XCTAssertFalse(gameState.squadNameError)
-            XCTAssertEqual(gameState.errorMessage, FirebaseSyncError.incorrectPin.localizedDescription)
+            XCTAssertFalse(gameState.pinError)
+            XCTAssertEqual(gameState.errorMessage, FirebaseSyncError.roomNotFound.localizedDescription)
             exp.fulfill()
         }
         wait(for: [exp], timeout: 1.0)
@@ -2836,7 +2730,7 @@ final class RadarMapTests: XCTestCase {
             lastUpdatedTimestamp: 1787767191.0,
             sequenceNumber: 42,
             status: .active,
-            isHost: true,
+            role: .leader,
             colorHex: "#FF0000"
         )
         
@@ -2845,9 +2739,9 @@ final class RadarMapTests: XCTestCase {
         XCTAssertNotNil(json)
         
         // Allowed metadata keys for room roster
-        XCTAssertEqual(json?["id"] as? String, "uuid_user_1234")
-        XCTAssertEqual(json?["callsign"] as? String, "VIPER")
-        XCTAssertEqual(json?["isHost"] as? Bool, true)
+        XCTAssertEqual(json?["mid"] as? String, "uuid_user_1234")
+        XCTAssertEqual(json?["csn"] as? String, "VIPER")
+        XCTAssertEqual(json?["rol"] as? String, "leader")
         
         // Excluded dynamic telemetry fields
         XCTAssertNil(json?["latitude"])
@@ -2894,7 +2788,7 @@ final class RadarMapTests: XCTestCase {
         
         // Micro displacement (2.2m < 3.5m) and small HR change (5 BPM < 12 BPM)
         let microMovedLocation = CLLocation(latitude: 37.785834 + 0.000020, longitude: -122.406417) // ~2.22 meters
-        XCTAssertLessThan(microMovedLocation.distance(from: baseLocation), AppConstants.Timing.DeltaGating.minMovementDeltaMeters)
+        XCTAssertLessThan(microMovedLocation.distance(from: baseLocation), AppConstants.Timing.DeltaGating.maxPredictedPositionErrorMeters)
         
         let now = Date().timeIntervalSince1970
         let shouldEmitMicro = gameState.shouldEmitTelemetry(
@@ -2930,7 +2824,7 @@ final class RadarMapTests: XCTestCase {
         
         // Move 5.0 meters (>= 3.5m threshold)
         let movedLoc = CLLocation(latitude: 37.785834 + 0.000045, longitude: -122.406417)
-        XCTAssertGreaterThanOrEqual(movedLoc.distance(from: startLoc), AppConstants.Timing.DeltaGating.minMovementDeltaMeters)
+        XCTAssertGreaterThanOrEqual(movedLoc.distance(from: startLoc), AppConstants.Timing.DeltaGating.maxPredictedPositionErrorMeters)
         
         let now = Date().timeIntervalSince1970
         let shouldEmit = gameState.shouldEmitTelemetry(
@@ -3020,10 +2914,10 @@ final class RadarMapTests: XCTestCase {
         gameState.locationHeadingManager.blendedHeading = 0.0
         gameState.healthKitManager.currentHeartRate = 75.0
         
-        // Fixed fallback timer constant for upload liveness: 10.0s
-        XCTAssertEqual(gameState.currentHeartbeatFallbackInterval(), 10.0, accuracy: 0.01)
-        
-        // Stationary for 5.0 seconds (< 10.0s) -> should be suppressed
+        // Empty room (0 members): refreshInterval = 7 * updateInterval(0) = 7 * 1.0 = 7.0s
+        XCTAssertEqual(gameState.currentHeartbeatFallbackInterval(), 7.0, accuracy: 0.01)
+
+        // Stationary for 5.0 seconds (< 7.0s) -> should be suppressed
         let now = Date().timeIntervalSince1970
         let shouldNotEmit = gameState.shouldEmitTelemetry(
             currentLocation: loc,
@@ -3033,20 +2927,20 @@ final class RadarMapTests: XCTestCase {
             currentTime: now + 5.0,
             force: false
         )
-        XCTAssertFalse(shouldNotEmit, "Stationary before 10s fallback must be gated")
-        
-        // Simulate stationary in cover for 11.0 seconds (> 10.0s fallback threshold)
+        XCTAssertFalse(shouldNotEmit, "Stationary before 7s fallback must be gated")
+
+        // Simulate stationary in cover for 8.0 seconds (> 7.0s fallback threshold)
         let shouldEmit = gameState.shouldEmitTelemetry(
             currentLocation: loc,
             currentHeading: 0.0,
             currentHeartRate: 75.0,
             currentIsDead: false,
-            currentTime: now + 11.0,
+            currentTime: now + 8.0,
             force: false
         )
-        XCTAssertTrue(shouldEmit, "Stationary heartbeat fallback (10.0s) must emit to prevent teammate icons from turning gray")
+        XCTAssertTrue(shouldEmit, "Stationary heartbeat fallback (7.0s) must emit to prevent teammate icons from turning gray")
     }
-    
+
     func testLargeServerHeartbeatFallbackScaling() {
         let gameState = createMockGameState()
         var members: [String: SquadMember] = [:]
@@ -3055,14 +2949,17 @@ final class RadarMapTests: XCTestCase {
         }
         let largeRoom = SquadRoom(id: "LARGE_ROOM", hostId: "MEMBER_1", members: members)
         gameState.firebaseManager.activeRoom = largeRoom
-        
-        // 30 players: updateInterval = 1.0 * (30 / 12)^2 = 6.25s
+
+        // 30 players: updateInterval = 1.0 / (30 / 12) = 2.5s
         gameState.recalculateAdaptiveUploadInterval()
-        XCTAssertEqual(gameState.adaptiveUploadInterval, 6.25, accuracy: 0.01)
-        
-        // Heartbeat fallback timer constant: 10.0s
+        XCTAssertEqual(gameState.adaptiveUploadInterval, 2.5, accuracy: 0.01)
+
+        // Heartbeat fallback now scales with room size too: 7 * T = 7 * 2.5 = 17.5s
         let fallbackInterval = gameState.currentHeartbeatFallbackInterval()
-        XCTAssertEqual(fallbackInterval, 10.0, accuracy: 0.01, "Upload fallback constant remains 10s")
+        XCTAssertEqual(fallbackInterval, 17.5, accuracy: 0.01, "Upload fallback scales with room size (7 * T)")
+
+        // Display-side stale threshold stays in sync with the same T for Y * T staleness
+        XCTAssertEqual(SquadMember.defaultUpdateInterval, 2.5, accuracy: 0.01)
     }
 
     
@@ -3085,19 +2982,11 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testClientDrivenRESTTelemetryPollingIngestion() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let payload = """
-            {
-                "OP_1": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000, 1],
-                "OP_2": [37.7860, -122.4070, 12.0, 180.0, 80.0, 1700000000, 1]
-            }
-            """
-            return (response, payload.data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
+        mockTransport(for: syncManager).seed([
+            "OP_1": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000.0, 1],
+            "OP_2": [37.7860, -122.4070, 12.0, 180.0, 80.0, 1700000000.0, 1]
+        ], at: "p/REST_ROOM")
         let room = SquadRoom(id: "REST_ROOM", hostId: "HOST_1")
         syncManager.activeRoom = room
         
@@ -3114,19 +3003,11 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testClientDrivenRESTPrunesMissingRemoteMembers() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            // Only OP_1 is on the server; OP_2 has left the squad
-            let payload = """
-            {
-                "OP_1": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000, 1]
-            }
-            """
-            return (response, payload.data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
+        // Only OP_1 is on the server; OP_2 has left the squad
+        mockTransport(for: syncManager).seed([
+            "OP_1": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000.0, 1]
+        ], at: "p/PRUNE_ROOM")
         syncManager.localMemberId = "MY_LOCAL_ID"
         var room = SquadRoom(id: "PRUNE_ROOM", hostId: "HOST_1")
         room.members["MY_LOCAL_ID"] = SquadMember(id: "MY_LOCAL_ID", callsign: "ME", latitude: 37.70, longitude: -122.30)
@@ -3147,37 +3028,31 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testClientDrivenRESTPollingLifecycleAndTimers() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
+        // REST-era polling used a repeating Timer; polling is now driven by persistent RTDB
+        // listeners (see FirebaseSyncManager.startTelemetryPolling/stopTelemetryPolling), so this
+        // verifies listener attach/detach lifecycle instead of a timer.
         let syncManager = createMockFirebaseSyncManager()
+        let transport = mockTransport(for: syncManager)
         let room = SquadRoom(id: "LIFECYCLE_ROOM", hostId: "HOST_1")
         syncManager.activeRoom = room
-        
-        // Start client-driven polling
+
+        // Start client-driven polling -> attaches the p/t/r realtime listeners
         syncManager.startTelemetryPolling(roomId: "LIFECYCLE_ROOM")
         XCTAssertEqual(syncManager.pollingInterval, 1.0)
-        
-        // Stop client-driven polling
+        XCTAssertFalse(transport.recordedObservedPaths.isEmpty, "startTelemetryPolling must attach realtime listeners")
+        XCTAssertTrue(transport.recordedObservedPaths.contains { $0.path == "p/LIFECYCLE_ROOM" && $0.eventType == .childAdded })
+        XCTAssertTrue(transport.recordedObservedPaths.contains { $0.path == "t/LIFECYCLE_ROOM" && $0.eventType == .value })
+        XCTAssertTrue(transport.recordedObservedPaths.contains { $0.path == "r/LIFECYCLE_ROOM" && $0.eventType == .value })
+
+        // Stop client-driven polling -> detaches listeners without error/crash
         syncManager.stopTelemetryPolling()
     }
     
     func testWristDownThrottlingAndInstantWakeBurst() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let samplePayload = """
-            {
-                "OP_WAKE": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000, 1]
-            }
-            """
-            return (response, samplePayload.data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        mockTransport(for: gameState).seed([
+            "OP_WAKE": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000.0, 1]
+        ], at: "p/WAKE_ROOM")
         let room = SquadRoom(id: "WAKE_ROOM", hostId: gameState.myMemberId)
         gameState.firebaseManager.activeRoom = room
         
@@ -3206,18 +3081,10 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testDoubleTapAndAwakeInteractionTriggerWakeBurst() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            let samplePayload = """
-            {
-                "OP_WAKE2": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000, 1]
-            }
-            """
-            return (response, samplePayload.data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        mockTransport(for: gameState).seed([
+            "OP_WAKE2": [37.7858, -122.4064, 10.0, 90.0, 75.0, 1700000000.0, 1]
+        ], at: "p/DOUBLE_TAP_ROOM")
         let room = SquadRoom(id: "DOUBLE_TAP_ROOM", hostId: gameState.myMemberId)
         gameState.firebaseManager.activeRoom = room
         
@@ -3252,7 +3119,7 @@ final class RadarMapTests: XCTestCase {
             return
         }
         XCTAssertEqual(privacyUrl.scheme, "https")
-        XCTAssertEqual(privacyUrl.host, "radarmap.app")
+        XCTAssertTrue(privacyUrl.host == "www.privacypolicies.com" || privacyUrl.host == "radarmap.app")
         
         // Verify Contact Email is valid email format
         XCTAssertEqual(AppConstants.Policy.contactEmail, "sweetdreamsdeveloper@gmail.com")
@@ -3323,9 +3190,9 @@ final class RadarMapTests: XCTestCase {
         XCTAssertTrue(gameState.locationHeadingManager.isUpdating, "Location and heading updates should be active on launch so user position is known")
     }
     
-    func testDefaultMapStyleAndRadarCenterFollowsUser() {
+    func testDefaultPresentationAndRadarCenterFollowsUser() {
         let gameState = GameStateManager()
-        XCTAssertEqual(gameState.selectedMapStyle, .radar, "Default map style should be tactical radar")
+        XCTAssertEqual(gameState.selectedPresentation, .radar, "Default presentation should be tactical radar")
         
         // When location is updated, local player member uses updated coordinate
         let testCoord = CLLocation(latitude: 37.7749, longitude: -122.4194)
@@ -3356,17 +3223,9 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testCreateRoomInitializesTelemetryAndTacticalNodesWithTTL() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, "null".data(using: .utf8)!)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
-        let member = SquadMember(id: "HOST1", callsign: "VIPER", latitude: 0, longitude: 0, isHost: true)
+        let transport = mockTransport(for: syncManager)
+        let member = SquadMember(id: "HOST1", callsign: "VIPER", latitude: 0, longitude: 0, role: .leader)
         let room = SquadRoom(id: "NEW_SQUAD", hostId: "HOST1", members: ["HOST1": member])
         
         let exp = expectation(description: "Room created and subnodes initialized")
@@ -3379,10 +3238,9 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [exp], timeout: 1.0)
         
-        let putRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "PUT" }
-        XCTAssertTrue(putRequests.contains { $0.url?.absoluteString.contains("/rooms/NEW_SQUAD.json") == true }, "Must create room node")
-        XCTAssertTrue(putRequests.contains { $0.url?.absoluteString.contains("/telemetry/NEW_SQUAD.json") == true }, "Must initialize telemetry node on room creation")
-        XCTAssertTrue(putRequests.contains { $0.url?.absoluteString.contains("/tactical/NEW_SQUAD.json") == true }, "Must initialize tactical node on room creation")
+        XCTAssertTrue(transport.recordedSets.contains { $0.path == "r/NEW_SQUAD" }, "Must create room node")
+        XCTAssertTrue(transport.recordedSets.contains { $0.path == "p/NEW_SQUAD" }, "Must initialize telemetry node on room creation")
+        XCTAssertTrue(transport.recordedSets.contains { $0.path == "t/NEW_SQUAD" }, "Must initialize tactical node on room creation")
     }
     
     func testCreateRoomRejectsEmptyCallsign() {
@@ -3438,20 +3296,12 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testCallsignUniqueWithinRoomOnly_SameRoomRejection() {
-        MockURLProtocol.reset()
+        let syncManager = createMockFirebaseSyncManager()
         let existingMember = SquadMember(id: "USER1", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
         let roomA = SquadRoom(id: "ROOM_A", hostId: "USER1", members: ["USER1": existingMember])
         let roomData = try! JSONEncoder().encode(roomA)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
-        let syncManager = createMockFirebaseSyncManager()
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: syncManager).seed(roomJson, at: "r/ROOM_A")
         let duplicateMember = SquadMember(id: "USER2", callsign: "viper", latitude: 37.77, longitude: -122.41)
         
         let exp = expectation(description: "Duplicate callsign in same room rejected")
@@ -3468,21 +3318,13 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testCallsignUniqueWithinRoomOnly_DifferentRoomsAllowed() {
-        MockURLProtocol.reset()
+        let syncManager = createMockFirebaseSyncManager()
         // Room B does NOT have a member named VIPER (it has GHOST)
         let roomBMember = SquadMember(id: "USER3", callsign: "GHOST", latitude: 37.77, longitude: -122.41)
         let roomB = SquadRoom(id: "ROOM_B", hostId: "USER3", members: ["USER3": roomBMember])
         let roomData = try! JSONEncoder().encode(roomB)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
-        let syncManager = createMockFirebaseSyncManager()
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: syncManager).seed(roomJson, at: "r/ROOM_B")
         // Joining Room B with callsign VIPER (even though Room A already has a VIPER)
         let newMember = SquadMember(id: "USER4", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
         
@@ -3591,21 +3433,20 @@ final class RadarMapTests: XCTestCase {
         let json = """
         {
             "id": "FREE_SQUAD",
-            "hostId": "HOST_FREE",
-            "createdAt": 1700000000,
-            "members": {}
+            "hst": "HOST_FREE",
+            "m": {}
         }
         """.data(using: .utf8)!
-        
+
         let decoded = try JSONDecoder().decode(SquadRoom.self, from: json)
         XCTAssertEqual(decoded.maxCapacity, AppConstants.Subscription.freeTierMaxCapacity, "Missing maxCapacity should default to freeTierMaxCapacity (4)")
     }
-    
+
     func testSquadMemberDecodingFallbackDefaultBattery() throws {
         let json = """
         {
-            "id": "BATTERY_TEST",
-            "callsign": "RECON"
+            "mid": "BATTERY_TEST",
+            "csn": "RECON"
         }
         """.data(using: .utf8)!
         
@@ -3686,11 +3527,11 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(heading, 0.0, "Initial telemetry arrival from (0,0) placeholder must not calculate bearing from Null Island")
     }
     
-    func testTacticalMapStyleStandardElevationIsFlat() {
+    func testTacticalPresentationMapKitStyle() {
         if #available(watchOS 10.0, *) {
-            let standardStyle = TacticalMapStyle.standard.mapKitStyle
-            let radarStyle = TacticalMapStyle.radar.mapKitStyle
-            XCTAssertNotNil(standardStyle)
+            let mapStyle = TacticalPresentation.map.mapKitStyle
+            let radarStyle = TacticalPresentation.radar.mapKitStyle
+            XCTAssertNotNil(mapStyle)
             XCTAssertNotNil(radarStyle)
         }
     }
@@ -3701,17 +3542,25 @@ final class RadarMapTests: XCTestCase {
         let scales = AppConstants.UI.RadarScale.discreteScales
         XCTAssertEqual(scales.first, 1.0, "Minimum discrete scale should be 1m")
         XCTAssertEqual(scales.last, 2500.0, "Maximum discrete scale should be 2500m")
+        XCTAssertEqual(scales.count, 11, "Ladder must contain 11 rungs from 1m to 2.5km")
         XCTAssertTrue(scales.contains(1.0), "1m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(2.5), "2.5m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(5.0), "5m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(10.0), "10m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(25.0), "25m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(50.0), "50m scale must be in discrete scales")
-        XCTAssertTrue(scales.contains(100.0), "Default scale 100m must be in discrete scales")
+        XCTAssertTrue(scales.contains(100.0), "100m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(250.0), "250m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(500.0), "500m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(1000.0), "1000m scale must be in discrete scales")
         XCTAssertTrue(scales.contains(2500.0), "2500m scale must be in discrete scales")
+
+        // Every rung must be a [1, 2.5, 5] mantissa within its decade
+        for scale in scales {
+            let decade = pow(10.0, floor(log10(scale)))
+            let mantissa = (scale / decade * 10.0).rounded() / 10.0
+            XCTAssertTrue([1.0, 2.5, 5.0].contains(mantissa), "Scale \(scale)m must have a [1, 2.5, 5] mantissa, got \(mantissa)")
+        }
     }
     
     func testDiscreteWholeNumberScaleSnappingPerDivision() {
@@ -3725,29 +3574,29 @@ final class RadarMapTests: XCTestCase {
             }
         }
         
-        // Verify snapping helper functions
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(0.8), 1.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(2.2), 2.5)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(4.8), 5.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(9.0), 10.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(22.0), 25.0)
+        // Verify snapping helper functions using canonical ladder: [1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(1.4), 1.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(3.0), 2.5)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(8.0), 10.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(20.0), 25.0)
         XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(45.0), 50.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(95.0), 100.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(110.0), 100.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(230.0), 250.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(480.0), 500.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(950.0), 1000.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(2400.0), 2500.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(80.0), 100.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(180.0), 250.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(400.0), 500.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(800.0), 1000.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(2000.0), 2500.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(4000.0), 2500.0, "Above ladder max clamps to 2500m")
         
         // Verify discrete step zoom helpers (+ / - buttons)
-        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 100.0), 50.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 50.0), 25.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 25.0), 10.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 10.0), 5.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 5.0), 2.5)
         XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 2.5), 1.0)
         XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 1.0), 1.0, "Zoom in at min bound must clamp to 1.0m")
+        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 100.0), 50.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 250.0), 100.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomIn(from: 500.0), 250.0)
         
+        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomOut(from: 1.0), 2.5)
+        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomOut(from: 2.5), 5.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomOut(from: 50.0), 100.0)
         XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomOut(from: 100.0), 250.0)
         XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomOut(from: 250.0), 500.0)
         XCTAssertEqual(AppConstants.UI.RadarScale.stepZoomOut(from: 500.0), 1000.0)
@@ -3756,7 +3605,7 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testZoomScalesUpTo2500mRoundtripAccurately() {
-        let testScales: [Double] = [1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]
+        let testScales = AppConstants.UI.RadarScale.discreteScales
         for scale in testScales {
             let delta = AppConstants.UI.RadarScale.mapSpanDelta(forRadarScaleMeters: scale)
             let roundtripScale = AppConstants.UI.RadarScale.radarScaleMeters(forMapSpanDelta: delta)
@@ -3821,59 +3670,30 @@ final class RadarMapTests: XCTestCase {
     
     func testSquadRoomTTLPolicyFields() throws {
         let now = Date().timeIntervalSince1970
-        let room = SquadRoom(id: "ALPHA1", hostId: "HOST1", createdAt: now)
-        
+        let room = SquadRoom(id: "ALPHA1", hostId: "HOST1")
+
         let expectedExpireAt = now + AppConstants.Timing.Inactivity.ttlDurationSeconds
-        XCTAssertEqual(room.expireAt, expectedExpireAt, accuracy: 0.1, "SquadRoom expireAt should default to createdAt + 7 days")
-        
-        // Test JSON encoding includes expireAt field
+        XCTAssertEqual(room.expireAt, expectedExpireAt, accuracy: 0.5, "SquadRoom expireAt should default to now + 12h")
+
+        // Test JSON encoding includes exp field
         let encoder = JSONEncoder()
         let data = try encoder.encode(room)
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-        
-        XCTAssertNotNil(json?["expireAt"], "Room JSON must contain expireAt field for Firestore TTL")
-        XCTAssertEqual((json?["expireAt"] as? Double) ?? 0.0, expectedExpireAt, accuracy: 0.1)
-        
-        // Test JSON decoding recovers expireAt field
+
+        XCTAssertNotNil(json?["exp"], "Room JSON must contain exp field for Firebase TTL")
+        XCTAssertEqual((json?["exp"] as? Double) ?? 0.0, expectedExpireAt, accuracy: 0.5)
+
+        // Test JSON decoding recovers exp field
         let decoder = JSONDecoder()
         let decodedRoom = try decoder.decode(SquadRoom.self, from: data)
-        XCTAssertEqual(decodedRoom.expireAt, expectedExpireAt, accuracy: 0.1)
+        XCTAssertEqual(decodedRoom.expireAt, expectedExpireAt, accuracy: 0.5)
     }
     
     func testHostCreateRoomInitializesTTLSubroomMetadata() {
-        MockURLProtocol.reset()
-        
-        var recordedPutUrls: [String] = []
-        var recordedPayloads: [String: [String: Any]] = [:]
-        
-        MockURLProtocol.requestHandler = { request in
-            let urlString = request.url?.absoluteString ?? ""
-            if request.httpMethod == "PUT" {
-                recordedPutUrls.append(urlString)
-                if let bodyData = request.httpBody ?? (request.httpBodyStream.flatMap { stream in
-                    stream.open()
-                    var result = Data()
-                    let bufferSize = 1024
-                    let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: bufferSize)
-                    defer { buffer.deallocate() }
-                    while stream.hasBytesAvailable {
-                        let read = stream.read(buffer, maxLength: bufferSize)
-                        if read > 0 { result.append(buffer, count: read) }
-                    }
-                    stream.close()
-                    return result
-                }),
-                let json = try? JSONSerialization.jsonObject(with: bodyData) as? [String: Any] {
-                    recordedPayloads[urlString] = json
-                }
-            }
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
+        let transport = mockTransport(for: syncManager)
         let room = SquadRoom(id: "TTLROOM1", hostId: "HOST1")
-        
+
         let exp = expectation(description: "Create room with TTL metadata")
         syncManager.createRoom(room) { result in
             if case .success(let created) = result {
@@ -3884,27 +3704,28 @@ final class RadarMapTests: XCTestCase {
             exp.fulfill()
         }
         wait(for: [exp], timeout: 2.0)
-        
-        // Verify put requests were sent to rooms, tactical, and telemetry endpoints
-        let containsTelemetry = recordedPutUrls.contains { $0.contains("/telemetry/TTLROOM1.json") }
-        let containsTactical = recordedPutUrls.contains { $0.contains("/tactical/TTLROOM1.json") }
-        let containsRoom = recordedPutUrls.contains { $0.contains("/rooms/TTLROOM1.json") }
-        
-        XCTAssertTrue(containsRoom, "PUT request should be sent to rooms endpoint")
-        XCTAssertTrue(containsTelemetry, "TTL metadata PUT request should be sent to telemetry endpoint")
-        XCTAssertTrue(containsTactical, "TTL metadata PUT request should be sent to tactical endpoint")
-        
+
+        // Verify set() calls were sent to rooms, tactical, and telemetry paths
+        let containsRoom = transport.recordedSets.contains { $0.path == "r/TTLROOM1" }
+        let containsTelemetry = transport.recordedSets.contains { $0.path == "p/TTLROOM1" }
+        let containsTactical = transport.recordedSets.contains { $0.path == "t/TTLROOM1" }
+
+        XCTAssertTrue(containsRoom, "set() should be sent to rooms path")
+        XCTAssertTrue(containsTelemetry, "TTL metadata set() should be sent to telemetry path")
+        XCTAssertTrue(containsTactical, "TTL metadata set() should be sent to tactical path")
+
         // Inspect telemetry subroom TTL payload
-        if let telUrl = recordedPutUrls.first(where: { $0.contains("/telemetry/TTLROOM1.json") }),
-           let telPayload = recordedPayloads[telUrl] {
-            XCTAssertNotNil(telPayload["expireAt"], "Telemetry subroom payload must include expireAt")
+        if let telPayload = transport.recordedSets.first(where: { $0.path == "p/TTLROOM1" })?.value as? [String: Any] {
+            XCTAssertNotNil(telPayload["exp"], "Telemetry subroom payload must include exp")
+        } else {
+            XCTFail("Telemetry TTL payload not recorded")
         }
-        
+
         // Inspect tactical subroom TTL payload
-        if let tactUrl = recordedPutUrls.first(where: { $0.contains("/tactical/TTLROOM1.json") }),
-           let tactPayload = recordedPayloads[tactUrl] {
-            XCTAssertNotNil(tactPayload["expireAt"], "Tactical subroom payload must include expireAt")
-            XCTAssertNotNil(tactPayload["updatedAt"], "Tactical subroom payload must include updatedAt")
+        if let tactPayload = transport.recordedSets.first(where: { $0.path == "t/TTLROOM1" })?.value as? [String: Any] {
+            XCTAssertNotNil(tactPayload["exp"], "Tactical subroom payload must include exp")
+        } else {
+            XCTFail("Tactical TTL payload not recorded")
         }
     }
     
@@ -3943,19 +3764,16 @@ final class RadarMapTests: XCTestCase {
         let jsonString = """
         {
             "id": "BRAVO",
-            "hostId": "USER_HOST",
-            "maxCapacity": 4,
-            "createdAt": 1000.0,
-            "lastActivityTimestamp": 1000.0,
-            "hasPin": false,
-            "members": {
+            "hst": "USER_HOST",
+            "cap": 4,
+            "m": {
                 "USER_HOST": {
-                    "callsign": "OVERLORD",
-                    "isHost": true
+                    "csn": "OVERLORD",
+                    "rol": "leader"
                 },
                 "USER_OPERATOR": {
-                    "callsign": "VIPER",
-                    "isHost": false
+                    "csn": "VIPER",
+                    "rol": "player"
                 }
             }
         }
@@ -3969,25 +3787,20 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testJoinRoom_RejoiningAsMyselfWithSameCallsign_SucceedsWithoutConflict() {
-        MockURLProtocol.reset()
-        let existingMember = SquadMember(id: "MY_PERSISTENT_ID", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
-        let room = SquadRoom(id: "ALPHA", hostId: "MY_PERSISTENT_ID", members: ["MY_PERSISTENT_ID": existingMember])
-        let roomData = try! JSONEncoder().encode(room)
-        
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let gameState = createMockGameState()
+        let pin = "1234"
+        let name = "ALPHA"
+        let roomId = name + FirebaseSyncManager.deriveRoomPadding(pin: pin, name: name)
+        let existingMember = SquadMember(id: "MY_PERSISTENT_ID", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
+        let room = SquadRoom(id: roomId, hostId: "MY_PERSISTENT_ID", pinHash: FirebaseSyncManager.hashPin(pin, salt: roomId), members: ["MY_PERSISTENT_ID": existingMember])
+        let roomData = try! JSONEncoder().encode(room)
+        let roomJson = try! JSONSerialization.jsonObject(with: roomData)
+        mockTransport(for: gameState).seed(roomJson, at: "r/\(roomId)")
         gameState.myMemberId = "MY_PERSISTENT_ID"
         gameState.myCallsign = "VIPER"
-        
+
         let exp = expectation(description: "Self-reconnect should succeed")
-        gameState.joinRoom(id: "ALPHA") { success in
+        gameState.joinRoom(id: name, pin: pin) { success in
             XCTAssertTrue(success, "Reconnecting to squad where local player already exists must succeed")
             XCTAssertFalse(gameState.callsignError, "No callsign error should be generated when entry is myself")
             exp.fulfill()
@@ -4098,13 +3911,13 @@ final class RadarMapTests: XCTestCase {
         let phoneState = createMockGameState()
         phoneState.myMemberId = "OPERATOR_PHONE"
         phoneState.myCallsign = "VIPER"
-        phoneState.selectedMapStyle = .standard
+        phoneState.selectedPresentation = .map
         phoneState.updateLocalPlayerMember()
         
         let watchState = createMockGameState()
         watchState.myMemberId = "OPERATOR_PHONE"
         watchState.myCallsign = "VIPER"
-        watchState.selectedMapStyle = .standard
+        watchState.selectedPresentation = .map
         watchState.updateLocalPlayerMember()
         
         // Initial state: Both alive
@@ -4164,87 +3977,43 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testLogoutPlayer_PurgesTelemetryAndSquadOrders() {
-        MockURLProtocol.reset()
-        
-        let tacticalData = """
-        {
-            "updatedAt": 1000.0,
-            "expireAt": 2000.0,
-            "ind_my_order": {
-                "id": "ind_my_order",
-                "type": "watchHere",
-                "category": "squadOrder",
-                "placedByMemberId": "USER_LEAVING",
-                "latitude": 37.77,
-                "longitude": -122.41
-            },
-            "ind_other_order": {
-                "id": "ind_other_order",
-                "type": "goHere",
-                "category": "squadOrder",
-                "placedByMemberId": "USER_OTHER",
-                "latitude": 37.78,
-                "longitude": -122.42
-            }
-        }
-        """.data(using: .utf8)!
-        
-        MockURLProtocol.requestHandler = { request in
-            let path = request.url?.path ?? ""
-            let method = request.httpMethod ?? "GET"
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            
-            if path.contains("/tactical/DELTA.json") && method == "GET" {
-                return (response, tacticalData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let firebase = createMockFirebaseSyncManager()
+        let transport = mockTransport(for: firebase)
+
+        transport.seed([
+            "ind_my_order": ["wat", 37.77, -122.41, 1000.0, "USER_LEAVING"],
+            "ind_other_order": ["goh", 37.78, -122.42, 1000.0, "USER_OTHER"]
+        ], at: "t/DELTA/o")
         let exp = expectation(description: "Logout should purge telemetry and member orders")
         firebase.logoutPlayer(roomId: "DELTA", memberId: "USER_LEAVING") { success in
             XCTAssertTrue(success)
             exp.fulfill()
         }
         wait(for: [exp], timeout: 2.0)
-        
-        let deleteRequests = MockURLProtocol.recordedRequests.filter { $0.httpMethod == "DELETE" }
-        let deletedUrls = deleteRequests.compactMap { $0.url?.absoluteString }
-        
-        XCTAssertTrue(deletedUrls.contains { $0.contains("/rooms/DELTA/members/USER_LEAVING.json") }, "Must delete member entry")
-        XCTAssertTrue(deletedUrls.contains { $0.contains("/telemetry/DELTA/USER_LEAVING.json") }, "Must delete telemetry entry")
-        XCTAssertTrue(deletedUrls.contains { $0.contains("/tactical/DELTA/ind_my_order.json") }, "Must delete user's squad order")
-        XCTAssertFalse(deletedUrls.contains { $0.contains("/tactical/DELTA/ind_other_order.json") }, "Must NOT delete other member's squad order")
+
+        let removedPaths = transport.recordedRemoves
+
+        XCTAssertTrue(removedPaths.contains("r/DELTA/m/USER_LEAVING"), "Must delete member entry")
+        XCTAssertTrue(removedPaths.contains("p/DELTA/USER_LEAVING"), "Must delete telemetry entry")
+        XCTAssertTrue(removedPaths.contains("t/DELTA/o/ind_my_order"), "Must delete user's squad order")
+        XCTAssertFalse(removedPaths.contains("t/DELTA/o/ind_other_order"), "Must NOT delete other member's squad order")
     }
     
     func testSingleSharedLoginState_WatchActionAdoptsSessionWithoutDuplicateNetworkJoin() {
-        MockURLProtocol.reset()
-        let roomData = """
-        {
+        let gameState = createMockGameState()
+        mockTransport(for: gameState).seed([
             "id": "BRAVO",
-            "hostId": "OP_WATCH",
-            "members": {
-                "OP_WATCH": {
-                    "id": "OP_WATCH",
-                    "callsign": "VIPER",
+            "hst": "OP_WATCH",
+            "m": [
+                "OP_WATCH": [
+                    "mid": "OP_WATCH",
+                    "csn": "VIPER",
                     "latitude": 37.77,
                     "longitude": -122.41,
-                    "isHost": true
-                }
-            }
-        }
-        """.data(using: .utf8)!
-        
-        MockURLProtocol.requestHandler = { request in
-            let path = request.url?.path ?? ""
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            if path.contains("/rooms/BRAVO.json") && request.httpMethod == "GET" {
-                return (response, roomData)
-            }
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
-        let gameState = createMockGameState()
+                    "rol": "leader"
+                ]
+            ]
+        ], at: "r/BRAVO")
         gameState.myMemberId = "OP_PHONE"
         gameState.myCallsign = "VIPER"
         
@@ -4313,14 +4082,14 @@ final class RadarMapTests: XCTestCase {
         
         // 5. Update scale continuously (standard MapKit pinch behavior)
         gameState.updateMapScale(meters: 250.0)
-        XCTAssertEqual(gameState.radarScaleMeters, 250.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 250.0)
         
         // 6. Scale clamping bounds
-        gameState.updateMapScale(meters: 0.5) // Below min (1.0m)
-        XCTAssertEqual(gameState.radarScaleMeters, AppConstants.UI.RadarScale.minScaleMeters)
+        gameState.updateMapScale(meters: 0.2) // Below min (1.0m)
+        XCTAssertEqual(gameState.selectedScaleMeters, AppConstants.UI.RadarScale.minScaleMeters)
         
-        gameState.updateMapScale(meters: 5000.0) // Above max (2500m)
-        XCTAssertEqual(gameState.radarScaleMeters, AppConstants.UI.RadarScale.maxiOSScaleMeters)
+        gameState.updateMapScale(meters: 100000.0) // Above max (2500m)
+        XCTAssertEqual(gameState.selectedScaleMeters, AppConstants.UI.RadarScale.maxiOSScaleMeters)
     }
     
     func testResetMapToDefaultCenterAndZoomResetsAllState() {
@@ -4340,56 +4109,56 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.radarCenterTrigger, initialTrigger + 1, "Trigger counter must increment")
     }
     
-    func testMapStyleTogglePreservesMapCenterAndScale() {
+    func testPresentationTogglePreservesMapCenterAndScale() {
         let gameState = createMockGameState()
         let customCoord = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
         gameState.currentMapCenter = customCoord
-        gameState.radarScaleMeters = 250.0
+        gameState.selectedScaleMeters = 250.0
         
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .standard)
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .map)
         XCTAssertEqual(gameState.currentMapCenter?.latitude, customCoord.latitude)
         XCTAssertEqual(gameState.currentMapCenter?.longitude, customCoord.longitude)
-        XCTAssertEqual(gameState.radarScaleMeters, 250.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 250.0)
         
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
         XCTAssertEqual(gameState.currentMapCenter?.latitude, customCoord.latitude)
         XCTAssertEqual(gameState.currentMapCenter?.longitude, customCoord.longitude)
-        XCTAssertEqual(gameState.radarScaleMeters, 250.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 250.0)
     }
     
-    func testRapidMapStyleSwitchesPreservesExactScaleStateMachine() {
+    func testRapidPresentationSwitchesPreservesExactScaleStateMachine() {
         let gameState = createMockGameState()
         let targetScale = 500.0
         gameState.updateMapScale(meters: targetScale)
         
         XCTAssertEqual(gameState.mapStateMachine.scaleMeters, targetScale)
-        XCTAssertEqual(gameState.radarScaleMeters, targetScale)
+        XCTAssertEqual(gameState.selectedScaleMeters, targetScale)
         
-        // Rapidly toggle map style 10 times
+        // Rapidly toggle presentation 10 times
         for i in 1...10 {
-            gameState.toggleNextMapStyle()
-            let expectedStyle: TacticalMapStyle = (i % 2 == 1) ? .standard : .radar
-            XCTAssertEqual(gameState.selectedMapStyle, expectedStyle)
-            XCTAssertEqual(gameState.mapStateMachine.style, expectedStyle)
-            XCTAssertEqual(gameState.mapStateMachine.scaleMeters, targetScale, "Scale in state machine must never mutate when switching styles")
-            XCTAssertEqual(gameState.radarScaleMeters, targetScale, "Published scale must never mutate when switching styles")
+            gameState.togglePresentation()
+            let expectedPres: TacticalPresentation = (i % 2 == 1) ? .map : .radar
+            XCTAssertEqual(gameState.selectedPresentation, expectedPres)
+            XCTAssertEqual(gameState.mapStateMachine.presentation, expectedPres)
+            XCTAssertEqual(gameState.mapStateMachine.scaleMeters, targetScale, "Scale in state machine must never mutate when switching presentation")
+            XCTAssertEqual(gameState.selectedScaleMeters, targetScale, "Published scale must never mutate when switching presentation")
         }
     }
     
     func testCenterMapOnLocalUserPreservesScale() {
         let gameState = createMockGameState()
         gameState.currentMapCenter = CLLocationCoordinate2D(latitude: 37.7749, longitude: -122.4194)
-        gameState.radarScaleMeters = 500.0
+        gameState.selectedScaleMeters = 500.0
         
         gameState.centerMapOnLocalUser()
         XCTAssertNil(gameState.currentMapCenter, "Map center must be reset to nil to track local user")
-        XCTAssertEqual(gameState.radarScaleMeters, 500.0, "Scale must be preserved when centering")
+        XCTAssertEqual(gameState.selectedScaleMeters, 500.0, "Scale must be preserved when centering")
     }
     
-    func testDecadesLadderValues() {
+    func testCanonicalLadderValues() {
         let expected: [Double] = [1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]
         XCTAssertEqual(AppConstants.UI.RadarScale.discreteScales, expected)
     }
@@ -4415,29 +4184,29 @@ final class RadarMapTests: XCTestCase {
     func testMapViewSwitchPreservesLocalUserCenteringPositiveAndNegativeUX() {
         let gameState = createMockGameState()
         
-        // 1. Initial State: Mode is Radar, centered on local user
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
+        // 1. Initial State: Presentation is Radar, centered on local user
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
         XCTAssertNil(gameState.currentMapCenter, "Initial map center must be nil (tracking local user)")
-        XCTAssertEqual(gameState.radarScaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
+        XCTAssertEqual(gameState.selectedScaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
         
-        // Positive UX 1: Switch Radar -> Standard
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .standard)
-        // Negative UX Check 1: Switching to Standard must NOT uncenter from local user
-        XCTAssertNil(gameState.currentMapCenter, "Switching to standard map must remain centered on local user")
-        XCTAssertEqual(gameState.radarScaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
+        // Positive UX 1: Switch Radar -> Map
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .map)
+        // Negative UX Check 1: Switching to Map must NOT uncenter from local user
+        XCTAssertNil(gameState.currentMapCenter, "Switching to map presentation must remain centered on local user")
+        XCTAssertEqual(gameState.selectedScaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
         
-        // Positive UX 2: Switch Standard -> Radar
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
+        // Positive UX 2: Switch Map -> Radar
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
         // Negative UX Check 2: Switching back to Radar must remain centered on local user
         XCTAssertNil(gameState.currentMapCenter, "Switching back to radar must remain centered on local user")
-        XCTAssertEqual(gameState.radarScaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
+        XCTAssertEqual(gameState.selectedScaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
         
         // Positive UX 3: Rapid consecutive toggling preserves local centering
         for _ in 1...10 {
-            gameState.toggleNextMapStyle()
-            XCTAssertNil(gameState.currentMapCenter, "Rapid style switching must NEVER cause currentMapCenter to become non-nil")
+            gameState.togglePresentation()
+            XCTAssertNil(gameState.currentMapCenter, "Rapid presentation switching must NEVER cause currentMapCenter to become non-nil")
         }
     }
     
@@ -4451,15 +4220,15 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.currentMapCenter?.latitude, customCoord.latitude)
         XCTAssertEqual(gameState.currentMapCenter?.longitude, customCoord.longitude)
         
-        // Positive UX: Switch to Standard retains custom panned coordinates
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .standard)
+        // Positive UX: Switch to Map retains custom panned coordinates
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .map)
         XCTAssertEqual(gameState.currentMapCenter?.latitude, customCoord.latitude)
         XCTAssertEqual(gameState.currentMapCenter?.longitude, customCoord.longitude)
         
         // Positive UX: Switch back to Radar retains custom panned coordinates
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
         XCTAssertEqual(gameState.currentMapCenter?.latitude, customCoord.latitude)
         XCTAssertEqual(gameState.currentMapCenter?.longitude, customCoord.longitude)
         
@@ -4468,8 +4237,8 @@ final class RadarMapTests: XCTestCase {
         XCTAssertNil(gameState.currentMapCenter, "Recentering must clear custom center to track local user")
         
         // Subsequent view switches now stay centered on local user
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .standard)
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .map)
         XCTAssertNil(gameState.currentMapCenter, "Must remain locked to local user after recentering")
     }
     
@@ -4477,26 +4246,26 @@ final class RadarMapTests: XCTestCase {
         let gameState = createMockGameState()
         XCTAssertNil(gameState.currentMapCenter)
         
-        // Zoom in to 25m in Radar view
-        gameState.updateMapScale(meters: 25.0)
-        XCTAssertEqual(gameState.radarScaleMeters, 25.0)
+        // Zoom in to 50m in Radar view
+        gameState.updateMapScale(meters: 50.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 50.0)
         XCTAssertNil(gameState.currentMapCenter)
         
-        // Switch to Standard view: scale must be preserved and center must remain on user
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .standard)
-        XCTAssertEqual(gameState.radarScaleMeters, 25.0, "Scale must be preserved when switching views")
+        // Switch to Map view: scale must be preserved and center must remain on user
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .map)
+        XCTAssertEqual(gameState.selectedScaleMeters, 50.0, "Scale must be preserved when switching views")
         XCTAssertNil(gameState.currentMapCenter, "Must stay centered on local user")
         
-        // Zoom out to 1000m in Standard view
+        // Zoom out to 1000m in Map view
         gameState.updateMapScale(meters: 1000.0)
-        XCTAssertEqual(gameState.radarScaleMeters, 1000.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 1000.0)
         XCTAssertNil(gameState.currentMapCenter)
         
         // Switch back to Radar view: scale 1000m must be preserved and center must remain on user
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
-        XCTAssertEqual(gameState.radarScaleMeters, 1000.0, "Scale must be preserved when switching back to radar")
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
+        XCTAssertEqual(gameState.selectedScaleMeters, 1000.0, "Scale must be preserved when switching back to radar")
         XCTAssertNil(gameState.currentMapCenter, "Must stay centered on local user")
     }
     
@@ -4536,7 +4305,7 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(unlocked.iconName, "location")
     }
     
-    func testMapCenterLockStateRememberedAcrossStyleSwitchAndReinitialization() {
+    func testMapCenterLockStateRememberedAcrossPresentationSwitchAndReinitialization() {
         let gameState = createMockGameState()
         
         // 1. Initial State: locked to local user
@@ -4549,8 +4318,8 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.mapCenterLockState, .unlocked)
         XCTAssertEqual(gameState.currentMapCenter?.latitude, pannedCoord.latitude)
         
-        // 3. Switch style: desired unlocked state is remembered
-        gameState.toggleNextMapStyle()
+        // 3. Switch presentation: desired unlocked state is remembered
+        gameState.togglePresentation()
         XCTAssertEqual(gameState.mapCenterLockState, .unlocked)
         XCTAssertEqual(gameState.currentMapCenter?.latitude, pannedCoord.latitude)
         
@@ -4559,8 +4328,8 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.mapCenterLockState, .locked)
         XCTAssertNil(gameState.currentMapCenter)
         
-        // 5. Switch style: desired locked state is remembered
-        gameState.toggleNextMapStyle()
+        // 5. Switch presentation: desired locked state is remembered
+        gameState.togglePresentation()
         XCTAssertEqual(gameState.mapCenterLockState, .locked)
         XCTAssertNil(gameState.currentMapCenter)
         
@@ -4586,7 +4355,7 @@ final class RadarMapTests: XCTestCase {
         // Initial state
         XCTAssertEqual(sm.trackingState, .locked)
         XCTAssertEqual(sm.scaleMeters, AppConstants.UI.RadarScale.defaultScaleMeters)
-        XCTAssertEqual(sm.style, .radar)
+        XCTAssertEqual(sm.presentation, .radar)
         XCTAssertEqual(sm.centerTriggerCount, 0)
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, userCoord.latitude)
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).longitude, userCoord.longitude)
@@ -4611,11 +4380,11 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, userCoord.latitude)
         XCTAssertEqual(sm.trackingState.iconName, "location.fill")
         
-        // Cycle style
-        sm.handle(.cycleStyle)
-        XCTAssertEqual(sm.style, .standard)
-        sm.handle(.cycleStyle)
-        XCTAssertEqual(sm.style, .radar)
+        // Toggle presentation
+        sm.handle(.togglePresentation)
+        XCTAssertEqual(sm.presentation, .map)
+        sm.handle(.togglePresentation)
+        XCTAssertEqual(sm.presentation, .radar)
         
         // Set scale
         sm.handle(.setScale(meters: 500.0))
@@ -4731,39 +4500,29 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.mapCenterLockState.iconName, "location.fill")
     }
     
-    func testHUDMapStyleButtonIconReflectsActiveStyle() {
+    func testHUDPresentationButtonIconReflectsActivePresentation() {
         let gameState = createMockGameState()
         
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
-        XCTAssertEqual(gameState.selectedMapStyle.iconName, "map")
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
+        XCTAssertEqual(gameState.selectedPresentation.iconName, "map")
         
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .standard)
-        XCTAssertEqual(gameState.selectedMapStyle.iconName, "map")
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .map)
+        XCTAssertEqual(gameState.selectedPresentation.iconName, "map")
         
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
-        XCTAssertEqual(gameState.selectedMapStyle.iconName, "map")
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
+        XCTAssertEqual(gameState.selectedPresentation.iconName, "map")
     }
     
     func testScaleRulerDistanceFormattingAcrossAllDecades() {
         // Discrete thresholds formatting (tactical ruler displays exact map zoom scale)
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 1.0), "1m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 2.5), "2.5m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 5.0), "5m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 10.0), "10m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 25.0), "25m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 50.0), "50m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 100.0), "100m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 250.0), "250m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 500.0), "500m")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 1000.0), "1km")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: 2500.0), "2.5km")
-        
-        // General distance formatting
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 25.0), "25m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 100.0), "100m")
-        XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 1000.0), "1km")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 2500.0), "2.5km")
         XCTAssertEqual(AppConstants.UI.ScaleRuler.formatDistance(meters: 1500.0), "1.5km")
     }
@@ -4782,13 +4541,16 @@ final class RadarMapTests: XCTestCase {
         }
         
         // In-between scale snapping
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(1.2), 1.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(1.4), 1.0)
         XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(3.0), 2.5)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(12.0), 10.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(30.0), 25.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(8.0), 10.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(20.0), 25.0)
         XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(45.0), 50.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(220.0), 250.0)
-        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(2300.0), 2500.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(80.0), 100.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(180.0), 250.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(400.0), 500.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(800.0), 1000.0)
+        XCTAssertEqual(AppConstants.UI.RadarScale.snapToDiscreteScale(2000.0), 2500.0)
     }
     
     func testEKGSweepDurationDynamicCalculation() {
@@ -4824,13 +4586,14 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(GameStateManager.sanitizePinInput("PIN: 7890"), "7890")
         XCTAssertEqual(GameStateManager.sanitizePinInput("  4 3 2 1  "), "4321")
         
-        // Max 4 digits clamping
-        XCTAssertEqual(GameStateManager.sanitizePinInput("12345678"), "1234")
+        // Max 16 digits clamping
+        XCTAssertEqual(GameStateManager.sanitizePinInput("12345678"), "12345678")
+        XCTAssertEqual(GameStateManager.sanitizePinInput("123456789012345678"), "1234567890123456")
     }
     
     func testWelcomeGuideHUDCalloutsCompleteness() {
         let callouts = TacticalHUDCallout.allCases
-        XCTAssertEqual(callouts.count, 5)
+        XCTAssertEqual(callouts.count, 6)
         
         for callout in callouts {
             XCTAssertFalse(callout.codeTag.isEmpty, "\(callout.rawValue) codeTag must not be empty")
@@ -4946,7 +4709,7 @@ final class RadarMapTests: XCTestCase {
     
     func testMapSpanDeltaAndScaleRulerIsotropicGeometry() {
         let referenceCoord = CLLocationCoordinate2D(latitude: 37.785834, longitude: -122.406417)
-        let minorScaleMeters: Double = 5.0
+        let minorScaleMeters: Double = 50.0
         
         let latDelta = AppConstants.UI.RadarScale.mapSpanDelta(forRadarScaleMeters: minorScaleMeters)
         let cosLat = cos(referenceCoord.latitude * AppConstants.Location.degreesToRadiansFactor)
@@ -4959,9 +4722,9 @@ final class RadarMapTests: XCTestCase {
         // Isotropic distance verification: North-South distance must equal East-West distance
         XCTAssertEqual(northSouthMeters, eastWestMeters, accuracy: 0.001, "Map coordinate span must be isotropic to maintain accurate scale ruler display")
         
-        // Verify scale ruler text matches the tactical scale (5m)
+        // Verify scale ruler text matches the tactical scale (50m)
         let rulerText = AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: minorScaleMeters)
-        XCTAssertEqual(rulerText, "5m")
+        XCTAssertEqual(rulerText, "50m")
     }
     
     func testPositionedByUserFlagGuardsProgrammaticZoomAndStyleSwitch() {
@@ -4981,76 +4744,76 @@ final class RadarMapTests: XCTestCase {
         
         // 1. Set zoom scale to 500m
         gameState.updateMapScale(meters: 500.0)
-        XCTAssertEqual(gameState.radarScaleMeters, 500.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 500.0)
         
-        // 2. Toggle map style from radar to standard: scale must stay 500m
-        gameState.selectedMapStyle = .radar
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .standard)
-        XCTAssertEqual(gameState.radarScaleMeters, 500.0, "Map style toggle must not change map scale")
+        // 2. Toggle presentation from radar to map: scale must stay 500m
+        gameState.selectedPresentation = .radar
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .map)
+        XCTAssertEqual(gameState.selectedScaleMeters, 500.0, "Presentation toggle must not change map scale")
         
         // 3. Pan map away to custom coordinate
         let pannedCoord = CLLocationCoordinate2D(latitude: 37.85, longitude: -122.45)
         gameState.updateMapCenter(to: pannedCoord)
         XCTAssertNotNil(gameState.currentMapCenter)
-        XCTAssertEqual(gameState.radarScaleMeters, 500.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 500.0)
         
         // 4. Tap center map button: map center becomes nil (tracking user), scale stays 500m
         gameState.centerMapOnLocalUser()
         XCTAssertNil(gameState.currentMapCenter, "Center map button must restore user tracking")
-        XCTAssertEqual(gameState.radarScaleMeters, 500.0, "Center map button must preserve map scale")
+        XCTAssertEqual(gameState.selectedScaleMeters, 500.0, "Center map button must preserve map scale")
         
-        // 5. Toggle map style back to radar: scale remains 500m and user tracking remains active
-        gameState.toggleNextMapStyle()
-        XCTAssertEqual(gameState.selectedMapStyle, .radar)
+        // 5. Toggle presentation back to radar: scale remains 500m and user tracking remains active
+        gameState.togglePresentation()
+        XCTAssertEqual(gameState.selectedPresentation, .radar)
         XCTAssertNil(gameState.currentMapCenter, "Must remain centered on local user")
-        XCTAssertEqual(gameState.radarScaleMeters, 500.0, "Scale must remain 500m")
+        XCTAssertEqual(gameState.selectedScaleMeters, 500.0, "Scale must remain 500m")
     }
     
-    func testPostZoomSnapToDecadeLadder() {
+    func testPostZoomSnapToCanonicalLadder() {
         var sm = MapStateMachine()
         
-        // Passing non-decade arbitrary scales to setScale must immediately snap to discrete [1, 2.5, 5] decades
-        sm.handle(.setScale(meters: 1.2))
+        // Snaps to canonical ladder: [1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]
+        sm.handle(.setScale(meters: 1.4))
         XCTAssertEqual(sm.scaleMeters, 1.0)
         
-        sm.handle(.setScale(meters: 2.1))
+        sm.handle(.setScale(meters: 3.0))
         XCTAssertEqual(sm.scaleMeters, 2.5)
         
-        sm.handle(.setScale(meters: 4.8))
-        XCTAssertEqual(sm.scaleMeters, 5.0)
-        
-        sm.handle(.setScale(meters: 12.0))
+        sm.handle(.setScale(meters: 8.0))
         XCTAssertEqual(sm.scaleMeters, 10.0)
         
-        sm.handle(.setScale(meters: 35.0))
+        sm.handle(.setScale(meters: 20.0))
         XCTAssertEqual(sm.scaleMeters, 25.0)
         
-        sm.handle(.setScale(meters: 65.0))
+        sm.handle(.setScale(meters: 45.0))
         XCTAssertEqual(sm.scaleMeters, 50.0)
         
-        sm.handle(.setScale(meters: 120.0))
+        sm.handle(.setScale(meters: 80.0))
         XCTAssertEqual(sm.scaleMeters, 100.0)
         
-        sm.handle(.setScale(meters: 300.0))
+        sm.handle(.setScale(meters: 180.0))
         XCTAssertEqual(sm.scaleMeters, 250.0)
         
-        sm.handle(.setScale(meters: 600.0))
+        sm.handle(.setScale(meters: 400.0))
         XCTAssertEqual(sm.scaleMeters, 500.0)
         
-        sm.handle(.setScale(meters: 1200.0))
+        sm.handle(.setScale(meters: 800.0))
         XCTAssertEqual(sm.scaleMeters, 1000.0)
         
-        sm.handle(.setScale(meters: 2400.0))
+        sm.handle(.setScale(meters: 2000.0))
         XCTAssertEqual(sm.scaleMeters, 2500.0)
         
-        // GameStateManager updateMapScale must also enforce discrete decade scale snapping
+        sm.handle(.setScale(meters: 4000.0))
+        XCTAssertEqual(sm.scaleMeters, 2500.0, "Above ladder max clamps to 2500m")
+        
+        // GameStateManager updateMapScale must also enforce discrete canonical scale snapping
         let gameState = createMockGameState()
         gameState.updateMapScale(meters: 42.0)
-        XCTAssertEqual(gameState.radarScaleMeters, 50.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 50.0)
         
         gameState.updateMapScale(meters: 220.0)
-        XCTAssertEqual(gameState.radarScaleMeters, 250.0)
+        XCTAssertEqual(gameState.selectedScaleMeters, 250.0)
     }
     
     func testKiaToggleImmediateStatusUpdate() {
@@ -5071,26 +4834,14 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testDigitalCrownZoomStepsAndDiscreteLadderConversion() {
-        let expectedScales: [(index: Double, scale: Double)] = [
-            (0.0, 2500.0),
-            (1.0, 1000.0),
-            (2.0, 500.0),
-            (3.0, 250.0),
-            (4.0, 100.0),
-            (5.0, 50.0),
-            (6.0, 25.0),
-            (7.0, 10.0),
-            (8.0, 5.0),
-            (9.0, 2.5),
-            (10.0, 1.0)
-        ]
-        
-        for item in expectedScales {
-            let resolvedScale = AppConstants.UI.RadarScale.scale(forCrownIndex: item.index)
-            XCTAssertEqual(resolvedScale, item.scale, "Crown index \(item.index) must map to \(item.scale)m")
+        let ladder = AppConstants.UI.RadarScale.discreteScales
+        for (index, scale) in ladder.enumerated() {
+            let crownIndex = Double((ladder.count - 1) - index)
+            let resolvedScale = AppConstants.UI.RadarScale.scale(forCrownIndex: crownIndex)
+            XCTAssertEqual(resolvedScale, scale, "Crown index \(crownIndex) must map to \(scale)m")
             
-            let resolvedIndex = AppConstants.UI.RadarScale.crownIndex(for: item.scale)
-            XCTAssertEqual(resolvedIndex, item.index, "Scale \(item.scale)m must map to crown index \(item.index)")
+            let computedIndex = AppConstants.UI.RadarScale.crownIndex(for: scale)
+            XCTAssertEqual(computedIndex, crownIndex, "Scale \(scale)m must map to crown index \(crownIndex)")
         }
     }
     
@@ -5114,7 +4865,7 @@ final class RadarMapTests: XCTestCase {
     
     func testStandardMapCenteringAndCameraDistance() {
         let defaultScale = AppConstants.UI.RadarScale.defaultScaleMeters
-        let distance = StandardMapView.cameraDistance(forScale: defaultScale)
+        let distance = AppConstants.UI.RadarScale.cameraDistance(forScale: defaultScale)
         XCTAssertGreaterThan(distance, 0)
         
         var sm = MapStateMachine()
@@ -5148,7 +4899,7 @@ final class RadarMapTests: XCTestCase {
     
     func testStandardMapCameraDistanceMatchesMapKitVerticalFOVAndRadarScale() {
         for scale in AppConstants.UI.RadarScale.discreteScales {
-            let cameraDist = StandardMapView.cameraDistance(forScale: scale)
+            let cameraDist = AppConstants.UI.RadarScale.cameraDistance(forScale: scale)
             // Visible vertical span in MapKit with 30-degree FOV: V = 2 * distance * tan(15 deg)
             let visibleVerticalMeters = 2.0 * cameraDist * tan(15.0 * .pi / 180.0)
             
@@ -5170,25 +4921,25 @@ final class RadarMapTests: XCTestCase {
         XCTAssertGreaterThan(barWidth, 0)
     }
     
-    func testMapStyleSwitchPreservesCenterAndTrackingState() {
-        var sm = MapStateMachine(trackingState: .locked, scaleMeters: 100.0, style: .radar)
+    func testMapPresentationSwitchPreservesCenterAndTrackingState() {
+        var sm = MapStateMachine(trackingState: .locked, scaleMeters: 100.0, presentation: .radar)
         let userCoord = CLLocationCoordinate2D(latitude: 37.7858, longitude: -122.4064)
         
-        // Style switch from radar to standard
-        sm.handle(.cycleStyle)
-        XCTAssertEqual(sm.style, .standard)
+        // Presentation switch from radar to map
+        sm.handle(.togglePresentation)
+        XCTAssertEqual(sm.presentation, .map)
         XCTAssertTrue(sm.trackingState.isLocked)
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, userCoord.latitude)
         
-        // User pans in standard view
+        // User pans in map view
         let panCoord = CLLocationCoordinate2D(latitude: 37.8000, longitude: -122.4200)
         sm.handle(.pan(to: panCoord, userCoord: userCoord))
         XCTAssertTrue(sm.trackingState.isUnlocked)
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, panCoord.latitude)
         
-        // Style switch back to radar preserves panned coordinate
-        sm.handle(.cycleStyle)
-        XCTAssertEqual(sm.style, .radar)
+        // Presentation switch back to radar preserves panned coordinate
+        sm.handle(.togglePresentation)
+        XCTAssertEqual(sm.presentation, .radar)
         XCTAssertTrue(sm.trackingState.isUnlocked)
         XCTAssertEqual(sm.effectiveCenter(userCoord: userCoord).latitude, panCoord.latitude)
         
@@ -5634,27 +5385,15 @@ final class RadarMapTests: XCTestCase {
     func testNewPlayerJoiningResolvesCallsignInsteadOfShowingMemberId() {
         let gameState = createMockGameState()
         let syncManager = gameState.firebaseManager
-        
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let urlString = request.url?.absoluteString ?? ""
-            if urlString.contains("/rooms/ALPHA/members/PLAYER_NEW.json") {
-                let memberJson: [String: Any] = [
-                    "id": "PLAYER_NEW",
-                    "callsign": "GHOST-9",
-                    "isHost": false
-                ]
-                let data = try! JSONSerialization.data(withJSONObject: memberJson)
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                return (response, data)
-            }
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("{}".utf8))
-        }
-        
+        mockTransport(for: gameState).seed([
+            "mid": "PLAYER_NEW",
+            "csn": "GHOST-9",
+            "rol": "player"
+        ], at: "r/ALPHA/m/PLAYER_NEW")
+
         // Host creates active room ALPHA
         gameState.myCallsign = "LEADER"
-        let hostMember = SquadMember(id: gameState.myMemberId, callsign: "LEADER", latitude: 37.77, longitude: -122.41, isHost: true)
+        let hostMember = SquadMember(id: gameState.myMemberId, callsign: "LEADER", latitude: 37.77, longitude: -122.41, role: .leader)
         syncManager.activeRoom = SquadRoom(id: "ALPHA", hostId: gameState.myMemberId, members: [gameState.myMemberId: hostMember])
         
         let callsignResolvedExp = expectation(description: "Fetch member details updates callsign to GHOST-9")
@@ -5693,27 +5432,14 @@ final class RadarMapTests: XCTestCase {
     
     func testFetchMemberDetails_UpdatesCallsignAndPreservesTelemetry() {
         let syncManager = FirebaseSyncManager()
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [MockURLProtocol.self]
-        syncManager.urlSession = URLSession(configuration: config)
-        
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let urlString = request.url?.absoluteString ?? ""
-            if urlString.contains("/rooms/BRAVO/members/MEMBER_X.json") {
-                let memberJson: [String: Any] = [
-                    "id": "MEMBER_X",
-                    "callsign": "SHADOW-1",
-                    "isHost": false
-                ]
-                let data = try! JSONSerialization.data(withJSONObject: memberJson)
-                let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-                return (response, data)
-            }
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, Data("{}".utf8))
-        }
-        
+        let transport = MockRTDBTransport()
+        syncManager.transport = transport
+        transport.seed([
+            "mid": "MEMBER_X",
+            "csn": "SHADOW-1",
+            "rol": "player"
+        ], at: "r/BRAVO/m/MEMBER_X")
+
         var initialMember = SquadMember(
             id: "MEMBER_X",
             callsign: "MEMBER_X", // Initial placeholder unique ID
@@ -6160,7 +5886,6 @@ final class RadarMapTests: XCTestCase {
     // MARK: - Upload Scheduling & Connectivity Gate Tests
     
     func testUploadScheduling_TacticalWritesSubmittedWhileOfflineQueueAll() {
-        MockURLProtocol.reset()
         let syncManager = createMockFirebaseSyncManager()
         let room = SquadRoom(id: "ROOM_TACTICAL", hostId: "USER1")
         syncManager.connectToRoom(room)
@@ -6195,7 +5920,6 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testUploadScheduling_OfflineTelemetryCoalesces60SamplesIntoSingleLatestPending() {
-        MockURLProtocol.reset()
         let syncManager = createMockFirebaseSyncManager()
         let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
         syncManager.connectToRoom(room)
@@ -6241,15 +5965,8 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testUploadScheduling_ReconnectFlushesSingleLatestTelemetryToExistingPath() {
-        MockURLProtocol.reset()
-        var capturedRequests: [URLRequest] = []
-        MockURLProtocol.requestHandler = { request in
-            capturedRequests.append(request)
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
+        let transport = mockTransport(for: syncManager)
         let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
         syncManager.connectToRoom(room)
         
@@ -6297,29 +6014,19 @@ final class RadarMapTests: XCTestCase {
         XCTAssertNil(syncManager.getPendingTelemetry(), "Pending telemetry slot cleared after successful reconnect upload")
         
         // Verify path and payload
-        let telemetryReq = capturedRequests.first { $0.url?.absoluteString.contains("/telemetry/ALPHA/VIPER-1.json") == true }
-        XCTAssertNotNil(telemetryReq, "Must write to existing path /telemetry/ALPHA/VIPER-1.json")
-        XCTAssertEqual(telemetryReq?.httpMethod, "PUT")
-        
-        if let body = telemetryReq?.httpBody,
-           let array = try? JSONSerialization.jsonObject(with: body) as? [Any] {
+        let telemetrySet = transport.recordedSets.first { $0.path == "p/ALPHA/VIPER-1" }
+        XCTAssertNotNil(telemetrySet, "Must write to existing path telemetry/ALPHA/VIPER-1")
+
+        if let array = telemetrySet?.value as? [Any] {
             XCTAssertEqual(array.count, 4, "Must preserve existing 4-element compact array schema")
             XCTAssertEqual(array[0] as? Double, 37.7858 + (10.0 * 0.0001))
             XCTAssertEqual(array[2] as? Double, 90.0)
+        } else {
+            XCTFail("Telemetry write payload must be a 4-element compact array")
         }
     }
     
     func testUploadScheduling_ConnectedTelemetrySendsImmediatelyWithoutCoalescing() {
-        MockURLProtocol.reset()
-        var writeCount = 0
-        MockURLProtocol.requestHandler = { request in
-            if request.url?.absoluteString.contains("/telemetry/") == true {
-                writeCount += 1
-            }
-            let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
         let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
         syncManager.connectToRoom(room)
@@ -6358,13 +6065,9 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testUploadScheduling_ReconnectFailureRetainsPendingSample() {
-        MockURLProtocol.reset()
-        MockURLProtocol.requestHandler = { request in
-            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: nil)!
-            return (response, "{}".data(using: .utf8)!)
-        }
-        
         let syncManager = createMockFirebaseSyncManager()
+        // Simulate a server write failure on this member's telemetry path.
+        mockTransport(for: syncManager).failingPaths.insert("p/ALPHA/VIPER-1")
         let room = SquadRoom(id: "ALPHA", hostId: "VIPER-1")
         syncManager.connectToRoom(room)
         

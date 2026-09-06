@@ -13,7 +13,7 @@ This directory contains Jupyter notebooks and Python scripts for simulating squa
 
 ## 🔑 Firebase Credentials (required)
 
-The simulator talks to Firebase via the **`firebase-admin`** Python SDK (not raw REST calls), using a service-account JSON key — a privileged server credential, separate from and not to be confused with the iOS app's `GoogleService-Info.plist`. This key **bypasses `database.rules.json` entirely**, which is expected for a trusted local script (see `CLOUD_DATA_MANAGEMENT.md` §6).
+The simulator talks to Firebase via the **`firebase-admin`** Python SDK (not raw REST calls), using a service-account JSON key — a privileged server credential, separate from and not to be confused with the iOS app's `GoogleService-Info.plist`. This key **bypasses `database.rules.json` entirely**, which is expected for a trusted local script (see [`CLOUD_DATA_MANAGEMENT.md`](../docs/CLOUD_DATA_MANAGEMENT.md#6-access-control--security-model)).
 
 1. Install the dependency: `pip install -r notebooks/requirements.txt`
 2. Download a service-account key from the [Firebase Console](https://console.firebase.google.com/) → radarmap-8adf0 project → Project Settings → Service Accounts → **Generate new private key**.
@@ -40,7 +40,7 @@ The following centralized constants from [`AppConstants.swift`](../RadarMap/AppC
 | **Delta Gating** | `minHeartRateDeltaBpm` | `12.0 BPM` | Heart rate swing threshold (`DeltaGating`) |
 | **Fallbacks** | Heartbeat Fallback Multiplier | `10.0 × T` ($10.0\text{s}$ at $1\text{Hz}$) | Maximum time without send when stationary (`ConstantBandwidth`) |
 | **Stale Timeout**| `staleTimeoutMultiplier` | `15.0 × T` ($15.0\text{s}$ at $1\text{Hz}$) | Timeout before remote player is flagged stale (`ConstantBandwidth`) |
-| **Room Key** | Room ID Lengths | `16` total / `4–12` name / `4–16` PIN | Mandatory PIN validation and 4-char suffix padding (`UI`) |
+| **Room Key** | Room ID Lengths | `16` total / `4–12` name / `4–16` PIN | Mandatory PIN validation and dynamic Crockford Base32 padding ($16 - \text{name.length}$) (`UI`) |
 | **Capacities** | Player Caps | `4` (Free) / `12` (Pro) | Room operator capacity limits (`Subscription`) |
 | **Indicators** | Indicator Caps | `0` (Free) / `20` (Pro) | Shared cap on enemy & environmental indicators (`Subscription`) |
 

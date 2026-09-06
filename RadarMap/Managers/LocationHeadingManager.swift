@@ -115,10 +115,16 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
         locationManager.headingFilter = AppConstants.Location.headingFilterDegrees
         locationManager.headingOrientation = .portrait
         #endif
+        #if os(iOS)
+        locationManager.allowsBackgroundLocationUpdates = true
+        locationManager.pausesLocationUpdatesAutomatically = false
+        #endif
     }
-    
+
     public func requestPermissions() {
-        #if os(watchOS) || os(iOS)
+        #if os(iOS)
+        locationManager.requestAlwaysAuthorization()
+        #elseif os(watchOS)
         locationManager.requestWhenInUseAuthorization()
         #else
         locationManager.requestAlwaysAuthorization()

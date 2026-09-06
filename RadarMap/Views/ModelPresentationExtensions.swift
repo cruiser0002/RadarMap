@@ -21,21 +21,16 @@ extension SquadMember {
     }
 }
 
-// MARK: - TacticalMapStyle Presentation Extensions
+// MARK: - TacticalPresentation Extensions
 
-extension TacticalMapStyle {
-    public var iconName: String {
-        return "map"
-    }
-    
-    @available(watchOS 10.0, *)
+extension TacticalPresentation {
+    @available(watchOS 10.0, iOS 17.0, *)
     public var mapKitStyle: MapStyle {
-        switch self {
-        case .standard:
-            return .standard(elevation: .flat, pointsOfInterest: .excludingAll)
-        case .radar:
-            return .standard(elevation: .flat, pointsOfInterest: .excludingAll)
-        }
+        .standard(elevation: .flat, pointsOfInterest: .excludingAll)
+    }
+
+    public var iconName: String {
+        "map"
     }
 }
 

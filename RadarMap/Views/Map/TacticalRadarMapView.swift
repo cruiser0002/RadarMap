@@ -47,17 +47,29 @@ public struct TacticalRadarMapView: View {
     }
     
     private var uiThemeColor: Color {
-        if gameState.selectedMapStyle == .radar {
+        if gameState.selectedPresentation == .radar {
             return radarThemeColor
         } else {
             return .primary
         }
     }
     
+    /// Snaps the current (freely pinch/pan-zoomed) map scale to the nearest discrete
+    /// `[1, 2.5, 5]` radar ladder value. Called on transition into `.radar` so the range
+    /// rings always land on a clean decade scale. Reads `liveMapScaleMeters` — the
+    /// standard map view's actual live camera scale — rather than the committed
+    /// `mapStateMachine.scaleMeters`, since standard map's native Apple-Maps-style zoom
+    /// never writes back into the committed scale while it's being freely zoomed.
+    private func snapScaleToRadarLadder() {
+        let snapped = AppConstants.UI.RadarScale.snapToDiscreteScale(gameState.liveMapScaleMeters)
+        gameState.sendMapAction(.setScale(meters: snapped))
+        gameState.liveMapScaleMeters = snapped
+    }
+
     public var body: some View {
         ZStack {
             // Standard Native MapKit View
-            if gameState.selectedMapStyle != .radar {
+            if gameState.selectedPresentation != .radar {
                 StandardMapView(
                     gameState: gameState,
                     lastCameraCenterCoordinate: $lastCameraCenterCoordinate,
@@ -70,9 +82,9 @@ public struct TacticalRadarMapView: View {
                 .edgesIgnoringSafeArea(.all)
                 .zIndex(0)
             }
-            
+
             // Concentric Range Ring Radar View
-            if gameState.selectedMapStyle == .radar {
+            if gameState.selectedPresentation == .radar {
                 RadarMapView()
                     .edgesIgnoringSafeArea(.all)
                     .zIndex(1)
@@ -227,17 +239,16 @@ public struct TacticalRadarMapView: View {
                                 .foregroundColor(uiThemeColor)
                         }
                         .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
-                        .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                        .contentShape(Rectangle())
+                        .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
                     .focusable(false)
-                    
+
                     Spacer()
-                    
+
                     // Bottom center: Fixed slot for both views (KIA on Radar, Ruler on MapKit)
                     Group {
-                        if gameState.selectedMapStyle == .radar {
+                        if gameState.selectedPresentation == .radar {
                             let themeColor = uiThemeColor
                             let buttonWidth: CGFloat = AppConstants.UI.HUD.rectButtonWidth
                             let buttonHeight: CGFloat = AppConstants.UI.HUD.rectButtonHeight
@@ -327,7 +338,7 @@ public struct TacticalRadarMapView: View {
                                     
                                     Rectangle()
                                         .fill(uiThemeColor.opacity(0.9))
-                                        .frame(width: AppConstants.UI.HUD.rulerNotchMinorWidth, height: AppConstants.UI.HUD.rulerNotchMinorHeight)
+                                        .frame(width: AppConstants.UI.HUD.rulerNotchMajorWidth, height: AppConstants.UI.HUD.rulerNotchMajorHeight)
                                     
                                     Rectangle()
                                         .fill(uiThemeColor.opacity(0.6))
@@ -365,16 +376,16 @@ public struct TacticalRadarMapView: View {
                     
                     Spacer()
                     
-                    // Bottom right: Map style cycling
+                    // Bottom right: Presentation switch (Map <-> Radar)
                     Button(action: {
-                        toggleNextMapStyle()
+                        togglePresentation()
                     }) {
                         ZStack {
                             Circle()
                                 .fill(Color.black.opacity(0.85))
                                 .shadow(color: .black.opacity(0.75), radius: 2.5)
                             
-                            Image(systemName: gameState.selectedMapStyle.iconName)
+                            Image(systemName: "map")
                                 .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .semibold))
                                 .foregroundColor(uiThemeColor)
                         }
@@ -395,10 +406,10 @@ public struct TacticalRadarMapView: View {
         .overlay(
             CrownInputView(
                 crownIndex: Binding(
-                    get: { AppConstants.UI.RadarScale.crownIndex(for: gameState.mapStateMachine.scaleMeters) },
+                    get: { AppConstants.UI.RadarScale.crownIndex(for: gameState.selectedScaleMeters) },
                     set: { newIndex in
                         let newScale = AppConstants.UI.RadarScale.scale(forCrownIndex: newIndex)
-                        if abs(gameState.mapStateMachine.scaleMeters - newScale) > 0.01 {
+                        if abs(gameState.selectedScaleMeters - newScale) > 0.01 {
                             gameState.sendMapAction(.setScale(meters: newScale))
                         }
                     }
@@ -429,6 +440,11 @@ public struct TacticalRadarMapView: View {
                     .environmentObject(gameState)
             }
         }
+        .onChange(of: gameState.selectedPresentation) { _, newPresentation in
+            if newPresentation == .radar {
+                snapScaleToRadarLadder()
+            }
+        }
         .onChange(of: gameState.showIndicatorMenuSheet) { _, isShowing in
             if isShowing {
                 showingIndicatorMenuSheet = true
@@ -446,6 +462,8 @@ public struct TacticalRadarMapView: View {
         .onChange(of: gameState.showPaywallSheet) { _, isShowing in
             if isShowing {
                 showingPaywallSheet = true
+            } else {
+                showingPaywallSheet = false
             }
         }
         .onChange(of: showingPaywallSheet) { _, isShowing in
@@ -531,15 +549,15 @@ public struct TacticalRadarMapView: View {
         #endif
     }
     
-    private func toggleNextMapStyle() {
-        gameState.toggleNextMapStyle()
+    private func togglePresentation() {
+        gameState.togglePresentation()
         #if os(watchOS)
         crownFocusTrigger += 1
         #endif
     }
     
     private func zoomIn() {
-        let currentScale = gameState.mapStateMachine.scaleMeters
+        let currentScale = gameState.selectedScaleMeters
         let targetScale = AppConstants.UI.RadarScale.stepZoomIn(from: currentScale)
         #if os(iOS)
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -550,7 +568,7 @@ public struct TacticalRadarMapView: View {
     }
     
     private func zoomOut() {
-        let currentScale = gameState.mapStateMachine.scaleMeters
+        let currentScale = gameState.selectedScaleMeters
         let targetScale = AppConstants.UI.RadarScale.stepZoomOut(from: currentScale)
         #if os(iOS)
         UIImpactFeedbackGenerator(style: .light).impactOccurred()

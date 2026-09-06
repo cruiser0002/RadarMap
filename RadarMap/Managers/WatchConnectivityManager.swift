@@ -364,8 +364,9 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                     self.publishApplicationContext()
                 }
                 
+                let snapshotToDeliver = self.localLS
                 DispatchQueue.main.async {
-                    self.onLowSpeedConvergenceStateChanged?(self.localLS)
+                    self.onLowSpeedConvergenceStateChanged?(snapshotToDeliver)
                 }
             }
         }

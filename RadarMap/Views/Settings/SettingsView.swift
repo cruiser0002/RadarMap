@@ -1,4 +1,8 @@
 import SwiftUI
+import CoreLocation
+#if canImport(HealthKit)
+import HealthKit
+#endif
 
 public struct SettingsView: View {
     @EnvironmentObject var gameState: GameStateManager
@@ -8,12 +12,14 @@ public struct SettingsView: View {
     @State private var callsignInput: String = ""
     @State private var squadName: String = ""
     @State private var squadPin: String = ""
-    
+    @State private var customDatabaseURL: String = ""
+
     // Focus states for auto-scrolling on keyboard appearance
     private enum FocusField: Hashable {
         case callsign
         case squadName
         case pin
+        case databaseURL
     }
     @FocusState private var focusedField: FocusField?
     
@@ -44,22 +50,36 @@ public struct SettingsView: View {
     private var isBusy: Bool {
         isConnected || gameState.isHosting || gameState.isInitiatingHost || gameState.isJoining
     }
+
+    private var nameLengthValid: Bool {
+        let len = squadName.trimmingCharacters(in: .whitespacesAndNewlines).count
+        return len >= AppConstants.UI.minRoomNameEntryLength && len <= AppConstants.UI.maxRoomNameEntryLength
+    }
+    private var pinLengthValid: Bool {
+        let len = squadPin.trimmingCharacters(in: .whitespacesAndNewlines).count
+        return len >= AppConstants.UI.minPinLength && len <= AppConstants.UI.maxPinLength
+    }
+    private var nameFieldInvalid: Bool { !squadName.isEmpty && !nameLengthValid }
+    private var pinFieldInvalid: Bool { !squadPin.isEmpty && !pinLengthValid }
+    private var canHostOrJoin: Bool { nameLengthValid && pinLengthValid }
     
     public var body: some View {
         ScrollViewReader { proxy in
             List {
                 Section {
+                    joinQRBox
+                    joinButton
+                    hostButton
                     callsignField
                     squadNameField
                     pinField
-                    hostButton
-                    joinButton
+                    databaseURLField
+                    locationUploadToggle
+                    healthDataUploadToggle
                 }
-                
+
                 radarColorSection
-                
-                privacyUploadSection
-                
+
                 paywallSection
                 
                 hudGuideSection
@@ -84,13 +104,17 @@ public struct SettingsView: View {
             .onAppear {
                 DispatchQueue.main.async {
                     callsignInput = gameState.myCallsign
-                    if let room = gameState.firebaseManager.activeRoom {
-                        squadName = room.name
-                    } else if squadName.isEmpty {
+                    // room.name is an alias for the room's Firebase id (the salted+padded
+                    // string) — never the plain typed name. savedRoomName is the one property
+                    // guaranteed to hold only what was actually typed, whether hosting or joined.
+                    if squadName.isEmpty {
                         squadName = gameState.savedRoomName
                     }
                     if squadPin.isEmpty {
                         squadPin = gameState.savedPin
+                    }
+                    if customDatabaseURL.isEmpty {
+                        customDatabaseURL = gameState.customDatabaseURL
                     }
                     if let error = gameState.errorMessage, !error.isEmpty {
                         currentErrorText = error
@@ -190,9 +214,9 @@ public struct SettingsView: View {
     
     @ViewBuilder
     private var squadNameField: some View {
-        TextField("Room Name", text: $squadName)
+        TextField("Room Name (4-12)", text: $squadName)
             .font(.system(size: 11))
-            .foregroundColor(gameState.squadNameError ? .red : (isBusy ? .gray : .primary))
+            .foregroundColor((gameState.squadNameError || nameFieldInvalid) ? .red : (isBusy ? .gray : .primary))
             .opacity(isBusy ? 0.6 : 1.0)
             .lineLimit(1)
             .submitLabel(.done)
@@ -203,30 +227,33 @@ public struct SettingsView: View {
             .focused($focusedField, equals: .squadName)
             .id(FocusField.squadName)
             .disabled(isBusy)
-            .listRowBackground(gameState.squadNameError ? Color.red.opacity(0.18) : nil)
+            .listRowBackground((gameState.squadNameError || nameFieldInvalid) ? Color.red.opacity(0.18) : nil)
             .onChange(of: squadName) { _, newValue in
                 gameState.squadNameError = false
-                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                gameState.savedRoomName = trimmed
+                let sanitized = GameStateManager.sanitizeRoomNameInput(newValue)
+                if squadName != sanitized {
+                    squadName = sanitized
+                }
+                gameState.savedRoomName = sanitized
             }
     }
-    
+
     @ViewBuilder
     private var pinField: some View {
-        TextField("PIN (4 digits, optional)", text: $squadPin)
+        TextField("PIN (4-16)", text: $squadPin)
             .font(.system(size: 11, weight: .bold, design: .monospaced))
-            .foregroundColor(gameState.pinError ? .red : (isBusy ? .gray : .primary))
+            .foregroundColor((gameState.pinError || pinFieldInvalid) ? .red : (isBusy ? .gray : .primary))
             .opacity(isBusy ? 0.6 : 1.0)
             .lineLimit(1)
             .submitLabel(.done)
             .textContentType(.oneTimeCode)
             #if os(iOS)
-            .keyboardType(.numberPad)
+            .keyboardType(.asciiCapable)
             #endif
             .focused($focusedField, equals: .pin)
             .id(FocusField.pin)
             .disabled(isBusy)
-            .listRowBackground(gameState.pinError ? Color.red.opacity(0.18) : nil)
+            .listRowBackground((gameState.pinError || pinFieldInvalid) ? Color.red.opacity(0.18) : nil)
             .onChange(of: squadPin) { _, newValue in
                 gameState.pinError = false
                 let sanitized = GameStateManager.sanitizePinInput(newValue)
@@ -237,6 +264,73 @@ public struct SettingsView: View {
             }
     }
     
+    @ViewBuilder
+    private var databaseURLField: some View {
+        // Optional: run this squad on your own Firebase project instead of the shared default.
+        // See the HUD Guide's "Bring Your Own Firebase" entry, or BRING_YOUR_OWN_FIREBASE.md.
+        DatabaseURLField(
+            value: $customDatabaseURL,
+            isEnabled: $gameState.isCustomDatabaseURLEnabled,
+            isDisabled: isBusy,
+            recentURLs: gameState.recentDatabaseURLs,
+            onEditingFinished: { gameState.syncConfigToWatchConnectivity() }
+        )
+        .id(FocusField.databaseURL)
+        .onChange(of: customDatabaseURL) { _, newValue in
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            gameState.customDatabaseURL = trimmed
+        }
+    }
+
+    @ViewBuilder
+    private var joinQRBox: some View {
+        // A scanned full join code fills the room name/PIN above too, since this field is shared
+        // by both the Host and Join actions here.
+        JoinQRBox(
+            // Shown once connected, whether hosting or joined as a client, so any member can
+            // hand teammates a no-friction join code — not just the host.
+            isHosting: isConnected,
+            // The plain typed room name only — never the derived (salted+padded) Firebase room
+            // id. Read from the textbox state, not gameState.savedRoomName: that property gets
+            // rewritten on every low-speed convergence sync tick (adoptCompanionSession compares
+            // the derived activeRoom.id against the plain config.roomName, which never match, so
+            // it fires on nearly every sync and stomps savedRoomName), which made the QR flicker
+            // on every upload/download. The textbox is the stable source of truth here, and a
+            // joiner re-derives the same padding locally from (name, pin) themselves.
+            roomId: squadName.isEmpty ? nil : squadName,
+            pin: squadPin,
+            // The raw setting (empty when hosting on the shared default), not the resolved
+            // firebaseManager.databaseURL — a default-project host's QR should never embed that
+            // project's actual URL. See JoinQRBox.swift.
+            databaseURL: customDatabaseURL,
+            isDisabled: isBusy && !isConnected
+        ) { payload in
+            // payload.r is the plain room name (see the roomId comment above) — safe to treat
+            // exactly like manual entry, including saving it into gameState.savedRoomName below.
+            squadName = payload.r
+            gameState.savedRoomName = payload.r
+            squadPin = payload.p ?? ""
+            gameState.savedPin = payload.p ?? ""
+            let trimmedURL = payload.d.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasURL = !trimmedURL.isEmpty
+            withAnimation {
+                gameState.isCustomDatabaseURLEnabled = hasURL
+            }
+            if hasURL {
+                customDatabaseURL = trimmedURL
+                gameState.customDatabaseURL = trimmedURL
+            } else {
+                customDatabaseURL = ""
+                gameState.customDatabaseURL = ""
+            }
+            // A scan is a batch fill of all 4 synced fields at once, equivalent from the user's
+            // perspective to typing each textbox and hitting enter — push it out over WCSession
+            // explicitly rather than relying on individual field triggers (customDatabaseURL in
+            // particular only syncs on the field losing focus, which never happens here).
+            gameState.syncConfigToWatchConnectivity()
+        }
+    }
+
     @ViewBuilder
     private var hostButton: some View {
         if isHost {
@@ -260,7 +354,7 @@ public struct SettingsView: View {
             Button(action: {
                 let name = squadName.trimmingCharacters(in: .whitespacesAndNewlines)
                 let pin = squadPin.trimmingCharacters(in: .whitespacesAndNewlines)
-                _ = gameState.hostRoom(name: name, pin: pin.isEmpty ? nil : pin)
+                _ = gameState.hostRoom(name: name, pin: pin)
             }) {
                 HStack(spacing: 6) {
                     Spacer()
@@ -284,10 +378,10 @@ public struct SettingsView: View {
                 .cornerRadius(6)
             }
             .buttonStyle(.plain)
-            .disabled(gameState.isJoining || gameState.isInitiatingHost || isClient)
+            .disabled(!canHostOrJoin || gameState.isJoining || gameState.isInitiatingHost || isClient)
         }
     }
-    
+
     @ViewBuilder
     private var joinButton: some View {
         if isClient {
@@ -311,7 +405,8 @@ public struct SettingsView: View {
             Button(action: {
                 let name = squadName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
                 let pin = squadPin.trimmingCharacters(in: .whitespacesAndNewlines)
-                gameState.joinRoom(id: name, name: name, pin: pin.isEmpty ? nil : pin)
+                let dbURL = customDatabaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                gameState.joinRoom(id: name, name: name, pin: pin, databaseURL: dbURL.isEmpty ? nil : dbURL)
             }) {
                 HStack(spacing: 6) {
                     Spacer()
@@ -335,7 +430,7 @@ public struct SettingsView: View {
                 .cornerRadius(6)
             }
             .buttonStyle(.plain)
-            .disabled(gameState.isInitiatingHost || gameState.isJoining || isHost)
+            .disabled(!canHostOrJoin || gameState.isInitiatingHost || gameState.isJoining || isHost)
         }
     }
     
@@ -359,34 +454,108 @@ public struct SettingsView: View {
     }
     
     @ViewBuilder
-    private var privacyUploadSection: some View {
-        Section(header: Text("Data Sharing").font(.system(size: 9))) {
-            Toggle(isOn: Binding(
-                get: { gameState.isUploadLocationEnabled },
-                set: { enabled in
-                    withAnimation {
-                        gameState.isUploadLocationEnabled = enabled
-                    }
-                }
-            )) {
-                HStack(spacing: 6) {
-                    Image(systemName: "location.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.green)
-                    Text("Upload Location")
-                        .font(.system(size: 11, weight: .semibold))
-                }
+    private var locationUploadToggle: some View {
+        Toggle(isOn: Binding(
+            get: {
+                gameState.isUploadLocationEnabled && permissionState(for: gameState.locationHeadingManager.authorizationStatus) == .granted
+            },
+            set: { enabled in
+                handlePermissionBackedToggle(
+                    enabled: enabled,
+                    currentState: permissionState(for: gameState.locationHeadingManager.authorizationStatus),
+                    requestAccess: { gameState.locationHeadingManager.requestPermissions() },
+                    setPreference: { gameState.isUploadLocationEnabled = $0 },
+                    deniedInstructions: "Location access was denied. On your Watch, open Settings \u{2192} Privacy & Security \u{2192} Location Services \u{2192} RadarMap, or manage it from the Watch app on your iPhone."
+                )
             }
-            
-            Toggle(isOn: $gameState.isUploadHeartRateEnabled) {
-                HStack(spacing: 6) {
-                    Image(systemName: "heart.fill")
-                        .font(.system(size: 10))
-                        .foregroundColor(.red)
-                    Text("Upload HR")
-                        .font(.system(size: 11, weight: .semibold))
-                }
+        )) {
+            HStack(spacing: 6) {
+                Image(systemName: "location.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.green)
+                Text("Location")
+                    .font(.system(size: 11, weight: .semibold))
             }
+        }
+        .foregroundColor(isConnected ? .gray : .primary)
+        .opacity(isConnected ? 0.6 : 1.0)
+        .disabled(isConnected)
+    }
+
+    @ViewBuilder
+    private var healthDataUploadToggle: some View {
+        Toggle(isOn: Binding(
+            get: {
+                gameState.isUploadHeartRateEnabled && permissionState(for: gameState.healthKitManager.authorizationStatus) == .granted
+            },
+            set: { enabled in
+                handlePermissionBackedToggle(
+                    enabled: enabled,
+                    currentState: permissionState(for: gameState.healthKitManager.authorizationStatus),
+                    requestAccess: { gameState.healthKitManager.requestAuthorization() },
+                    setPreference: { gameState.isUploadHeartRateEnabled = $0 },
+                    deniedInstructions: "Health access was denied. On your iPhone, open the Health app \u{2192} your profile icon \u{2192} Apps \u{2192} RadarMap, then enable Heart Rate and Workouts."
+                )
+            }
+        )) {
+            HStack(spacing: 6) {
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 10))
+                    .foregroundColor(.red)
+                Text("Health data")
+                    .font(.system(size: 11, weight: .semibold))
+            }
+        }
+        .foregroundColor(isConnected ? .gray : .primary)
+        .opacity(isConnected ? 0.6 : 1.0)
+        .disabled(isConnected)
+    }
+
+    private enum PermissionState {
+        case notDetermined
+        case deniedOrRestricted
+        case granted
+    }
+
+    private func permissionState(for status: CLAuthorizationStatus) -> PermissionState {
+        switch status {
+        case .notDetermined: return .notDetermined
+        case .denied, .restricted: return .deniedOrRestricted
+        default: return .granted
+        }
+    }
+
+    private func permissionState(for status: HKAuthorizationStatus) -> PermissionState {
+        switch status {
+        case .notDetermined: return .notDetermined
+        case .sharingDenied: return .deniedOrRestricted
+        default: return .granted
+        }
+    }
+
+    private func handlePermissionBackedToggle(
+        enabled: Bool,
+        currentState: PermissionState,
+        requestAccess: () -> Void,
+        setPreference: (Bool) -> Void,
+        deniedInstructions: String
+    ) {
+        guard enabled else {
+            withAnimation { setPreference(false) }
+            return
+        }
+        switch currentState {
+        case .notDetermined:
+            // Not yet decided — this is a genuine first-time OS prompt.
+            requestAccess()
+            withAnimation { setPreference(true) }
+        case .deniedOrRestricted:
+            // iOS/watchOS will never re-show the system dialog after a denial, so point the
+            // user at the one place they can actually flip it back on.
+            currentErrorText = deniedInstructions
+            showErrorAlert = true
+        case .granted:
+            withAnimation { setPreference(true) }
         }
     }
     
@@ -456,7 +625,7 @@ public struct SettingsView: View {
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                                 .foregroundColor(member.id == gameState.myMemberId ? .cyan : .white)
                             
-                            if member.isHost {
+                            if member.role == .leader {
                                 Text("HOST")
                                     .font(.system(size: 7, weight: .bold))
                                     .padding(.horizontal, 3)

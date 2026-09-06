@@ -29,17 +29,15 @@ public struct SquadLobbyView: View {
                             }
                             
                             HStack {
-                                Text("\(room.memberCount)/\(room.maxCapacity) Operators")
+                                Text("\(room.memberCount)/\(room.maxCapacity) Players")
                                     .font(.system(size: 9))
                                     .foregroundColor(.gray)
                                 
                                 Spacer()
                                 
-                                if room.hasPin {
-                                    Label("PIN", systemImage: "lock.fill")
-                                        .font(.system(size: 8, weight: .semibold))
-                                        .foregroundColor(.yellow)
-                                }
+                                Label("PIN", systemImage: "lock.fill")
+                                    .font(.system(size: 8, weight: .semibold))
+                                    .foregroundColor(.yellow)
                             }
                         }
                     }
@@ -52,7 +50,7 @@ public struct SquadLobbyView: View {
                             HStack {
                                 Image(systemName: "map.fill")
                                     .foregroundColor(.green)
-                                Text("Return to Tactical Map")
+                                Text("Return to Radar Map")
                                     .font(.system(size: 11, weight: .bold))
                                     .foregroundColor(.green)
                             }
@@ -69,7 +67,7 @@ public struct SquadLobbyView: View {
                                             .font(.system(size: 11, weight: .bold, design: .monospaced))
                                             .foregroundColor(member.id == gameState.myMemberId ? .cyan : .white)
                                         
-                                        if member.isHost {
+                                        if member.role == .leader {
                                             Text("HOST")
                                                 .font(.system(size: 7, weight: .bold))
                                                 .padding(.horizontal, 3)

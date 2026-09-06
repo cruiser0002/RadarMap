@@ -40,7 +40,8 @@ public struct MemberAnnotationView: View {
                     .frame(width: markers.deadXIconSize, height: markers.deadXIconSize)
             } else {
                 // Live Squad Indicator (SL vs Teammate Player)
-                if member.isHost {
+                switch member.role {
+                case .leader:
                     // Squad Leader (SL) Icon
                     ZStack {
                         SquadLeaderShape()
@@ -58,7 +59,7 @@ public struct MemberAnnotationView: View {
                             .frame(width: markers.pulseCoreSize, height: markers.pulseCoreSize)
                     }
                     .frame(width: markers.markerFrameSize, height: markers.markerFrameSize)
-                } else {
+                default: // .player, and any future role without a dedicated icon yet
                     // Regular Squad Player Icon
                     ZStack {
                         SquadPlayerShape()

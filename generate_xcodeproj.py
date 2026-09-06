@@ -51,7 +51,13 @@ def create_pbxproj():
     file_refs.append(f'\t\t{watch_info_plist_id} /* Info.plist */ = {{isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Resources/Info.plist"; sourceTree = "<group>"; }};')
     
     google_plist_id = "FF0000020000000000000001"
+    google_plist_build_id = "FF0000020000000000000002"
+    ios_google_plist_id = "2F0000020000000000000003"
+    ios_google_plist_build_id = "2F0000020000000000000002"
     file_refs.append(f'\t\t{google_plist_id} /* GoogleService-Info.plist */ = {{isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Resources/GoogleService-Info.plist"; sourceTree = "<group>"; }};')
+    file_refs.append(f'\t\t{ios_google_plist_id} /* GoogleService-Info.plist */ = {{isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "../RadarMap/Resources/GoogleService-Info.plist"; sourceTree = "<group>"; }};')
+    build_files.append(f'\t\t{google_plist_build_id} /* GoogleService-Info.plist in Resources */ = {{isa = PBXBuildFile; fileRef = {google_plist_id} /* GoogleService-Info.plist */; }};')
+    build_files.append(f'\t\t{ios_google_plist_build_id} /* GoogleService-Info.plist in Resources */ = {{isa = PBXBuildFile; fileRef = {ios_google_plist_id} /* GoogleService-Info.plist */; }};')
 
     assets_id = "FF0000030000000000000001"
     assets_build_id = "FF0000030000000000000002"
@@ -90,25 +96,146 @@ def create_pbxproj():
         f'\t\t\t\t{ios_swift_id} /* RadarMapCompanionApp.swift */,',
         f'\t\t\t\t{ios_info_plist_id} /* Info.plist */,',
         f'\t\t\t\t{ios_entitlements_id} /* RadarMapCompanion.entitlements */,',
+        f'\t\t\t\t{ios_google_plist_id} /* GoogleService-Info.plist */,',
     ]
 
     watch_sources_build_phase = [f'\t\t\t\t{watch_build_ids[fname]} /* {fname} in Sources */,' for fname, _ in watch_swift_files]
-    watch_resources_build_phase = [f'\t\t\t\t{assets_build_id} /* Assets.xcassets in Resources */,']
-    
+    watch_resources_build_phase = [
+        f'\t\t\t\t{assets_build_id} /* Assets.xcassets in Resources */,',
+        f'\t\t\t\t{google_plist_build_id} /* GoogleService-Info.plist in Resources */,',
+    ]
+
     ios_sources_build_phase = [f'\t\t\t\t{ios_swift_build_id} /* RadarMapCompanionApp.swift in Sources */,']
-    ios_resources_build_phase = [f'\t\t\t\t{ios_assets_build_id} /* Assets.xcassets in Resources */,']
+    ios_resources_build_phase = [
+        f'\t\t\t\t{ios_assets_build_id} /* Assets.xcassets in Resources */,',
+        f'\t\t\t\t{ios_google_plist_build_id} /* GoogleService-Info.plist in Resources */,',
+    ]
     for fname, _ in watch_swift_files:
         if fname != "RadarMapApp.swift":
             ios_sources_build_phase.append(f'\t\t\t\t{ios_watch_build_ids[fname]} /* {fname} in Sources */,')
 
     team_id = "2VUBR7QPFD"
-    
+
     build_num_file = os.path.join(project_dir, "build_number.txt")
     if os.path.exists(build_num_file):
         with open(build_num_file, "r") as bf:
             build_num = bf.read().strip() or "1"
     else:
         build_num = "1"
+
+    # Firebase (firebase-ios-sdk) Swift Package dependency.
+    # Linked into both native targets: "RadarMap Watch App" (the watchOS app) and "RadarMap"
+    # (despite the name, this is the iOS Companion app target — see PRODUCT_BUNDLE_IDENTIFIER
+    # com.radarmap.watch / INFOPLIST_FILE RadarMapCompanion/... below). Both targets compile
+    # nearly all of the same RadarMap/ source files (including FirebaseSyncManager.swift), so
+    # both need FirebaseCore (for FirebaseApp.configure()) and FirebaseDatabase (for the
+    # Realtime Database SDK). FirebaseDatabaseInternal explicitly links WatchKit for watchOS
+    # in firebase-ios-sdk's own Package.swift, confirming watchOS support for this product.
+    firebase_package_ref_id = "3A0000010000000000000001"
+    watch_firebase_core_dep_id = "3A0000020000000000000001"
+    watch_firebase_core_buildfile_id = "3A0000020000000000000002"
+    watch_firebase_database_dep_id = "3A0000030000000000000001"
+    watch_firebase_database_buildfile_id = "3A0000030000000000000002"
+    ios_firebase_core_dep_id = "3A0000040000000000000001"
+    ios_firebase_core_buildfile_id = "3A0000040000000000000002"
+    ios_firebase_database_dep_id = "3A0000050000000000000001"
+    ios_firebase_database_buildfile_id = "3A0000050000000000000002"
+
+    # QRCode (dagronf/QRCode) Swift Package dependency, linked into both native targets same as
+    # Firebase above. Used instead of raw CoreImage because CoreImage's QR generator filter isn't
+    # resolvable on watchOS in this project's toolchain (verified directly — even a plain
+    # `import CoreImage` fails to resolve for the watchOS target); QRCode ships its own
+    # pure-Swift generator for watchOS instead of relying on Core Image there. See
+    # RadarMap/Views/Room/QRCodeView.swift.
+    qrcode_package_ref_id = "3A0000060000000000000001"
+    watch_qrcode_dep_id = "3A0000070000000000000001"
+    watch_qrcode_buildfile_id = "3A0000070000000000000002"
+    ios_qrcode_dep_id = "3A0000080000000000000001"
+    ios_qrcode_buildfile_id = "3A0000080000000000000002"
+
+    build_files.append(f'\t\t{watch_firebase_core_buildfile_id} /* FirebaseCore in Frameworks */ = {{isa = PBXBuildFile; productRef = {watch_firebase_core_dep_id} /* FirebaseCore */; }};')
+    build_files.append(f'\t\t{watch_firebase_database_buildfile_id} /* FirebaseDatabase in Frameworks */ = {{isa = PBXBuildFile; productRef = {watch_firebase_database_dep_id} /* FirebaseDatabase */; }};')
+    build_files.append(f'\t\t{ios_firebase_core_buildfile_id} /* FirebaseCore in Frameworks */ = {{isa = PBXBuildFile; productRef = {ios_firebase_core_dep_id} /* FirebaseCore */; }};')
+    build_files.append(f'\t\t{ios_firebase_database_buildfile_id} /* FirebaseDatabase in Frameworks */ = {{isa = PBXBuildFile; productRef = {ios_firebase_database_dep_id} /* FirebaseDatabase */; }};')
+    build_files.append(f'\t\t{watch_qrcode_buildfile_id} /* QRCode in Frameworks */ = {{isa = PBXBuildFile; productRef = {watch_qrcode_dep_id} /* QRCode */; }};')
+    build_files.append(f'\t\t{ios_qrcode_buildfile_id} /* QRCode in Frameworks */ = {{isa = PBXBuildFile; productRef = {ios_qrcode_dep_id} /* QRCode */; }};')
+
+    watch_frameworks_files_block = chr(10).join([
+        f'\t\t\t\t{watch_firebase_core_buildfile_id} /* FirebaseCore in Frameworks */,',
+        f'\t\t\t\t{watch_firebase_database_buildfile_id} /* FirebaseDatabase in Frameworks */,',
+        f'\t\t\t\t{watch_qrcode_buildfile_id} /* QRCode in Frameworks */,',
+    ])
+    ios_frameworks_files_block = chr(10).join([
+        f'\t\t\t\t{ios_firebase_core_buildfile_id} /* FirebaseCore in Frameworks */,',
+        f'\t\t\t\t{ios_firebase_database_buildfile_id} /* FirebaseDatabase in Frameworks */,',
+        f'\t\t\t\t{ios_qrcode_buildfile_id} /* QRCode in Frameworks */,',
+    ])
+    watch_package_product_deps_block = chr(10).join([
+        f'\t\t\t\t{watch_firebase_core_dep_id} /* FirebaseCore */,',
+        f'\t\t\t\t{watch_firebase_database_dep_id} /* FirebaseDatabase */,',
+        f'\t\t\t\t{watch_qrcode_dep_id} /* QRCode */,',
+    ])
+    ios_package_product_deps_block = chr(10).join([
+        f'\t\t\t\t{ios_firebase_core_dep_id} /* FirebaseCore */,',
+        f'\t\t\t\t{ios_firebase_database_dep_id} /* FirebaseDatabase */,',
+        f'\t\t\t\t{ios_qrcode_dep_id} /* QRCode */,',
+    ])
+    package_reference_block = chr(10).join([
+        f'\t\t\t\t{firebase_package_ref_id} /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,',
+        f'\t\t\t\t{qrcode_package_ref_id} /* XCRemoteSwiftPackageReference "QRCode" */,',
+    ])
+
+    xcremote_swift_package_reference_section = f'''/* Begin XCRemoteSwiftPackageReference section */
+\t\t{firebase_package_ref_id} /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {{
+\t\t\tisa = XCRemoteSwiftPackageReference;
+\t\t\trepositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+\t\t\trequirement = {{
+\t\t\t\tkind = upToNextMajorVersion;
+\t\t\t\tminimumVersion = 12.0.0;
+\t\t\t}};
+\t\t}};
+\t\t{qrcode_package_ref_id} /* XCRemoteSwiftPackageReference "QRCode" */ = {{
+\t\t\tisa = XCRemoteSwiftPackageReference;
+\t\t\trepositoryURL = "https://github.com/dagronf/QRCode.git";
+\t\t\trequirement = {{
+\t\t\t\tkind = upToNextMajorVersion;
+\t\t\t\tminimumVersion = 20.0.0;
+\t\t\t}};
+\t\t}};
+/* End XCRemoteSwiftPackageReference section */'''
+
+    xcswift_package_product_dependency_section = f'''/* Begin XCSwiftPackageProductDependency section */
+\t\t{watch_firebase_core_dep_id} /* FirebaseCore */ = {{
+\t\t\tisa = XCSwiftPackageProductDependency;
+\t\t\tpackage = {firebase_package_ref_id} /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+\t\t\tproductName = FirebaseCore;
+\t\t}};
+\t\t{watch_firebase_database_dep_id} /* FirebaseDatabase */ = {{
+\t\t\tisa = XCSwiftPackageProductDependency;
+\t\t\tpackage = {firebase_package_ref_id} /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+\t\t\tproductName = FirebaseDatabase;
+\t\t}};
+\t\t{ios_firebase_core_dep_id} /* FirebaseCore */ = {{
+\t\t\tisa = XCSwiftPackageProductDependency;
+\t\t\tpackage = {firebase_package_ref_id} /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+\t\t\tproductName = FirebaseCore;
+\t\t}};
+\t\t{ios_firebase_database_dep_id} /* FirebaseDatabase */ = {{
+\t\t\tisa = XCSwiftPackageProductDependency;
+\t\t\tpackage = {firebase_package_ref_id} /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+\t\t\tproductName = FirebaseDatabase;
+\t\t}};
+\t\t{watch_qrcode_dep_id} /* QRCode */ = {{
+\t\t\tisa = XCSwiftPackageProductDependency;
+\t\t\tpackage = {qrcode_package_ref_id} /* XCRemoteSwiftPackageReference "QRCode" */;
+\t\t\tproductName = QRCode;
+\t\t}};
+\t\t{ios_qrcode_dep_id} /* QRCode */ = {{
+\t\t\tisa = XCSwiftPackageProductDependency;
+\t\t\tpackage = {qrcode_package_ref_id} /* XCRemoteSwiftPackageReference "QRCode" */;
+\t\t\tproductName = QRCode;
+\t\t}};
+/* End XCSwiftPackageProductDependency section */'''
 
     pbxproj_content = f"""// !$*UTF8*$!
 {{
@@ -155,6 +282,7 @@ def create_pbxproj():
 \t\t\tisa = PBXFrameworksBuildPhase;
 \t\t\tbuildActionMask = 2147483647;
 \t\t\tfiles = (
+{watch_frameworks_files_block}
 \t\t\t);
 \t\t\trunOnlyForDeploymentPostprocessing = 0;
 \t\t}};
@@ -162,6 +290,7 @@ def create_pbxproj():
 \t\t\tisa = PBXFrameworksBuildPhase;
 \t\t\tbuildActionMask = 2147483647;
 \t\t\tfiles = (
+{ios_frameworks_files_block}
 \t\t\t);
 \t\t\trunOnlyForDeploymentPostprocessing = 0;
 \t\t}};
@@ -220,6 +349,9 @@ def create_pbxproj():
 \t\t\t\t2A00000A0000000000000001 /* PBXTargetDependency */,
 \t\t\t);
 \t\t\tname = "RadarMap";
+\t\t\tpackageProductDependencies = (
+{ios_package_product_deps_block}
+\t\t\t);
 \t\t\tproductName = "RadarMap";
 \t\t\tproductReference = 2A0000010000000000000001 /* RadarMap.app */;
 \t\t\tproductType = "com.apple.product-type.application";
@@ -238,6 +370,9 @@ def create_pbxproj():
 \t\t\tdependencies = (
 \t\t\t);
 \t\t\tname = "RadarMap Watch App";
+\t\t\tpackageProductDependencies = (
+{watch_package_product_deps_block}
+\t\t\t);
 \t\t\tproductName = "RadarMap Watch App";
 \t\t\tproductReference = 1A0000010000000000000001 /* RadarMap Watch App.app */;
 \t\t\tproductType = "com.apple.product-type.application";
@@ -273,6 +408,9 @@ def create_pbxproj():
 \t\t\t\tBase,
 \t\t\t);
 \t\t\tmainGroup = 1A0000030000000000000001;
+\t\t\tpackageReferences = (
+{package_reference_block}
+\t\t\t);
 \t\t\tproductRefGroup = 1A0000050000000000000001 /* Products */;
 \t\t\tprojectDirPath = "";
 \t\t\tprojectRoot = "";
@@ -556,6 +694,10 @@ def create_pbxproj():
 \t\t\tdefaultConfigurationName = Release;
 \t\t}};
 /* End XCConfigurationList section */
+
+{xcremote_swift_package_reference_section}
+
+{xcswift_package_product_dependency_section}
 
 \t}};
 \trootObject = 1A0000090000000000000001 /* Project object */;

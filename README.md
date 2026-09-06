@@ -1,11 +1,11 @@
-# Radar Map: Your Milsim Companion (watchOS & iOS)
+# Radar Map: Tactical Radar & Field Companion (watchOS & iOS)
 
 [![watchOS 10.0+](https://img.shields.io/badge/watchOS-10.0%2B-black?style=flat&logo=apple)](https://developer.apple.com/watchos/)
 [![iOS 17.0+](https://img.shields.io/badge/iOS-17.0%2B-black?style=flat&logo=apple)](https://developer.apple.com/ios/)
 [![Swift 5.9](https://img.shields.io/badge/Swift-5.9-orange?style=flat&logo=swift)](https://swift.org)
 [![Xcode 15.0+](https://img.shields.io/badge/Xcode-15.0%2B-blue?style=flat&logo=xcode)](https://developer.apple.com/xcode/)
 
-**Radar Map** is a tactical companion application built with SwiftUI for watchOS and iOS, engineered for milsim (military simulation), airsoft, paintball, and outdoor tactical squad coordination.
+**Radar Map** is a tactical companion application built with SwiftUI for watchOS and iOS, engineered for airsoft, paintball, and outdoor field squad coordination.
 
 ---
 
@@ -14,38 +14,38 @@
 * 🛰️ **Dual-Presentation Tactical Display**:
   * **Map View**: Native MapKit integration with 60Hz/120Hz GPU-composited smooth user tracking, muted tactical cartography, and a live calibrated metric scale ruler.
   * **Radar View**: High-contrast, battery-optimized OLED vector radial display with 4 concentric range rings ($S, 2S, 3S, 4S$) and cardinal headings.
-  * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](TACTICAL_UI_SPECIFICATION.md) & [**`MAPKIT_EQUIVALENTS.md`**](MAPKIT_EQUIVALENTS.md)
-* 🧭 **Live Telemetry, Biometrics & KIA Reporting**:
+  * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md)
+* 🧭 **Live Telemetry, Biometrics & Tag Out Reporting**:
   * Continuous GPS coordinates with dynamic speed-weighted heading blending (Compass $\leftrightarrow$ GPS Course Over Ground).
   * Real-time HealthKit (`HKWorkoutSession`) heart rate streaming with biometric stress zones and optical PPG battery duty-cycling.
-  * One-touch KIA / Downed status reporting with visual cross-out indicators across the squad map.
-  * *Details:* [**`PRIVACY_AND_COMPLIANCE.md`**](PRIVACY_AND_COMPLIANCE.md)
+  * One-touch Tag Out / Downed status reporting with visual cross-out indicators across the squad map.
+  * *Details:* [**`PRIVACY_AND_COMPLIANCE.md`**](docs/PRIVACY_AND_COMPLIANCE.md)
 * ⚡ **WatchConnectivity Companion Synchronization**:
   * Immediate local rendering with persistent context staging in `WCSession`.
   * Dual-stream pipeline: high-speed stream for live sensor data (Phone GPS priority & Watch biometrics) and low-speed snapshot sync for markers, room lifecycle, and configuration.
   * Automatic network handover between paired iPhone and standalone Apple Watch.
-  * *Details:* [**`COMPANION_DATA_SYNC_MODEL.md`**](COMPANION_DATA_SYNC_MODEL.md)
+  * *Details:* [**`COMPANION_DATA_SYNC_MODEL.md`**](docs/COMPANION_DATA_SYNC_MODEL.md)
 * 📍 **Tactical Markers & Orders**:
   * Squad Leaders can deploy tactical objective points, orders (`watchHere`, `goHere`, `attackHere`, `defendHere`, `flag`), hostile unit classifications, and environmental hazards.
   * Hostile markers feature automated 5-minute linear decay to grayscale.
-  * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](TACTICAL_UI_SPECIFICATION.md)
+  * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md)
 * 🔍 **Discrete Decade Zoom Ladder**:
   * Digital Crown (watchOS) and pinch-to-zoom (iOS) navigation stepping through discrete $[1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]\text{m}$ decade scales.
   * Non-destructive centering preserving active zoom distance.
-  * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](TACTICAL_UI_SPECIFICATION.md)
+  * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md)
 * 🔄 **Predictive Netcode & Cloud Telemetry**:
   * Split upload scheduling: must-arrive queueing for tactical mutations; latest-only coalescing for high-frequency telemetry.
   * Dead-reckoning predictive delta gating ($3.5\text{m}$ error threshold) and remote player extrapolation smoothing.
   * Monotonic sequence numbers and timestamp watermarking to prevent out-of-order jitter.
-  * *Details:* [**`CLOUD_DATA_MANAGEMENT.md`**](CLOUD_DATA_MANAGEMENT.md) & [**`DEAD_RECKONING.md`**](DEAD_RECKONING.md)
+  * *Details:* [**`CLOUD_DATA_MANAGEMENT.md`**](docs/CLOUD_DATA_MANAGEMENT.md) & [**`DEAD_RECKONING.md`**](docs/DEAD_RECKONING.md)
 * 🌐 **Bring Your Own Firebase (BYO-Firebase)**:
   * Squad leaders can host private rooms on their own dedicated Google Firebase Realtime Database (100% free Spark plan) to isolate traffic from shared public room quotas.
   * Features camera Live Text OCR recognition, Lock protection, and instant teammate auto-configuration via Join QR codes.
-  * *Details:* [**`BRING_YOUR_OWN_FIREBASE.md`**](BRING_YOUR_OWN_FIREBASE.md)
+  * *Details:* [**`BRING_YOUR_OWN_FIREBASE.md`**](docs/BRING_YOUR_OWN_FIREBASE.md)
 * 💳 **RevenueCat Squad Leader Paywall**:
-  * Free tier supports squads of up to 4 operators with free participation in rooms of any size.
-  * $29.99 lifetime unlock enables squad hosting up to 12 operators and custom tactical marker placement.
-  * *Details:* [**`REVENUECAT_AND_STOREKIT_SETUP.md`**](REVENUECAT_AND_STOREKIT_SETUP.md)
+  * Free tier supports squads of up to 4 players with free participation in rooms of any size.
+  * $29.99 lifetime unlock enables squad hosting up to 12 players and custom tactical marker placement.
+  * *Details:* [**`REVENUECAT_AND_STOREKIT_SETUP.md`**](docs/REVENUECAT_AND_STOREKIT_SETUP.md)
 * 📖 **Interactive HUD Field Manual**:
   * Integrated in-app onboarding guide with interactive diagrams for hardware controls, tactical glyphs, and BYO-Firebase setup.
 
@@ -66,16 +66,16 @@ The application is parameterized by centralized constants in [`RadarMap/AppConst
 | **Dead Reckoning** | `maxPredictedPositionErrorMeters`| `3.5m` | Extrapolation error gate before transmitting GPS telemetry |
 | **Dead Reckoning** | `minHeartRateDeltaBpm` | `12.0 BPM` | Biometric gate threshold (passive when `heartRateDeltaGatingEnabled` = false) |
 | **Dead Reckoning** | Extrapolation Cadence | `1.0 Hz` | Cadence for locally recomputing remote squad positions |
-| **Bandwidth Scaling**| `playerThreshold` | `12` operators | Room player count ceiling before dynamic update rate reduction |
+| **Bandwidth Scaling**| `playerThreshold` | `12` players | Room player count ceiling before dynamic update rate reduction |
 | **Bandwidth Scaling**| Heartbeat & Stale Rates | `10 × T` / `15 × T` | Fallback refresh heartbeat ($10.0\text{s}$) and stale peer cutoff ($15.0\text{s}$) |
-| **Squad Capacities**| `freeTierMaxCapacity` / `proTierMaxCapacity` | `4` / `12` operators | Squad room host limits for Free vs Pro tiers |
+| **Squad Capacities**| `freeTierMaxCapacity` / `proTierMaxCapacity` | `4` / `12` players | Squad room host limits for Free vs Pro tiers |
 | **Monetization** | Lifetime Price / Product ID | `$29.99` / `com.radarmap.watch.pro` | One-time non-consumable Squad Leader lifetime unlock |
 | **Tactical Markers**| `freeTierMaxTacticalIndicators` / `pro` | `0` / `20` markers | Concurrent active enemy & environmental markers cap |
 | **Tactical Markers**| `enemyIndicatorFadeDurationSeconds` | `300.0s` (5 min) | Automatic fade-to-grayscale duration for enemy sightings |
 | **Room Identifiers**| Room ID / Entry Length | `16` total / `4–12` name | 4–12 char squad name + dynamic Crockford Base32 padding ($16 - \text{name.length}$) = fixed 16-char path key |
 | **PIN Validation** | `minPinLength` / `maxPinLength`| `4` min / `16` max | Mandatory join PIN validation limits |
 | **Biometrics** | Optical PPG Duty Cycle | `4.0s` active / `16.0s` sleep | 80% battery conservation duty cycling (`HealthKitManager`) |
-| **Biometrics** | `flatlineHeartRate` | `0.0 BPM` | KIA / Downed status indicator triggered via 1.2s hold gesture |
+| **Biometrics** | `flatlineHeartRate` | `0.0 BPM` | Tag Out / Downed status indicator triggered via 1.2s hold gesture |
 | **Networking** | `defaultDatabaseURL` | `https://radarmap-8adf0-default-rtdb.firebaseio.com` | Default fallback Google Firebase Realtime Database endpoint |
 | **Companion Sync** | `activeUntilLeaseDurationSeconds`| `5.0s` (`currentTime + 5s`)| WatchConnectivity foreground lease duration between Watch & Phone |
 
@@ -87,25 +87,30 @@ RadarMap adheres to strict zero-mock, real-time tactical synchronization standar
 * **No Fallback Data Sources**: Production targets consume data directly from authoritative sensors and streams; missing telemetry is surfaced via explicit UI states rather than masked with synthetic fallbacks.
 * **No Internal Identifier Leakage**: The UI never presents internal UUIDs or member hashes while callsigns or locations are resolving.
 
-For project generation, dual-target layout, and pull request testing standards, see [**`CONTRIBUTING.md`**](CONTRIBUTING.md).
+For project generation, dual-target layout, and pull request testing standards, see [**`CONTRIBUTING.md`**](docs/CONTRIBUTING.md).
 
 ---
 
-## 📚 Technical Architecture & Instructional Documents
+## 📚 Documentation
 
-All operational procedures, netcode specifications, and compliance rules are maintained in dedicated reference documents:
+All technical architecture specifications, netcode models, and setup guides are maintained under [`docs/`](docs/):
 
-### 📖 Instructional & Setup Guides
-* [**Bring Your Own Firebase Guide**](BRING_YOUR_OWN_FIREBASE.md): Step-by-step instructions for hosting rooms on your own free Google Firebase Realtime Database with camera Live Text OCR scanning and instant QR auto-onboarding for squadmates.
-* [**In-App Purchases & RevenueCat Setup**](REVENUECAT_AND_STOREKIT_SETUP.md): App Store Connect IAP setup, RevenueCat dashboard configuration, offerings, entitlements, and local Xcode StoreKit testing.
-* [**Privacy, Policy & App Store Compliance Standards**](PRIVACY_AND_COMPLIANCE.md): Complete guidelines for App Store review approval, HealthKit, background location, mandatory paywall EULA/Privacy links, permission lifecycles, and privacy policy generation.
-
-### ⚙️ Netcode, Synchronization & Architecture Specifications
-* [**Tactical UI & Radar Specification**](TACTICAL_UI_SPECIFICATION.md): Authoritative UI/UX specification covering Map and Radar presentations, discrete decade scale ladders, 60Hz native follow-me motion rules, and platform adapters.
-* [**Dead Reckoning & Predictive Delta Gating**](DEAD_RECKONING.md): Predictive delta compression, dual-sample velocity derivation, and local extrapolation for smooth remote player rendering.
-* [**Cloud Data Management Architecture**](CLOUD_DATA_MANAGEMENT.md): Cloud Data Matrix, delta gating, dead reckoning, late packet rejection, scheduled Cloud Functions garbage collection, and the RTDB schema reference (16-character PIN-derived room ID padding, role migration, short leaf keys, and tactical indicator pruning).
-* [**Local Companion Data Sync Architecture**](COMPANION_DATA_SYNC_MODEL.md): `WatchConnectivity` (`WCSession`) dual-stream sync protocol, immediate local rendering, and phone preference network handover.
-* [**MapKit Equivalents & Native Behavioral Standards**](MAPKIT_EQUIVALENTS.md): MapKit native behaviors, camera altitude trigonometry, `UserAnnotation` standards, and discrete decade zoom scales.
+* **Display & Interaction**:
+  * [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md): Authoritative specification for Map & Radar views, 60Hz follow-me rules, discrete decade scale ladder, and platform MapKit adapters.
+  * [**`SETTINGS_VIEW.md`**](docs/SETTINGS_VIEW.md): Layout and behavior of the gear-icon Config screen — callsign, host/join squad flow, QR scan/display, and custom database URL entry.
+* **Synchronization & Netcode**:
+  * [**`CLOUD_DATA_MANAGEMENT.md`**](docs/CLOUD_DATA_MANAGEMENT.md): Firebase RTDB synchronization matrix, client upload scheduling, bandwidth adaptation, and RTDB schema reference.
+  * [**`COMPANION_DATA_SYNC_MODEL.md`**](docs/COMPANION_DATA_SYNC_MODEL.md): Local Apple Watch $\leftrightarrow$ iPhone `WatchConnectivity` (`WCSession`) dual-stream protocol.
+  * [**`DEAD_RECKONING.md`**](docs/DEAD_RECKONING.md): Predictive delta gating formulas, velocity derivation, and receiver-side extrapolation.
+* **Monetization & Compliance**:
+  * [**`REVENUECAT_AND_STOREKIT_SETUP.md`**](docs/REVENUECAT_AND_STOREKIT_SETUP.md): RevenueCat, App Store Connect IAP configuration, and local Xcode StoreKit testing.
+  * [**`PRIVACY_AND_COMPLIANCE.md`**](docs/PRIVACY_AND_COMPLIANCE.md): HealthKit `HKWorkoutSession` framing, background location guidelines, and legal privacy policies.
+* **Developer Guides & Tooling**:
+  * [**`CONTRIBUTING.md`**](docs/CONTRIBUTING.md): Architectural invariants, dual-target layout, project generation, and testing standards.
+  * [**`BRING_YOUR_OWN_FIREBASE.md`**](docs/BRING_YOUR_OWN_FIREBASE.md): Step-by-step setup guide for hosting squad rooms on private Firebase instances.
+  * [**`NETWORK_BENCHMARK_FIREBASE_COST_ESTIMATION.md`**](docs/NETWORK_BENCHMARK_FIREBASE_COST_ESTIMATION.md): Network benchmarking framework and Firebase RTDB cost estimation model.
+  * [**`notebooks/README.md`**](notebooks/README.md): Headless multi-player Python simulator and Jupyter testing suite.
+  * [**`output/README.md`**](output/README.md): Designated output destination specification for benchmark artifacts and simulation traces.
 
 ---
 
@@ -121,7 +126,7 @@ RadarMap/
 │   ├── DeadReckoning.swift                 # Planar dead reckoning math & velocity derivation
 │   ├── MapCenterLockState.swift            # Map locking modes (Free Roam, Locked Follow)
 │   ├── MapStateMachine.swift               # MapKit camera altitude & tracking state coordinator
-│   ├── PlayerVitalStateMachine.swift       # Biometric stress zones & KIA/Downed state machine
+│   ├── PlayerVitalStateMachine.swift       # Biometric stress zones & Tag Out/Downed state machine
 │   ├── QRJoinPayload.swift                 # Join QR code payload model & parser
 │   ├── RadarColorTheme.swift               # Tactical CRT & NVG color palettes (Red / Green)
 │   ├── SessionStateMachine.swift           # Squad session lifecycle (disconnected, hosting, joined, error)
@@ -180,12 +185,26 @@ RadarMap/
 Additional top-level project contents (outside `RadarMap/`):
 
 ```
+docs/                                       # Technical reference documentation & architecture specifications
+├── BRING_YOUR_OWN_FIREBASE.md              # Self-hosted Google Spark RTDB setup & Live Text OCR
+├── CLOUD_DATA_MANAGEMENT.md                # RTDB sync matrix, upload policies & schema reference
+├── COMPANION_DATA_SYNC_MODEL.md            # Local Apple Watch <-> iPhone WCSession dual-stream protocol
+├── CONTRIBUTING.md                         # Architectural invariants, project generation & PR testing standards
+├── DEAD_RECKONING.md                       # Predictive delta gating math & remote player extrapolation
+├── NETWORK_BENCHMARK_FIREBASE_COST_ESTIMATION.md # Network benchmark protocol & cost estimation model
+├── PRIVACY_AND_COMPLIANCE.md               # HealthKit compliance, background location & privacy standards
+├── REVENUECAT_AND_STOREKIT_SETUP.md        # RevenueCat IAP, StoreKit local testing & paywall rules
+├── SETTINGS_VIEW.md                        # Config view specification, QR scanning & database URL input
+└── TACTICAL_UI_SPECIFICATION.md            # Map & Radar view presentation, 60Hz motion & decade ladder
 RadarMapTests/
 └── RadarMapTests.swift                     # Unit & integration test suite (187+ tests)
 RadarMapCompanion/                          # iOS (iPhone) companion target
 └── RadarMapCompanionApp.swift
+benchmarks/                                 # Baseline & candidate network benchmark configurations
+credentials/                                # Local service-account JSON keys (gitignored)
 functions/                                  # Firebase Cloud Functions (room TTL sweeps, indicator pruning)
 notebooks/                                  # Jupyter notebook & CLI player simulator (see notebooks/README.md)
+output/                                     # Benchmark and simulation output destination (see output/README.md)
 scripts/                                    # Standalone tooling (e.g. network_benchmark.py)
 Package.swift                               # Swift Package Manager manifest
 generate_xcodeproj.py                       # Regenerates RadarMap.xcodeproj from the file tree — must be re-run
@@ -227,7 +246,7 @@ Select an Apple Watch target (e.g. Apple Watch Series 9 or Ultra 2, watchOS 10+)
 
 ## 🤝 Contributing
 
-Contributions and issue reports are welcome! Please review [**`CONTRIBUTING.md`**](CONTRIBUTING.md) for architectural invariants, dual-target layout standards, and pull request testing requirements.
+Contributions and issue reports are welcome! Please review [**`CONTRIBUTING.md`**](docs/CONTRIBUTING.md) for architectural invariants, dual-target layout standards, and pull request testing requirements.
 
 ---
 

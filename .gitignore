@@ -8,4 +8,10 @@ node_modules/
 functions/node_modules/
 __pycache__/
 *.pyc
+/credentials/
+notebooks/credentials/
+*.serviceaccount.json
+*-firebase-adminsdk-*.json
+output/*
+!output/README.md
 

@@ -6,45 +6,62 @@ public struct CreateRoomView: View {
     
     @State private var roomName: String = ""
     @State private var roomPassword: String = ""
+    @State private var customDatabaseURL: String = ""
     @State private var squadCapacity: Int = AppConstants.Subscription.freeTierMaxCapacity
     @State private var showPaywall: Bool = false
     @State private var navigateToLobby: Bool = false
-    
+
     public init() {}
-    
+
+    private var nameLengthValid: Bool {
+        let len = roomName.trimmingCharacters(in: .whitespacesAndNewlines).count
+        return len >= AppConstants.UI.minRoomNameEntryLength && len <= AppConstants.UI.maxRoomNameEntryLength
+    }
+    private var pinLengthValid: Bool {
+        let len = roomPassword.trimmingCharacters(in: .whitespacesAndNewlines).count
+        return len >= AppConstants.UI.minPinLength && len <= AppConstants.UI.maxPinLength
+    }
+    private var nameFieldInvalid: Bool { !roomName.isEmpty && !nameLengthValid }
+    private var pinFieldInvalid: Bool { !roomPassword.isEmpty && !pinLengthValid }
+    private var canHost: Bool { nameLengthValid && pinLengthValid }
+
     public var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 8) {
                     // Room Name Field
-                    TextField("Squad Name", text: $roomName)
+                    TextField("Squad Name (4-12)", text: $roomName)
                         .font(.system(size: 12))
-                        .foregroundColor((gameState.isHosting || gameState.firebaseManager.isConnected) ? .gray : .primary)
+                        .foregroundColor(nameFieldInvalid ? .red : ((gameState.isHosting || gameState.firebaseManager.isConnected) ? .gray : .primary))
                         .opacity((gameState.isHosting || gameState.firebaseManager.isConnected) ? 0.6 : 1.0)
                         .padding(8)
-                        .background(Color.white.opacity(0.1))
+                        .background(nameFieldInvalid ? Color.red.opacity(0.18) : Color.white.opacity(0.1))
                         .cornerRadius(6)
                         .lineLimit(1)
                         .submitLabel(.done)
                         .autocorrectionDisabled(true)
                         .disabled(gameState.isHosting || gameState.firebaseManager.isConnected)
                         .onChange(of: roomName) { _, newValue in
-                            gameState.savedRoomName = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            let sanitized = GameStateManager.sanitizeRoomNameInput(newValue)
+                            if roomName != sanitized {
+                                roomName = sanitized
+                            }
+                            gameState.savedRoomName = sanitized
                         }
-                    
-                    // Squad Password / PIN Field (4-digit number only)
-                    TextField("Squad PIN (4 digits, optional)", text: $roomPassword)
+
+                    // Squad PIN Field (mandatory, 4-16 digits)
+                    TextField("PIN (4-16)", text: $roomPassword)
                         .font(.system(size: 12, design: .monospaced))
-                        .foregroundColor((gameState.isHosting || gameState.firebaseManager.isConnected) ? .gray : .primary)
+                        .foregroundColor(pinFieldInvalid ? .red : ((gameState.isHosting || gameState.firebaseManager.isConnected) ? .gray : .primary))
                         .opacity((gameState.isHosting || gameState.firebaseManager.isConnected) ? 0.6 : 1.0)
                         .padding(8)
-                        .background(Color.white.opacity(0.1))
+                        .background(pinFieldInvalid ? Color.red.opacity(0.18) : Color.white.opacity(0.1))
                         .cornerRadius(6)
                         .lineLimit(1)
                         .submitLabel(.done)
                         .textContentType(.oneTimeCode)
                         #if os(iOS)
-                        .keyboardType(.numberPad)
+                        .keyboardType(.asciiCapable)
                         #endif
                         .disabled(gameState.isHosting || gameState.firebaseManager.isConnected)
                         .onChange(of: roomPassword) { _, newValue in
@@ -54,7 +71,7 @@ public struct CreateRoomView: View {
                             }
                             gameState.savedPin = roomPassword
                         }
-                    
+
                     // Capacity Tier Status (4 or 999)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
@@ -64,11 +81,11 @@ public struct CreateRoomView: View {
                             Spacer()
                             
                             if gameState.subscriptionManager.hasUnlimitedSquadUnlock {
-                                Text("Unlimited (Squad Leader Pro)")
+                                Text("Up to \(AppConstants.Subscription.proTierMaxCapacity) Players (Pro)")
                                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                                     .foregroundColor(.green)
                             } else {
-                                Text("\(AppConstants.Subscription.freeTierMaxCapacity) operators (Free)")
+                                Text("\(AppConstants.Subscription.freeTierMaxCapacity) Players (Free)")
                                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                                     .foregroundColor(.yellow)
                             }
@@ -81,7 +98,7 @@ public struct CreateRoomView: View {
                                 HStack(spacing: 4) {
                                     Image(systemName: "lock.fill")
                                         .font(.system(size: 9))
-                                    Text("Upgrade to Unlimited Players (\(AppConstants.Subscription.lifetimePriceString))")
+                                    Text("Upgrade to \(AppConstants.Subscription.proTierMaxCapacity) Players (\(AppConstants.Subscription.lifetimePriceString))")
                                         .font(.system(size: 9, weight: .bold))
                                 }
                                 .frame(maxWidth: .infinity)
@@ -96,7 +113,7 @@ public struct CreateRoomView: View {
                     }
                     
                     Button(action: {
-                        gameState.hostRoom(name: roomName, pin: roomPassword.isEmpty ? nil : roomPassword) { success in
+                        gameState.hostRoom(name: roomName, pin: roomPassword) { success in
                             if success {
                                 dismiss()
                             }
@@ -109,12 +126,66 @@ public struct CreateRoomView: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
-                        .background(Color.green)
+                        .background(canHost ? Color.green : Color.gray.opacity(0.3))
                         .foregroundColor(.black)
                         .cornerRadius(8)
                     }
                     .buttonStyle(.plain)
+                    .disabled(!canHost || gameState.isHosting || gameState.firebaseManager.isConnected)
                     .padding(.top, 4)
+
+                    // Optional: run this squad on your own Firebase project instead of the
+                    // shared default (see HUD Guide > Bring Your Own Firebase, or
+                    // BRING_YOUR_OWN_FIREBASE.md).
+                    DatabaseURLField(
+                        value: $customDatabaseURL,
+                        isEnabled: $gameState.isCustomDatabaseURLEnabled,
+                        isDisabled: gameState.isHosting || gameState.firebaseManager.isConnected,
+                        onEditingFinished: { gameState.syncConfigToWatchConnectivity() }
+                    )
+                    .onChange(of: customDatabaseURL) { _, newValue in
+                        gameState.customDatabaseURL = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
+                    .padding(.top, 4)
+
+                    // Scanning here only ever sets the database URL, never the room name/PIN,
+                    // since this screen is host-only.
+                    JoinQRBox(
+                        isHosting: gameState.firebaseManager.activeRoom != nil && gameState.firebaseManager.isConnected,
+                        // The plain typed room name only — never the derived (salted+padded)
+                        // Firebase room id. Read from the textbox state, not
+                        // gameState.savedRoomName: that property gets rewritten on nearly every
+                        // low-speed convergence sync tick (adoptCompanionSession in
+                        // GameStateManager compares the derived activeRoom.id against the plain
+                        // config.roomName, which never match, so it fires almost every sync and
+                        // stomps savedRoomName) — which made the QR flicker on every
+                        // upload/download. The textbox is the stable source of truth here, and a
+                        // joiner re-derives the same padding locally from (name, pin) themselves.
+                        roomId: roomName.isEmpty ? nil : roomName,
+                        pin: roomPassword,
+                        // The raw setting (empty when hosting on the shared default), not the
+                        // resolved firebaseManager.databaseURL — a default-project host's QR
+                        // should never embed that project's actual URL. See JoinQRBox.swift.
+                        databaseURL: customDatabaseURL,
+                        isDisabled: gameState.isHosting || gameState.firebaseManager.isConnected
+                    ) { payload in
+                        let trimmedURL = payload.d.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let hasURL = !trimmedURL.isEmpty
+                        withAnimation {
+                            gameState.isCustomDatabaseURLEnabled = hasURL
+                        }
+                        if hasURL {
+                            customDatabaseURL = trimmedURL
+                            gameState.customDatabaseURL = trimmedURL
+                        } else {
+                            customDatabaseURL = ""
+                            gameState.customDatabaseURL = ""
+                        }
+                        // Equivalent from the user's perspective to typing the URL box and hitting
+                        // enter — push it out over WCSession explicitly, since customDatabaseURL
+                        // only syncs on the field losing focus, which never happens here.
+                        gameState.syncConfigToWatchConnectivity()
+                    }
                 }
                 .padding(.horizontal, 6)
             }
@@ -158,6 +229,9 @@ public struct CreateRoomView: View {
                 }
                 if roomPassword.isEmpty {
                     roomPassword = gameState.savedPin
+                }
+                if customDatabaseURL.isEmpty {
+                    customDatabaseURL = gameState.customDatabaseURL
                 }
             }
         }

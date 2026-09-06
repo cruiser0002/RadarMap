@@ -20,7 +20,7 @@ This document is the authoritative design and implementation specification for t
 
 ## ⚡ Key Constants & Configuration Reference
 
-The following centralized constants from [`AppConstants.swift`](RadarMap/AppConstants.swift) and [`TacticalScalePolicy.swift`](RadarMap/Models/TacticalScalePolicy.swift) govern all tactical presentation, geometry, timing, and HUD calculations:
+The following centralized constants from [`AppConstants.swift`](../RadarMap/AppConstants.swift) and [`TacticalScalePolicy.swift`](../RadarMap/Models/TacticalScalePolicy.swift) govern all tactical presentation, geometry, timing, and HUD calculations:
 
 | Section & Domain | Constant / Property | Value / Definition | Purpose & Behavioral Impact |
 | :--- | :--- | :--- | :--- |
@@ -29,7 +29,7 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 | **§2 Motion & Tracking** | `centerThresholdMeters` | `10.0m` (`AppConstants.Location`) | Deadband threshold before map transitions from local follow to free-roam pan |
 | **§3 Tactical Scales** | `defaultScale` | `50.0m` (`TacticalScalePolicy`) | Baseline minor scale on initial room entry or cold boot |
 | **§3 Tactical Scales** | `standardAllowedScales` | `[1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]` m | Canonical discrete logarithmic decade scale ladder |
-| **§3 Tactical Scales** | Scale Range Bounds | `1.0m` min / `2,500.0m` max | Clamping boundaries for Digital Crown and pinch-to-zoom |
+| **§3 Tactical Scales** | Scale Range Bounds | `1.0m` min / `2,500.0m` max | Clamping boundaries for Digital Crown and Radar-view zoom. Does **not** clamp iPhone/iPad Standard map pinch-to-zoom, which is free native MapKit zoom (§5.D.3) |
 | **§4 Radar Geometry** | `rangeRingRatios` | `[0.25, 0.50, 0.75, 1.0]` (`RadarScale`) | Radial multipliers for 4 concentric rings ($S, 2S, 3S, 4S$) |
 | **§4 Radar Geometry** | `radarRadiusRatio` | `0.44` (`RadarScale`) | Outer ring radius as fraction of minimum screen dimension |
 | **§4 Radar Geometry** | Outer Ring Gating | $d > 4 \times S$ | Strict out-of-range cutoff; entities beyond $4S$ are dropped |
@@ -37,7 +37,7 @@ The following centralized constants from [`AppConstants.swift`](RadarMap/AppCons
 | **§5 Map Adapters** | Camera FOV Half-Angle | `15.0°` (`30.0°` total FOV) | Tangent factor: $\text{altitude} = \frac{\text{visibleMetersLat}}{2 \cdot \tan(15^\circ)}$ |
 | **§5 Map Adapters** | Aspect Ratio ($H/W$) | `1.22` (watchOS) / `2.16` (iOS) | Screen vertical-to-horizontal ratio for coordinate span conversions |
 | **§5 Map Adapters** | `metersPerDegreeLatitude` | `111,139.0m` (`Location`) | WGS-84 geodesic latitude conversion factor |
-| **§6 HUD & Gestures** | `actionHoldDurationSeconds` | `1.2s` (`Gestures` / `DeathHold`) | Press-and-hold duration on Scale Ruler to toggle KIA flatline |
+| **§6 HUD & Gestures** | `actionHoldDurationSeconds` | `1.2s` (`Gestures` / `DeathHold`) | Press-and-hold duration on Scale Ruler to toggle Tag Out flatline |
 | **§6 HUD & Gestures** | Scale Ruler Width | `19pt` bar / `40pt` box (watchOS); `40pt` / `40pt` (iOS) | Physical metric scale indicator dimension |
 | **§6 HUD & Gestures** | Circle Hitbox Size | `48 × 48 pt` (watchOS) / `68 × 68 pt` (iOS) | Symmetrical corner interactive touch target dimensions |
 | **§6 HUD & Gestures** | Rect Hitbox Size | `52 × 48 pt` (watchOS) / `112 × 64 pt` (iOS) | Bottom ruler / center button touch target dimensions |
@@ -157,15 +157,11 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
 
 ### A. iPhone / iPad Adapter (`TacticalMKMapView.swift`)
 * **Architecture:** `MKMapView` wrapped inside SwiftUI `UIViewRepresentable`.
-* **Native Follow:** Governed by `showsUserLocation = true` and `userTrackingMode = .follow`.
+* **Native Follow, No Altitude Overrides:** Governed by plain `showsUserLocation = true` / `userTrackingMode = .follow`, matching stock Apple Maps behavior exactly — the adapter never calls `setCamera` to force a specific altitude, and re-centering (button tap or auto-relock-on-pan-back) is a single `setUserTrackingMode(.follow, animated: true)` call. This is a deliberate relaxation (see §5.D.3): forcing altitude to fight MapKit's own camera decisions on tracking-mode transitions was the root cause of visible zoom jumps (MapKit silently reasserting its own default altitude on the next GPS fix after tracking re-engages). Letting MapKit fully own the camera removes that entire class of bug.
 * **Camera State Coordinator (`TacticalPhoneCameraState`):**
-  * `desiredAltitude`: Calibrated altitude corresponding to `selectedScaleMeters`.
-  * `isApplyingProgrammaticCameraChange`: Guards against delegate feedback loops.
-  * `didObservePinch`: Differentiates pinch-to-zoom gestures from map panning.
-* **Pinch-to-Zoom & Spring Snap:**
-  * Free gesture zoom during active pinch; the scale ruler updates in real time via `CADisplayLink` reading map point geometry.
-  * On pinch release: Measures actual ground distance represented by the ruler bar, snaps to `nearestAllowedScale(to:)`, and executes a single zoom-only spring animation preserving center and tracking.
-* **Idempotent Updates:** `updateUIView` updates annotations and theme only when changed; it never sets camera center or triggers follow recovery on unrelated state updates.
+  * `isPinching`: Differentiates pinch-to-zoom gestures from map panning, so a zoom-only pinch's transient tracking-mode drop isn't misread as the user panning away.
+* **Pinch-to-Zoom — Fully Native, No Snap:** Continuous native MapKit pinch-zoom and pan, exactly like the stock Maps app. There is **no** decade-ladder snap on pinch release for this adapter — the `[1, 2.5, 5]` discrete scale ladder is exclusively a Radar-view (and watchOS Digital Crown) concern; see §5.D.3.
+* **Idempotent Updates:** `updateUIView` updates annotations only when changed; it never sets camera center or forces an altitude on unrelated state updates.
 
 ### B. Apple Watch Adapter (`StandardMapView.swift`)
 * **Architecture:** Native SwiftUI `Map` with `UserAnnotation(coordinate:)`.
@@ -175,6 +171,28 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
   * Haptic click (`WKInterfaceDevice.current().play(.click)`) triggers only when the scale selection actually changes.
 * **Location Source Handling:** Preserves watchOS's built-in system selection (automatically sourcing GPS from the paired iPhone when nearby and falling back to Watch GPS standalone).
 
+### C. Feature Equivalence Mapping
+
+| Feature | MapKit Native Component | RadarMap Implementation | Code Reference | Key Behavior & Rules |
+| :--- | :--- | :--- | :--- | :--- |
+| **Me** | Local user dot | Custom local user dot with heading and breathing; switches between player, commander, or Tag Out X | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`MemberAnnotationView.swift`](../RadarMap/Views/Map/MemberAnnotationView.swift)<br>[`SquadTacticalIcons.swift`](../RadarMap/Views/Map/SquadTacticalIcons.swift) | • Uses SwiftUI `UserAnnotation` to suppress MapKit's default blue dot and replace it with custom tactical vector shapes.<br>• Icon dynamically switches based on role (`SquadLeaderShape` vs `SquadPlayerShape`) or status (`SquadDeadXShape`).<br>• Central core dot pulses (`SquadPulseCore`) at frequency proportional to real-time BPM. |
+| **Other players** | Annotations | Custom annotation with heading and breathing; player, commander, or Tag Out X; fades to gray when stale | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`MemberAnnotationView.swift`](../RadarMap/Views/Map/MemberAnnotationView.swift) | • Rendered via `Annotation(coordinate:anchor: .center)`.<br>• When telemetry is stale (`member.isStale == true`), color turns to `.gray`.<br>• Directional rotation follows heading; center pulse follows teammate BPM. |
+| **Tac** | Annotations | Custom tactical annotation (Orders & Enemy markers) | [`TacticalIndicatorOverlayView.swift`](../RadarMap/Views/Map/TacticalIndicatorOverlayView.swift) | • Rendered via `Annotation`.<br>• Hardware GPU texture cache (`TacticalSpriteCache`).<br>• 5-minute linear fade to grayscale for enemy markers.<br>• Hold-to-delete interaction. |
+| **Center map** | Center map | Center map without changing zoom level | [`MapStateMachine.swift`](../RadarMap/Models/MapStateMachine.swift)<br>[`GameStateManager.swift`](../RadarMap/Managers/GameStateManager.swift) | • Bottom-left HUD button triggers `gameState.centerMapOnLocalUser()`.<br>• Re-locks `MapTrackingState` to `.locked` at the **current zoom scale** (`scaleMeters` is preserved, never reset). |
+| **Gestures** | Gesture | Standard pan/drag, tap, and native pinch-to-zoom gestures | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • iPhone/iPad (`TacticalMKMapView`): fully native, continuous MapKit pan/pinch-zoom with **no** discrete-scale snapping — behaves exactly like stock Apple Maps.<br>• watchOS (`StandardMapView`'s `NativeSwiftUIMapView`): Native `.interactionModes: .pan`; zoom is Digital-Crown-driven and still snaps to the discrete `[1, 2.5, 5]` ladder (see below).<br>• Drag gesture transitions state from `.locked` to `.unlocked` (panning) on both platforms.<br>• Tap gesture handles indicator placement when menu is pending. |
+| **Crown / Pinch Zoom** | Zoom | Digital Crown: discrete decade levels `[1, 2.5, 5]`. iOS pinch: free continuous native zoom | [`AppConstants.swift`](../RadarMap/AppConstants.swift)<br>[`TacticalRadarMapView.swift`](../RadarMap/Views/Map/TacticalRadarMapView.swift)<br>[`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • Digital Crown rotation (watchOS) steps through discrete minor scales `[1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]`, with altitude calculated via MapKit camera FOV trigonometry (`cameraDistance(forScale:)`).<br>• MapKit pinch-to-zoom on iPhone/iPad's Standard map view (`TacticalMKMapView`) is **not** bound to this ladder — it's free, continuous native zoom with no snapping and no altitude calculation of our own. The Radar (OLED) view's own decade ladder is unaffected on either platform. |
+| **Other buttons** | *(none)* | Custom definitions not related to MapKit | [`TacticalRadarMapView.swift`](../RadarMap/Views/Map/TacticalRadarMapView.swift) | • Top-left: Settings Gear.<br>• Top-center: Squad Leader / Commander Menu (`star.fill`).<br>• Bottom-center: Scale Ruler / Hold-to-Act Tag Out Button.<br>• Bottom-right: Map Style Toggle (Standard MapKit vs OLED Radar). |
+
+### D. Core MapKit Implementation Rules
+
+1. **User Annotation Placement**: Always use `UserAnnotation` in `StandardMapView` for the local user so MapKit coordinates location tracking without double-rendering native blue dots.
+2. **Camera Altitude & Aspect Ratio (watchOS only)**: On watchOS, MapKit camera altitude is bound to the tactical scale via `StandardMapView.cameraDistance(forScale:)` with FOV tangent trigonometry ($V = 2 \cdot \text{altitude} \cdot \tan(15^\circ)$). **This rule does not apply to the iPhone/iPad Standard map view** (`TacticalMKMapView`) — see §5.D.3.
+3. **Decade Zoom Progression & Post-Zoom Snapping (Radar view & watchOS Digital Crown only)**: Zoom levels are strictly constrained to the $1 \to 2.5 \to 5$ decade sequence across metric ranges ($1\text{m}, 2.5\text{m}, 5\text{m}, 10\text{m}, 25\text{m}, 50\text{m}, 100\text{m}, 250\text{m}, 500\text{m}, 1000\text{m}, 2500\text{m}$) for the Radar (OLED) view on both platforms, and for watchOS Digital Crown rotation on the Standard map. After any of those zoom changes, the system immediately snaps to the nearest discrete decade scale in `[1, 2.5, 5]` and animates the camera to the exact corresponding altitude distance.
+   * **Exception — iPhone/iPad Standard map view (`TacticalMKMapView`)**: Deliberately exempted from this rule. Pinch-to-zoom is free, continuous native MapKit zoom with no snapping and no altitude forcing of any kind — matching stock Apple Maps exactly. This was a considered relaxation: forcing camera altitude to enforce the ladder here meant fighting MapKit's own camera on every tracking-mode transition (e.g. re-centering after a pan), which caused MapKit to occasionally reassert its own default altitude on the next GPS fix, producing a visible, undesired zoom jump. Letting MapKit fully own zoom on this adapter removes that failure mode entirely; the Radar view's ladder (both platforms) and watchOS's Digital Crown ladder are unaffected.
+4. **Non-Destructive Centering**: Re-centering to the local user resets panning coordinates but does not touch zoom. On watchOS and in the Radar view this means the current discrete scale is explicitly retained; on the iPhone/iPad Standard map view it's implicit — re-centering only calls `setUserTrackingMode(.follow, animated:)`, which never touches altitude.
+5. **Native MapKit Follow-Me Mode (60Hz Smooth Tracking)**: In `StandardMapView`, camera tracking when `trackingState.isLocked` is `true` must use native SwiftUI MapKit `MapCameraPosition.userLocation(fallback: .camera(...))`. This enables MapKit's hardware GPU compositor tracking at 60Hz/120Hz display refresh rate instead of timer-based periodic discrete coordinate refresh steps, while preserving discrete tactical scale altitudes via `cameraBounds` and `MapCamera` fallbacks. (watchOS-only, via `NativeSwiftUIMapView`; the iPhone/iPad `TacticalMKMapView` adapter uses plain UIKit `userTrackingMode = .follow` instead, per §5.D.3.)
+6. **No Side-Effect Interactions**: Elements must strictly perform only their specified UX behavior without side effects. For example, toggling the Map Style button (`selectedMapStyle`) must never alter the map's current centering, tracking lock, or zoom scale.
+
 ---
 
 ## 6. HUD Controls, Gestures & Centering Semantics
@@ -183,10 +201,10 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
 
 | Control | Position | Icon | Action & Semantics |
 | :--- | :--- | :--- | :--- |
-| **Settings** | Top-Left | `gearshape.fill` | Opens configuration: callsign, squad management, radar colors, and legal policies. |
-| **Tactical Orders** | Top-Center | `star.fill` | Opens tactical order menu: place rally points, enemy warnings, and squad objectives. |
+| **Settings** | Top-Left | `gearshape.fill` | Opens configuration: callsign, squad management, radar colors, and legal policies (see [`SETTINGS_VIEW.md`](SETTINGS_VIEW.md)). |
+| **Tactical Orders** | Top-Center | `star.fill` | Opens tactical order menu: place rally points, hazard alerts, POI annotations, and squad objectives. |
 | **Center Map** | Bottom-Left | `location.fill` | Re-locks tracking to local user (`.locked`). **Strictly preserves active scale/altitude** (never resets to 50m). |
-| **Scale Ruler / Vitals** | Bottom-Center | `waveform.path.ecg` | Displays active metric ruler. Press & hold for 1.2s to toggle local KIA / Downed flatline state. |
+| **Scale Ruler / Vitals** | Bottom-Center | `waveform.path.ecg` | Displays active metric ruler. Press & hold for 1.2s to toggle local Tag Out / Downed flatline state. |
 | **Map / Radar Switch** | Bottom-Right | `map` / `circle.dashed` | Toggles between Map view and OLED Radar view. Preserves scale, annotations, and camera state. |
 
 ### Centering Semantics:
@@ -199,13 +217,29 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
 ## 7. Visual Styling, Themes & Layers Hierarchy
 
 ### 5-Layer UI Compositor Architecture:
+
+```mermaid
+graph TD
+    L5["<b>Layer 5: UX Buttons</b><br/>(Settings Gear, Star Menu, Center Map, Scale Ruler / HR Button, Map Style)"]
+    L4["<b>Layer 4: Annotations</b><br/>(Remote Squad Members & Tactical Indicators)"]
+    L3["<b>Layer 3: Pan and Zoom</b><br/>(Touch/Pinch Gestures & Digital Crown Interaction)"]
+    L2["<b>Layer 2: Radar/Ruler</b><br/>(Radar Grid, Range Rings, Metric Distance Scale Visuals)"]
+    L1["<b>Layer 1: MapKit & UserAnnotation</b><br/>(Standard MapKit Base, Local Player UserAnnotation Dot, 60Hz Hardware Follow-Me)"]
+
+    L5 --> L4
+    L4 --> L3
+    L3 --> L2
+    L2 --> L1
 ```
-Layer 5 (Top):    Floating HUD Buttons (Settings, Orders, Center, Vitals, Style Switch)
-Layer 4:          Dynamic Annotations (Teammates, Hostiles, Objective Markers)
-Layer 3:          Gesture Handling (Pan, Pinch-to-Zoom, Digital Crown Input)
-Layer 2:          Visual Overlay (Radar Range Rings, Crosshairs, Scale Ruler Bar)
-Layer 1 (Bottom): MapKit Native Compositor (Vector Tiles, Native 60Hz User Follow Dot)
-```
+
+| Layer | Component | Description & Responsibilities |
+| :--- | :--- | :--- |
+| **Layer 5 (Top)** | **UX Buttons** | Floating HUD buttons: Settings gear, Star menu, Center Map, Hold-to-Act Tag Out / Scale Ruler, and Map Style toggle. Intercepts taps and holds with top priority. |
+| **Layer 4** | **Annotations** | Dynamic tactical markers (remote squad teammates, orders, hostile alerts) rendered on geographic coordinates above map content. |
+| **Layer 3** | **Pan and zoom** | Gesture recognition layer: drag/pan to inspect, pinch-to-zoom (iOS), Digital Crown (watchOS). |
+| **Layer 2** | **Radar/ruler** | Radar range rings, grid divisions, and metric scale ruler visuals representing map zoom scale. |
+| **Layer 1 (Bottom)** | **MapKit & `UserAnnotation`** | Native MapKit engine and local player `UserAnnotation` vector icon with 60Hz hardware compositor tracking. |
+
 
 ### Visual Styling Rules:
 * **Dark-First Appearance:** UI is designed for dark environments (tactical NVG / OLED contrast).
@@ -222,5 +256,6 @@ When reviewing or refactoring UI components, ensure:
 - [ ] Tapping "Center Map" retains current zoom distance.
 - [ ] Map ↔ Radar presentation switch retains zoom scale and camera state.
 - [ ] Radar view strictly hides targets beyond $4 \times \text{selectedScaleMeters}$.
-- [ ] Pinch gesture release snaps cleanly to the nearest discrete decade scale.
+- [ ] Radar-view pinch/Digital Crown gesture release snaps cleanly to the nearest discrete decade scale.
+- [ ] iPhone/iPad Standard map view (`TacticalMKMapView`) pinch-to-zoom does **not** snap to the decade ladder and never forces a camera altitude — free native MapKit zoom only (§5.D.3).
 - [ ] Digital Crown rotation triggers haptic feedback only when scale index changes.

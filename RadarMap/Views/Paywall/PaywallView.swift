@@ -39,10 +39,10 @@ public struct PaywallView: View {
                 
                 // Features
                 VStack(alignment: .leading, spacing: 6) {
-                    FeatureRow(icon: "person.3.fill", text: ">4 players")
-                    FeatureRow(icon: "star.fill", text: "Orders")
-                    FeatureRow(icon: "exclamationmark.triangle.fill", text: "Tactical & environmental indicators")
-                    FeatureRow(icon: "person.badge.shield.checkmark.fill", text: "Others join 100% free")
+                    FeatureRow(icon: "person.3.fill", text: "Up to \(AppConstants.Subscription.proTierMaxCapacity) players")
+                    FeatureRow(icon: "star.fill", text: "Team orders")
+                    FeatureRow(icon: "mappin.and.ellipse", text: "POI & environmental markers")
+                    FeatureRow(icon: "person.badge.shield.checkmark.fill", text: "Teammates join 100% free")
                 }
                 .padding(.horizontal, 4)
                 
@@ -105,6 +105,23 @@ public struct PaywallView: View {
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .padding(.top, 2)
+                    
+                    HStack(spacing: 8) {
+                        if let privacyUrl = URL(string: AppConstants.Policy.privacyPolicyURL) {
+                            Link("Privacy Policy", destination: privacyUrl)
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundColor(.cyan)
+                        }
+                        Text("•")
+                            .font(.system(size: 8))
+                            .foregroundColor(.gray)
+                        if let termsUrl = URL(string: AppConstants.Policy.termsOfServiceURL) {
+                            Link("Terms of Use (EULA)", destination: termsUrl)
+                                .font(.system(size: 8, weight: .medium))
+                                .foregroundColor(.cyan)
+                        }
+                    }
+                    .padding(.top, 2)
                 }
                 .padding(.top, 4)
             }

@@ -27,6 +27,7 @@ public enum FirebaseSyncError: LocalizedError, Equatable {
     case incorrectPassword
     case unauthorized
     case networkError(String)
+    case invalidDatabaseURL
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +49,8 @@ public enum FirebaseSyncError: LocalizedError, Equatable {
             return "Unauthorized access"
         case .networkError(let msg):
             return "Network Error: \(msg)"
+        case .invalidDatabaseURL:
+            return "Custom database URL is not a valid https:// address"
         }
     }
 }
@@ -269,7 +272,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
     /// Derives a deterministic room-id padding suffix from (name, PIN), domain-separated from
     /// `hashPin`'s own combined-string format via the "roompad:" prefix so the two derivations
-    /// never share identical input despite hashing the same PIN. See ROOM_ID_HARDENING.md §1.
+    /// never share identical input despite hashing the same PIN. See CLOUD_DATA_MANAGEMENT.md.
     public static func deriveRoomPadding(pin: String, name: String, length: Int? = nil) -> String {
         let alphabet = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
         let padLength = length ?? max(0, AppConstants.UI.maxRoomNameLength - name.count)
@@ -732,7 +735,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                 return
             }
 
-            // Validate PIN (mandatory — see ROOM_ID_HARDENING.md §2)
+            // Validate PIN (mandatory — see CLOUD_DATA_MANAGEMENT.md)
             let inputHash = FirebaseSyncManager.hashPin(pin ?? "", salt: cleanId)
             if inputHash != room.pinHash {
                 DispatchQueue.main.async {
@@ -895,7 +898,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     }
 
     /// Refreshes this room's TTL expiry across all three top-level trees. Not server-enforced —
-    /// gate calls on `isCurrentMemberHost` client-side. See ROOM_ID_HARDENING.md §8.
+    /// gate calls on `isCurrentMemberHost` client-side. See CLOUD_DATA_MANAGEMENT.md.
     public func refreshRoomExpiry(roomId: String) {
         let newExpireAt = Date().timeIntervalSince1970 + AppConstants.Timing.Inactivity.ttlDurationSeconds
         transport.setValue(newExpireAt, at: roomExpireAtPath(roomId: roomId), completion: nil)
@@ -1101,8 +1104,75 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         }
     }
 
-    /// Decodes and merges a /r/{roomId} snapshot into activeRoom. Shared by the one-shot fetch
-    /// path above and the persistent realtime listener.
+    /// Merges a freshly-decoded remote members dict into activeRoom.members, protecting the
+    /// local member's own row from remote echoes (§5.B). Shared by the one-shot full-room fetch,
+    /// the members-subtree realtime listener, and their raw-JSON fallback paths.
+    private func mergeRemoteMembers(_ remoteMembers: [String: SquadMember], into current: inout SquadRoom) {
+        var updatedMembers: [String: SquadMember] = [:]
+        for (id, remoteMember) in remoteMembers {
+            // Self-echo filter (§5.B, required): the local member's own row is already
+            // locally authoritative — never let a remote echo (including the SDK's
+            // optimistic pre-server-confirmation echo) overwrite it here.
+            if let localId = self.localMemberId, id == localId {
+                continue
+            }
+            if var existing = current.members[id] {
+                existing.callsign = remoteMember.callsign
+                existing.role = remoteMember.role
+                updatedMembers[id] = existing
+            } else {
+                updatedMembers[id] = remoteMember
+            }
+        }
+        if let localId = self.localMemberId, let localMember = current.members[localId] {
+            updatedMembers[localId] = localMember
+        }
+        current.members = updatedMembers
+    }
+
+    /// Decodes and merges a /r/{roomId}/m (members-only) snapshot into activeRoom. This is the
+    /// persistent realtime listener's path — scoped to the members subtree specifically so that
+    /// the host's periodic /r/{roomId}/exp TTL heartbeat (see refreshRoomExpiry) never triggers
+    /// it. A `.value` listener on the whole /r/{roomId} node would refire on *any* write anywhere
+    /// under it, including that unrelated heartbeat, forcing every client to redecode the entire
+    /// room (including the full members dict) on every refresh cycle for no reason.
+    private func applyMembersSnapshot(_ value: Any?, roomId: String) {
+        guard let value = value else { return }
+
+        if JSONSerialization.isValidJSONObject(value),
+           let data = try? JSONSerialization.data(withJSONObject: value),
+           let decodedMembers = try? JSONDecoder().decode([String: SquadMember].self, from: data) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, var current = self.activeRoom else { return }
+                self.mergeRemoteMembers(decodedMembers, into: &current)
+                self.activeRoom = current
+            }
+            return
+        }
+
+        guard let membersJson = value as? [String: [String: Any]] else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, var current = self.activeRoom else { return }
+            var parsedMembers: [String: SquadMember] = [:]
+            for (memberId, memberData) in membersJson {
+                let callsign = memberData["csn"] as? String ?? ""
+                let role = MemberRole(rawValue: memberData["rol"] as? String ?? "") ?? .player
+                parsedMembers[memberId] = SquadMember(
+                    id: memberId,
+                    callsign: callsign,
+                    latitude: 0.0,
+                    longitude: 0.0,
+                    role: role
+                )
+            }
+            self.mergeRemoteMembers(parsedMembers, into: &current)
+            self.activeRoom = current
+        }
+    }
+
+    /// Decodes and merges a full /r/{roomId} snapshot into activeRoom. Used only by the one-shot
+    /// fetch (fetchRoomDetails, on initial connect) that needs the room's metadata (host, capacity,
+    /// pinHash, expireAt) — the persistent realtime listener uses applyMembersSnapshot instead.
     private func applyRoomSnapshot(_ value: Any?, roomId: String) {
         guard let value = value else { return }
 
@@ -1112,26 +1182,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
                 if var current = self.activeRoom {
-                    var updatedMembers: [String: SquadMember] = [:]
-                    for (id, remoteMember) in decodedRoom.members {
-                        // Self-echo filter (§5.B, required): the local member's own row is already
-                        // locally authoritative — never let a remote echo (including the SDK's
-                        // optimistic pre-server-confirmation echo) overwrite it here.
-                        if let localId = self.localMemberId, id == localId {
-                            continue
-                        }
-                        if var existing = current.members[id] {
-                            existing.callsign = remoteMember.callsign
-                            existing.role = remoteMember.role
-                            updatedMembers[id] = existing
-                        } else {
-                            updatedMembers[id] = remoteMember
-                        }
-                    }
-                    if let localId = self.localMemberId, let localMember = current.members[localId] {
-                        updatedMembers[localId] = localMember
-                    }
-                    current.members = updatedMembers
+                    self.mergeRemoteMembers(decodedRoom.members, into: &current)
                     self.activeRoom = current
                 } else {
                     self.activeRoom = decodedRoom
@@ -1159,23 +1210,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                 }
             }
             if var current = self.activeRoom {
-                var updatedMembers: [String: SquadMember] = [:]
-                for (id, member) in parsedMembers {
-                    if let localId = self.localMemberId, id == localId {
-                        continue
-                    }
-                    if var existing = current.members[id] {
-                        existing.callsign = member.callsign
-                        existing.role = member.role
-                        updatedMembers[id] = existing
-                    } else {
-                        updatedMembers[id] = member
-                    }
-                }
-                if let localId = self.localMemberId, let localMember = current.members[localId] {
-                    updatedMembers[localId] = localMember
-                }
-                current.members = updatedMembers
+                self.mergeRemoteMembers(parsedMembers, into: &current)
                 self.activeRoom = current
             } else {
                 let hostId = json["hst"] as? String ?? ""
@@ -1339,8 +1374,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             self?.applyTacticalSnapshot(snapshot.value as? [String: Any], roomId: roomId)
         }
 
-        roomValueHandle = transport.observe(at: roomPath(roomId: roomId), eventType: .value) { [weak self] snapshot in
-            self?.applyRoomSnapshot(snapshot.value, roomId: roomId)
+        // Scoped to the members subtree, not the whole room node — see applyMembersSnapshot.
+        roomValueHandle = transport.observe(at: roomMembersPath(roomId: roomId), eventType: .value) { [weak self] snapshot in
+            self?.applyMembersSnapshot(snapshot.value, roomId: roomId)
         }
     }
 
@@ -1513,6 +1549,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     private func tacticalCappedIndicatorPath(roomId: String, indicatorId: String) -> String { "t/\(roomId)/i/\(indicatorId)" }
     private func tacticalExpireAtPath(roomId: String) -> String { "t/\(roomId)/exp" }
     private func roomPath(roomId: String) -> String { "r/\(roomId)" }
+    private func roomMembersPath(roomId: String) -> String { "r/\(roomId)/m" }
     private func roomMemberPath(roomId: String, memberId: String) -> String { "r/\(roomId)/m/\(memberId)" }
     private func roomExpireAtPath(roomId: String) -> String { "r/\(roomId)/exp" }
 }

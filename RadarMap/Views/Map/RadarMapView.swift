@@ -78,10 +78,13 @@ public struct RadarMapView: View {
                 }
                 .stroke(themeColor, lineWidth: 2.0)
                 
-                // Range Ring Distance Labels (4 clicks of minor scale: 1x, 2x, 3x, 4x)
+                // Range Ring Distance Labels (4 intervals: 1S, 2S, 3S, 4S)
                 ForEach(Array(AppConstants.UI.RadarScale.rangeRingRatios.enumerated()), id: \.offset) { index, ratio in
                     let clickCount = Double(index + 1)
-                    let ringDist = gameState.radarScaleMeters * clickCount
+                    // Live scale (not the committed/settled scale) so labels update in real
+                    // time while pinching, matching the Ruler/Radar spec requirement to track
+                    // every change even during the gesture/animation.
+                    let ringDist = gameState.liveMapScaleMeters * clickCount
                     let diagOffset = (maxRadius * ratio) * cos(.pi / 4.0)
                     Text(AppConstants.UI.ScaleRuler.formatDistance(meters: ringDist))
                         .font(.system(size: AppConstants.UI.HUD.rulerFontSize, weight: .bold, design: .monospaced))
@@ -89,31 +92,38 @@ public struct RadarMapView: View {
                         .position(x: screenCenter.x + diagOffset, y: screenCenter.y - diagOffset)
                 }
                 
-                // Active Remote Squad Members
+                // Active Remote Squad Members within outer radar distance (d <= 4S)
                 ForEach(otherSquadMembers, id: \.id) { member in
-                    let offset = pointOffset(for: member.coordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
-                    
-                    MemberAnnotationView(
-                        member: member,
-                        isMe: false,
-                        radarColor: themeColor
-                    )
-                    .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
-                    .animation(.linear(duration: 0), value: member.coordinate)
+                    let displayCoordinate = gameState.remoteDisplayPositions[member.id] ?? member.coordinate
+                    let d = gameState.distanceToLocalPlayer(from: displayCoordinate)
+                    if d <= outerRadarDistanceMeters {
+                        let offset = pointOffset(for: displayCoordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
+
+                        MemberAnnotationView(
+                            member: member,
+                            isMe: false,
+                            radarColor: themeColor
+                        )
+                        .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
+                        .animation(.linear(duration: 0), value: displayCoordinate)
+                    }
                 }
                 
-                // Active Tactical Indicators (Orders & Enemy markers)
+                // Active Tactical Indicators within outer radar distance (d <= 4S)
                 ForEach(gameState.allTacticalIndicators) { indicator in
-                    let offset = pointOffset(for: indicator.coordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
-                    
-                    TacticalIndicatorOverlayView(
-                        indicator: indicator,
-                        radarColor: themeColor,
-                        onDelete: {
-                            gameState.removeTacticalIndicator(id: indicator.id)
-                        }
-                    )
-                    .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
+                    let d = gameState.distanceToLocalPlayer(from: indicator.coordinate)
+                    if d <= outerRadarDistanceMeters {
+                        let offset = pointOffset(for: indicator.coordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
+                        
+                        TacticalIndicatorOverlayView(
+                            indicator: indicator,
+                            radarColor: themeColor,
+                            onDelete: {
+                                gameState.removeTacticalIndicator(id: indicator.id)
+                            }
+                        )
+                        .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
+                    }
                 }
                 
                 // Local Player "Me" (Always pinned to local player offset / center)

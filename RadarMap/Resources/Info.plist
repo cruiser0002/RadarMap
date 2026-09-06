@@ -27,13 +27,13 @@
 	<key>MinimumOSVersion</key>
 	<string>10.0</string>
 	<key>NSHealthShareUsageDescription</key>
-	<string>Radar Map reads your heart rate to stream live squad biometric stress levels to teammates.</string>
+	<string>Radar Map reads your heart rate to stream live team biometric exertion levels to teammates during active sessions.</string>
 	<key>NSHealthUpdateUsageDescription</key>
-	<string>Radar Map records tactical workout sessions to maintain live heart rate streaming.</string>
+	<string>Radar Map records outdoor workout and activity sessions to track physical exertion and maintain live heart rate streaming.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Radar Map tracks tactical coordinates during active squad sessions.</string>
+	<string>Radar Map tracks real-time location coordinates during active squad sessions.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Radar Map requires your location to display your position on the tactical milsim map and share it with your squad.</string>
+	<string>Radar Map requires your location to display your position on the team map and share live coordinates with your squad.</string>
 	<key>WKApplication</key>
 	<true/>
 	<key>WKBackgroundModes</key>

@@ -579,12 +579,12 @@ class RadarPlayerSimulator:
         self.callsign = callsign.strip()
         # Plain user-entered name (<=12 chars) — the Firebase path key is the derived `room_id`
         # below, not this. See CLOUD_DATA_MANAGEMENT.md.
-        self.room_name = room_name.strip().upper()[:self.MAX_ROOM_NAME_ENTRY_LENGTH]
+        self.room_name = self.sanitize_room_name(room_name)
         self.pin = self.sanitize_pin(pin) if pin else ""
         if len(self.pin) < self.MIN_PIN_LENGTH:
             raise ValueError(
-                f"PIN is mandatory and must be at least {self.MIN_PIN_LENGTH} digits "
-                "(see CLOUD_DATA_MANAGEMENT.md) — pass pin=... with >= 4 digits."
+                f"PIN is mandatory and must be at least {self.MIN_PIN_LENGTH} characters "
+                "(see CLOUD_DATA_MANAGEMENT.md) — pass pin=... with >= 4 alphanumeric characters."
             )
         self.max_tactical_indicators = self.PRO_TIER_MAX_TACTICAL_INDICATORS
         self.room_id = self.room_name + self.derive_room_padding(self.pin, self.room_name)
@@ -634,10 +634,22 @@ class RadarPlayerSimulator:
         }
 
     @staticmethod
+    def sanitize_room_name(name: str) -> str:
+        """Sanitizes a room/squad name to ASCII alphanumerics, uppercased, up to
+        MAX_ROOM_NAME_ENTRY_LENGTH characters, matching GameStateManager.sanitizeRoomNameInput.
+        Non-ASCII characters (e.g. Greek letters, emoji) are stripped rather than counted, so the
+        derived room-id padding length agrees with the server's UTF-16 `.validate` length check —
+        see CLOUD_DATA_MANAGEMENT.md §6.A."""
+        alphanumeric = [c for c in name if c.isascii() and c.isalnum()]
+        return "".join(alphanumeric).upper()[:RadarPlayerSimulator.MAX_ROOM_NAME_ENTRY_LENGTH]
+
+    @staticmethod
     def sanitize_pin(pin: str) -> str:
-        """Sanitizes PIN input, filtering digits up to MAX_PIN_LENGTH characters matching GameStateManager."""
-        digits = [c for c in pin if c.isdigit()]
-        return "".join(digits[:RadarPlayerSimulator.MAX_PIN_LENGTH])
+        """Sanitizes PIN input to ASCII alphanumerics up to MAX_PIN_LENGTH characters, matching
+        GameStateManager.sanitizePinInput. Must stay alphanumeric (not digits-only) so a PIN typed
+        into the Swift app hashes identically here — see CLOUD_DATA_MANAGEMENT.md §6.A."""
+        alphanumeric = [c for c in pin if c.isascii() and c.isalnum()]
+        return "".join(alphanumeric[:RadarPlayerSimulator.MAX_PIN_LENGTH])
 
     @staticmethod
     def hash_pin(pin: str, salt: str) -> str:

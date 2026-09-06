@@ -10,7 +10,7 @@
       "internalID" : "com.radarmap.watch.pro.internal",
       "localizations" : [
         {
-          "description" : "Create squads of >4 operators and place tactical map indicators.",
+          "description" : "Host squads of up to 12 players and place custom field map markers.",
           "displayName" : "Squad Leader Lifetime",
           "locale" : "en_US"
         }

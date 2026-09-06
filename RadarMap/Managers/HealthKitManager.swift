@@ -8,34 +8,53 @@ public final class HealthKitManager: NSObject, ObservableObject {
     @Published public var currentHeartRate: Double = AppConstants.Health.defaultRestingHeartRate
     @Published public var isSessionActive: Bool = false
     @Published public var isLowPowerPPGEnabled: Bool = true
-    
+    /// Share-side authorization only — HealthKit deliberately never exposes read-side grant/deny
+    /// status. Workout share is requested in the same call as heart rate read, so this is the
+    /// closest available proxy for "did the user allow HealthKit access." Not meaningful on iOS,
+    /// where this app never touches HealthKit directly.
+    #if os(watchOS)
+    @Published public var authorizationStatus: HKAuthorizationStatus = .notDetermined
+    #else
+    @Published public var authorizationStatus: HKAuthorizationStatus = .sharingAuthorized
+    #endif
+
     #if os(watchOS)
     private let healthStore = HKHealthStore()
     private var workoutSession: HKWorkoutSession?
     private var workoutBuilder: HKLiveWorkoutBuilder?
     private var ppgDutyCycleTimer: AnyCancellable?
     #endif
-    
+
     public override init() {
         super.init()
+        #if os(watchOS)
+        if HKHealthStore.isHealthDataAvailable() {
+            authorizationStatus = healthStore.authorizationStatus(for: HKObjectType.workoutType())
+        }
+        #endif
     }
-    
+
     public func requestAuthorization(completion: @escaping (Bool) -> Void = { _ in }) {
         #if os(watchOS)
         guard HKHealthStore.isHealthDataAvailable() else {
             completion(false)
             return
         }
-        
+
         let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
         let typesToRead: Set<HKObjectType> = [heartRateType]
         let typesToShare: Set<HKSampleType> = [
             HKObjectType.workoutType(),
             heartRateType
         ]
-        
-        healthStore.requestAuthorization(toShare: typesToShare, read: typesToRead) { success, _ in
+
+        healthStore.requestAuthorization(toShare: typesToShare, read: typesToRead) { [weak self] success, _ in
             DispatchQueue.main.async {
+                guard let self = self else {
+                    completion(success)
+                    return
+                }
+                self.authorizationStatus = self.healthStore.authorizationStatus(for: HKObjectType.workoutType())
                 completion(success)
             }
         }

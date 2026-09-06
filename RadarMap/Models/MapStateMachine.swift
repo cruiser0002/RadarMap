@@ -32,26 +32,26 @@ public enum MapAction {
     case centerOnLocalUser
     case pan(to: CLLocationCoordinate2D, userCoord: CLLocationCoordinate2D)
     case setScale(meters: Double)
-    case cycleStyle
+    case togglePresentation
     case userMoved(to: CLLocationCoordinate2D)
 }
 
-/// Dedicated, deterministic State Machine governing Map scale, style, and tracking.
+/// Dedicated, deterministic State Machine governing Map scale, presentation, and tracking.
 public struct MapStateMachine: Equatable {
     public private(set) var trackingState: MapTrackingState
     public private(set) var scaleMeters: Double
-    public private(set) var style: TacticalMapStyle
+    public private(set) var presentation: TacticalPresentation
     public private(set) var centerTriggerCount: Int
     
     public init(
         trackingState: MapTrackingState = .locked,
-        scaleMeters: Double = AppConstants.UI.RadarScale.defaultScaleMeters,
-        style: TacticalMapStyle = .radar,
+        scaleMeters: Double = TacticalScalePolicy.defaultScale,
+        presentation: TacticalPresentation = .radar,
         centerTriggerCount: Int = 0
     ) {
         self.trackingState = trackingState
         self.scaleMeters = scaleMeters
-        self.style = style
+        self.presentation = presentation
         self.centerTriggerCount = centerTriggerCount
     }
     
@@ -75,21 +75,15 @@ public struct MapStateMachine: Equatable {
             }
             
         case let .setScale(meters):
-            #if os(watchOS)
-            let maxScale = AppConstants.UI.RadarScale.maxWatchScaleMeters
-            #else
-            let maxScale = AppConstants.UI.RadarScale.maxiOSScaleMeters
-            #endif
-            let clamped = min(max(meters, AppConstants.UI.RadarScale.minScaleMeters), maxScale)
-            let snapped = AppConstants.UI.RadarScale.snapToDiscreteScale(clamped)
+            let snapped = TacticalScalePolicy().nearestAllowedScale(to: meters)
             scaleMeters = snapped
             
-        case .cycleStyle:
-            switch style {
-            case .standard:
-                style = .radar
+        case .togglePresentation:
+            switch presentation {
+            case .map:
+                presentation = .radar
             case .radar:
-                style = .standard
+                presentation = .map
             }
             
         case .userMoved:

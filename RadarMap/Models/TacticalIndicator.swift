@@ -239,7 +239,7 @@ public struct TacticalIndicator: Identifiable, Codable, Equatable {
     }
     
     public init(
-        id: String = UUID().uuidString,
+        id: String = GameStateManager.generateShortMemberId(),
         type: TacticalIndicatorType,
         coordinate: CLLocationCoordinate2D,
         placedByMemberId: String,

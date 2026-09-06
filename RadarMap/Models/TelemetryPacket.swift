@@ -43,12 +43,19 @@ public struct TelemetryPacket: Codable, Equatable {
 extension TelemetryPacket {
     /// Serializes packet to an ultra-lean 4-element compact array format:
     /// `[0: lat, 1: lng, 2: hr, 3: ts]` (4 elements).
+    ///
+    /// Each field is rounded to the coarsest precision that's still far finer than what the
+    /// delta/heartbeat gating upstream of this call can ever act on, shaving digits off the
+    /// wire JSON (and RTDB's per-byte fan-out cost) for free: 6 decimal places on lat/lng is
+    /// ~0.11m, well under the 3.5m position delta gate; whole-BPM heart rate is well under the
+    /// 12 BPM delta gate; millisecond timestamps are far finer than the dead-reckoning velocity
+    /// math (which operates over multi-second intervals) needs.
     public func toCompactArray() -> [Any] {
         return [
-            latitude,
-            longitude,
-            heartRate,
-            timestamp
+            (latitude * 1_000_000).rounded() / 1_000_000,
+            (longitude * 1_000_000).rounded() / 1_000_000,
+            heartRate.rounded(),
+            (timestamp * 1_000).rounded() / 1_000
         ]
     }
     

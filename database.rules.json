@@ -2,47 +2,45 @@
   "rules": {
     ".read": false,
     ".write": false,
-    "rooms": {
-      ".indexOn": ["expireAt", "createdAt", "lastActivityTimestamp"],
+    "r": {
       "$roomId": {
         ".read": true,
-        ".write": "data.exists() || newData.child('id').exists() || newData.child('createdAt').exists()",
-        ".validate": "$roomId.length > 0 && $roomId.length <= 64",
-        "members": {
-          ".read": "root.child('rooms').child($roomId).exists()",
-          ".write": "root.child('rooms').child($roomId).exists()"
+        ".write": "data.exists() || newData.child('id').exists()",
+        ".validate": "$roomId.length > 0 && $roomId.length <= 16 && $roomId.matches(/^[A-Z0-9]+$/)",
+        "m": {
+          ".read": "root.child('r').child($roomId).exists()",
+          "$memberId": {
+            ".write": "root.child('r').child($roomId).exists()",
+            ".validate": "$memberId.length == 8"
+          }
         }
       }
     },
-    "telemetry": {
+    "p": {
       "$roomId": {
-        ".read": "root.child('rooms').child($roomId).exists()",
-        ".write": "!newData.exists() || (root.child('rooms').child($roomId).exists() && newData.hasChild('expireAt'))",
+        ".read": "root.child('r').child($roomId).exists()",
+        ".write": "!newData.exists() || (root.child('r').child($roomId).exists() && newData.hasChild('exp'))",
         "$memberId": {
-          ".write": "root.child('rooms').child($roomId).child('members').child($memberId).exists() || !newData.exists()"
+          ".write": "root.child('r').child($roomId).child('m').child($memberId).exists() || !newData.exists()",
+          ".validate": "$memberId.length == 8"
         }
       }
     },
-    "tactical": {
+    "t": {
       "$roomId": {
-        ".read": "root.child('rooms').child($roomId).exists()",
-        ".write": "!newData.exists() || (root.child('rooms').child($roomId).exists() && (newData.hasChild('meta') || newData.hasChild('updatedAt')))",
-        "meta": {
-          ".write": "root.child('rooms').child($roomId).exists()"
-        },
-        "updatedAt": {
-          ".write": "root.child('rooms').child($roomId).exists()"
-        },
-        "indicators": {
+        ".read": "root.child('r').child($roomId).exists()",
+        ".write": "!newData.exists() || (root.child('r').child($roomId).exists() && newData.hasChild('exp'))",
+        "o": {
           "$indicatorId": {
-            ".write": "!newData.exists() || (root.child('rooms').child($roomId).exists() && newData.child('placedByMemberId').exists() && root.child('rooms').child($roomId).child('members').child(newData.child('placedByMemberId').val()).exists())"
+            ".write": "!newData.exists() || root.child('r').child($roomId).exists()"
           }
         },
-        "$legacyIndicatorId": {
-          ".write": "!newData.exists() || (root.child('rooms').child($roomId).exists() && newData.child('placedByMemberId').exists() && root.child('rooms').child($roomId).child('members').child(newData.child('placedByMemberId').val()).exists())"
+        "i": {
+          "$indicatorId": {
+            ".write": "!newData.exists() || root.child('r').child($roomId).exists()"
+          }
         }
       }
     }
   }
 }
-

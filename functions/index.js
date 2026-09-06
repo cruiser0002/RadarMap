@@ -12,7 +12,7 @@ const db = admin.database();
 /**
  * 2nd-Gen Scheduled Cloud Function: cleanExpiredRooms
  * Runs every hour to query and purge expired rooms and their corresponding
- * nodes across /rooms, /tactical, and /telemetry sub-trees in an atomic multi-path update.
+ * nodes across /r, /t, and /p sub-trees in an atomic multi-path update.
  */
 exports.cleanExpiredRooms = onSchedule(
   {
@@ -26,37 +26,57 @@ exports.cleanExpiredRooms = onSchedule(
 
     try {
       const snapshot = await db
-        .ref("/rooms")
-        .orderByChild("expireAt")
+        .ref("/r")
+        .orderByChild("exp")
         .endAt(nowSeconds)
         .once("value");
-
-      if (!snapshot.exists()) {
-        logger.info("No expired rooms found.");
-        return;
-      }
 
       const updates = {};
       let expiredCount = 0;
 
-      snapshot.forEach((childSnap) => {
-        const roomId = childSnap.key;
-        const roomData = childSnap.val() || {};
+      if (snapshot.exists()) {
+        snapshot.forEach((childSnap) => {
+          const roomId = childSnap.key;
+          const roomData = childSnap.val() || {};
+          const expireAt = roomData.exp !== undefined ? roomData.exp : roomData.expireAt;
 
-        if (roomData.expireAt !== undefined && roomData.expireAt !== null && Number(roomData.expireAt) <= nowSeconds) {
-          logger.info(`Queueing expired room ${roomId} for deletion (expireAt: ${roomData.expireAt})`);
-          updates[`/rooms/${roomId}`] = null;
-          updates[`/tactical/${roomId}`] = null;
-          updates[`/telemetry/${roomId}`] = null;
-          expiredCount++;
-        }
-      });
+          if (expireAt !== undefined && expireAt !== null && Number(expireAt) <= nowSeconds) {
+            logger.info(`Queueing expired room ${roomId} for deletion (expireAt: ${expireAt})`);
+            updates[`/r/${roomId}`] = null;
+            updates[`/t/${roomId}`] = null;
+            updates[`/p/${roomId}`] = null;
+            expiredCount++;
+          }
+        });
+      }
+
+      // Also scan legacy expireAt
+      const legacySnap = await db
+        .ref("/r")
+        .orderByChild("expireAt")
+        .endAt(nowSeconds)
+        .once("value");
+
+      if (legacySnap.exists()) {
+        legacySnap.forEach((childSnap) => {
+          const roomId = childSnap.key;
+          const roomData = childSnap.val() || {};
+          const expireAt = roomData.expireAt;
+          if (expireAt !== undefined && expireAt !== null && Number(expireAt) <= nowSeconds && !updates[`/r/${roomId}`]) {
+            logger.info(`Queueing legacy expired room ${roomId} for deletion (expireAt: ${expireAt})`);
+            updates[`/r/${roomId}`] = null;
+            updates[`/t/${roomId}`] = null;
+            updates[`/p/${roomId}`] = null;
+            expiredCount++;
+          }
+        });
+      }
 
       if (expiredCount > 0) {
         await db.ref().update(updates);
-        logger.info(`Successfully deleted ${expiredCount} expired room(s) across /rooms, /tactical, and /telemetry.`);
+        logger.info(`Successfully deleted ${expiredCount} expired room(s) across /r, /t, and /p.`);
       } else {
-        logger.info("Snapshot returned keys, but none matched expiration condition.");
+        logger.info("No expired rooms found.");
       }
     } catch (err) {
       logger.error("Error during cleanExpiredRooms execution:", err);
@@ -67,11 +87,11 @@ exports.cleanExpiredRooms = onSchedule(
 
 /**
  * 1) Empty or Host Departure Room Cleanup Trigger:
- * Triggered on any write/delete to /rooms/{roomId}/members.
+ * Triggered on any write/delete to /r/{roomId}/m.
  * If the host leaves or members node becomes empty, automatically deletes the room, tactical, and associated telemetry.
  */
 exports.cleanupEmptyRoom = functions.database
-  .ref("/rooms/{roomId}/members")
+  .ref("/r/{roomId}/m")
   .onWrite(async (change, context) => {
     // Early exit if the data was deleted (e.g. room was purged) to prevent cascading writes
     if (!change.after.exists()) {
@@ -85,24 +105,25 @@ exports.cleanupEmptyRoom = functions.database
     if (!membersData || Object.keys(membersData).length === 0) {
       functions.logger.info(`Room ${roomId} has 0 members. Purging room, tactical, and telemetry...`);
       const updates = {};
-      updates[`/rooms/${roomId}`] = null;
-      updates[`/tactical/${roomId}`] = null;
-      updates[`/telemetry/${roomId}`] = null;
+      updates[`/r/${roomId}`] = null;
+      updates[`/t/${roomId}`] = null;
+      updates[`/p/${roomId}`] = null;
       await db.ref().update(updates);
       functions.logger.info(`Successfully deleted empty room ${roomId}, tactical, and associated telemetry.`);
       return null;
     }
 
-    // Check if the host has left the room
+    // Check if the host has left the room (support both hst and hostId)
     try {
-      const hostSnap = await db.ref(`/rooms/${roomId}/hostId`).once("value");
-      const hostId = hostSnap.val();
+      const roomSnap = await db.ref(`/r/${roomId}`).once("value");
+      const roomVal = roomSnap.val() || {};
+      const hostId = roomVal.hst || roomVal.hostId;
       if (hostId && !membersData[hostId]) {
         functions.logger.info(`Host ${hostId} has left room ${roomId}. Purging room, tactical, and telemetry...`);
         const updates = {};
-        updates[`/rooms/${roomId}`] = null;
-        updates[`/tactical/${roomId}`] = null;
-        updates[`/telemetry/${roomId}`] = null;
+        updates[`/r/${roomId}`] = null;
+        updates[`/t/${roomId}`] = null;
+        updates[`/p/${roomId}`] = null;
         await db.ref().update(updates);
         functions.logger.info(`Successfully purged disbanded room ${roomId} after host departure.`);
       }
@@ -114,62 +135,38 @@ exports.cleanupEmptyRoom = functions.database
   });
 
 /**
- * 2) 7-Day Idle Room Cleanup Schedule:
- * Runs daily at 00:00 UTC.
- * Scans /rooms and deletes any room where lastActivityTimestamp (or createdAt) is older than 7 days (604,800,000 ms).
- * Also cleans up any orphaned telemetry and tactical nodes.
+ * 2) Tactical Indicator Cap Enforcement:
+ * Triggered on any write to /t/{roomId}/i/{indicatorId} (enemy + environment indicators only —
+ * squad orders under /t/{roomId}/o self-prune client-side and never hit this cap). Evicts the
+ * oldest entries once the branch exceeds the room's `mti` cap. See ROOM_ID_HARDENING.md §6.
  */
-exports.scheduledDailyCleanup = functions.pubsub
-  .schedule("every 24 hours")
-  .timeZone("UTC")
-  .onRun(async (context) => {
-    const now = Date.now();
-    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-    const cutoffTimestamp = now - sevenDaysMs;
+exports.pruneExcessTacticalIndicators = functions.database
+  .ref("/t/{roomId}/i/{indicatorId}")
+  .onWrite(async (change, context) => {
+    if (!change.after.exists()) return null; // ignore deletes
 
-    functions.logger.info(`Running scheduled cleanup for rooms older than ${new Date(cutoffTimestamp).toISOString()}`);
+    const roomId = context.params.roomId;
 
-    const roomsSnapshot = await db.ref("/rooms").once("value");
-    if (!roomsSnapshot.exists()) {
-      functions.logger.info("No rooms found in database.");
-      return null;
-    }
+    const roomSnap = await db.ref(`/r/${roomId}`).once("value");
+    const roomVal = roomSnap.val() || {};
+    const MAX_TACTICAL = roomVal.mti !== undefined ? Number(roomVal.mti) : 20;
 
-    const updates = {};
-    let deletedCount = 0;
+    const snap = await db.ref(`/t/${roomId}/i`).once("value");
+    if (!snap.exists() || snap.numChildren() <= MAX_TACTICAL) return null;
 
-    roomsSnapshot.forEach((roomSnap) => {
-      const roomId = roomSnap.key;
-      const room = roomSnap.val() || {};
-
-      // Check last activity timestamp, fallback to createdAt or 0
-      let lastActive = room.lastActivityTimestamp || room.createdAt || 0;
-      // Convert seconds to ms if stored as unix seconds
-      if (lastActive < 10000000000) {
-        lastActive = lastActive * 1000;
-      }
-
-      const members = room.members ? Object.keys(room.members) : [];
-
-      const isIdleSevenDays = lastActive > 0 && lastActive < cutoffTimestamp;
-      const isEmpty = members.length === 0;
-
-      if (isIdleSevenDays || isEmpty) {
-        functions.logger.info(`Marking room ${roomId} for deletion (idle: ${isIdleSevenDays}, empty: ${isEmpty}, lastActive: ${new Date(lastActive).toISOString()})`);
-        updates[`/rooms/${roomId}`] = null;
-        updates[`/tactical/${roomId}`] = null;
-        updates[`/telemetry/${roomId}`] = null;
-        deletedCount += 1;
-      }
+    const entries = [];
+    snap.forEach((child) => {
+      const arr = child.val(); // [type_code, lat, lon, ts, placedByMemberId]
+      const ts = Array.isArray(arr) ? arr[3] : arr["3"];
+      entries.push({ id: child.key, ts: Number(ts) });
     });
 
-    if (deletedCount > 0) {
-      await db.ref().update(updates);
-      functions.logger.info(`Successfully cleaned up ${deletedCount} idle/empty rooms and associated telemetry.`);
-    } else {
-      functions.logger.info("No idle rooms exceeded the 7-day cutoff.");
-    }
-
+    entries.sort((a, b) => a.ts - b.ts);
+    const overflow = entries.slice(0, entries.length - MAX_TACTICAL);
+    const updates = {};
+    overflow.forEach((e) => { updates[`/t/${roomId}/i/${e.id}`] = null; });
+    await db.ref().update(updates);
+    logger.info(`Pruned ${overflow.length} excess tactical indicator(s) in room ${roomId}.`);
     return null;
   });
 

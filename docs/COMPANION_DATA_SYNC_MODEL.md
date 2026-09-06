@@ -6,7 +6,7 @@ This document formalizes the **Watch-Centric Local Companion Data Sync Model** b
 
 ## ⚡ Key Companion Sync Constants
 
-The following centralized constants from [`AppConstants.swift`](RadarMap/AppConstants.swift) (`AppConstants.WatchConnectivity`) govern `WCSession` message routing, lease heartbeats, and timestamp-driven state merging:
+The following centralized constants from [`AppConstants.swift`](../RadarMap/AppConstants.swift) (`AppConstants.WatchConnectivity`) govern `WCSession` message routing, lease heartbeats, and timestamp-driven state merging:
 
 | Section & Domain | Constant / Identifier | Value | Protocol Purpose & Architectural Scope |
 | :--- | :--- | :--- | :--- |

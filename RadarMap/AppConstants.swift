@@ -29,26 +29,70 @@ public enum AppConstants {
     public enum Storage {
         public static let userCallsignKey = "user_callsign"
         public static let savedRoomNameKey = "saved_room_name"
-        public static let userMemberIdKey = "user_member_id"
         public static let radarColorThemeKey = "radar_color_theme"
         public static let hasUnlimitedSquadUnlockKey = "hasUnlimitedSquadUnlock"
         public static let savedPinKey = "saved_pin"
         public static let isUploadHeartRateEnabledKey = "is_upload_heart_rate_enabled"
         public static let isUploadLocationEnabledKey = "is_upload_location_enabled"
+        public static let customDatabaseURLKey = "custom_database_url"
+        public static let isCustomDatabaseURLEnabledKey = "is_custom_database_url_enabled"
+        public static let recentDatabaseURLsKey = "recent_database_urls"
     }
     
     // MARK: - Networking & Realtime Database
     public enum Network {
         /// Firebase Realtime Database default endpoint URL
         public static let defaultDatabaseURL = "https://radarmap-8adf0-default-rtdb.firebaseio.com"
+
+        /// Generous upper bound on a real Firebase RTDB URL (a real one is ~50-90 characters).
+        /// Exists to keep the join QR code's payload small and reliably scannable — it's encoded
+        /// alongside the room name and PIN (see QRJoinPayload/JoinQRBox), and an unbounded field
+        /// here would be the one way to blow that up, whether by accident (a stray paste) or
+        /// otherwise, denser than the small screens it's displayed on can actually scan.
+        public static let maxDatabaseURLLength: Int = 200
+
+        /// Whether `string` is well-formed enough to hand to `Database.database(url:)` without it
+        /// trapping. Firebase's SDK terminates the app with an uncaught `NSException` when given a
+        /// URL it can't parse as an http(s) host root (e.g. missing scheme, or a bare word like
+        /// "dfgdsgf") — this check must run before any custom database URL reaches that call.
+        /// RFC 3986 URI characters (unreserved + reserved + percent-encoding) — the widest set a
+        /// legitimate Firebase RTDB URL can ever need. Unlike the room-name/PIN fields, a URL
+        /// can't be restricted to plain alphanumerics (it requires `: / . -` at minimum), so this
+        /// instead strips everything a URL *never* contains: whitespace, control characters, and
+        /// any non-ASCII text (e.g. from a stray paste or the camera-scan OCR field) that would
+        /// otherwise make `Database.database(url:)` trap instead of failing gracefully.
+        private static let uriCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%")
+
+        /// Sanitizes free-typed or scanned text destined for the custom-database-URL field to
+        /// RFC 3986 URI characters only. Does not itself validate URL well-formedness — pair with
+        /// `isValidDatabaseURL` before use.
+        public static func sanitizeInput(_ string: String) -> String {
+            let filtered = string.unicodeScalars.filter { uriCharacters.contains($0) }
+            return String(String.UnicodeScalarView(filtered)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        public static func isValidDatabaseURL(_ string: String) -> Bool {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count <= maxDatabaseURLLength,
+                  let url = URL(string: trimmed),
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "https" || scheme == "http",
+                  let host = url.host, !host.isEmpty else {
+                return false
+            }
+            return true
+        }
         
         /// Firebase Realtime Database path endpoints
         public enum Endpoints {
-            public static let rooms = "rooms"
-            public static let telemetry = "telemetry"
-            public static let tactical = "tactical"
-            public static let lastActivityTimestamp = "lastActivityTimestamp"
-            public static let members = "members"
+            public static let rooms = "r"
+            public static let telemetry = "p"
+            public static let tactical = "t"
+            public static let members = "m"
+            /// Squad-order indicators, under tactical/{roomId} — self-pruning, no numeric cap.
+            public static let orders = "o"
+            /// Enemy + environment indicators, under tactical/{roomId} — shares the room's `mti` cap.
+            public static let indicators = "i"
         }
         
         /// Quality monitoring and latency grading thresholds
@@ -79,10 +123,12 @@ public enum AppConstants {
         
         /// Squad player capacity limits
         public static let freeTierMaxCapacity: Int = 4
-        public static let proTierMaxCapacity: Int = 999
-        
-        /// Tactical Indicators Constants
-        public static let maxEnemyIndicatorsCount: Int = 20
+        public static let proTierMaxCapacity: Int = 12
+
+        /// Tactical Indicators Constants — shared cap on enemy+environment indicators (squad
+        /// orders self-prune separately and don't count against this cap; see CLOUD_DATA_MANAGEMENT.md)
+        public static let freeTierMaxTacticalIndicators: Int = 0
+        public static let proTierMaxTacticalIndicators: Int = 20
         public static let enemyIndicatorFadeDurationSeconds: TimeInterval = 300.0 // 5 minutes
         public static let indicatorHoldToDeleteDurationSeconds: TimeInterval = 1.2
         public static var tacticalIndicatorAckTimeoutSeconds: TimeInterval = 10.0
@@ -94,14 +140,16 @@ public enum AppConstants {
     
     // MARK: - Privacy & Policy
     public enum Policy {
-        public static let privacyPolicyURL = "https://radarmap.app/privacy"
+        public static let privacyPolicyURL = "https://www.privacypolicies.com/live/ffdebf4f-ec87-4552-aa22-f438f6fabc94"
+        public static let termsOfServiceURL = "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/"
         public static let contactEmail = "sweetdreamsdeveloper@gmail.com"
         public static let contactFormURL = "https://forms.gle/pCuy2zJtSfLoyqj16"
         
-        public static let summary = "Radar Map is committed to protecting your privacy. We collect real-time location and heart rate data solely for live squad tactical coordination during active sessions."
-        public static let locationDataDescription = "Location data (GPS coordinates, heading, course over ground) is streamed in real time to your squad room and is automatically purged when the room is disbanded or after 7 days of inactivity. You can opt out of location uploading at any time in Config."
-        public static let healthDataDescription = "Heart rate biometrics are read via Apple HealthKit to display squad stress levels and vital status. This data is never sold, used for advertising, or shared with third parties. You can opt out of HR uploading at any time in Config."
+        public static let summary = "Radar Map is committed to protecting your privacy. We collect real-time location and heart rate data solely for live squad coordination during active sessions."
+        public static let locationDataDescription = "Location data (GPS coordinates, heading, course over ground) is streamed in real time to your squad room and is automatically purged when the room is disbanded or after 24 hours of inactivity. Continued use of GPS running in the background can dramatically decrease battery life. You can opt out of location uploading at any time in Settings."
+        public static let healthDataDescription = "Heart rate biometrics are read via Apple HealthKit during outdoor workouts to display team exertion levels and vital status. This data is never sold, used for advertising, or shared with third parties. You can opt out of HR uploading at any time in Settings."
         public static let dataRetentionDescription = "We do not sell your data or use tracking cookies. All session data is ephemeral and tied to temporary squad rooms."
+        public static let batteryDisclaimer = "Continued use of GPS running in the background can dramatically decrease battery life."
     }
     
     // MARK: - Location & Geodesic Navigation
@@ -207,33 +255,48 @@ public enum AppConstants {
         public enum DisplayRefresh {
             public static let radarUIHz: Double = 20.0
             public static let radarUIIntervalSeconds: TimeInterval = 1.0 / 20.0
+
+            /// Rate at which extrapolated (dead-reckoned) positions for remote squad members are
+            /// recomputed for local rendering, independent of how often real telemetry updates
+            /// actually arrive over the network (see DEAD_RECKONING.md). Tunable — start conservative.
+            public static let remotePlayerDeadReckoningHz: Double = 1.0
+            public static let remotePlayerDeadReckoningIntervalSeconds: TimeInterval = 1.0 / remotePlayerDeadReckoningHz
         }
         
         /// Movement and telemetry delta gating thresholds (Dead Reckoning optimization)
         public enum DeltaGating {
-            public static let minMovementDeltaMeters: Double = 3.5 // Ignore natural GPS drift (< 3.5m)
+            /// Max allowed divergence between actual position and where a peer's dead-reckoning
+            /// extrapolation (from our last two sent samples) would predict us to be right now.
+            /// Below this, peers' predictions are already accurate enough — skip the send.
+            public static let maxPredictedPositionErrorMeters: Double = 3.5
             public static let minHeartRateDeltaBpm: Double = 12.0  // Ignore respiration & PPG sensor jitter (< 12 BPM)
-            public static let staleHeartbeatFrequencyDivisor: Double = 2.0 // Upload fallback is twice as frequent as stale timeout duration
-            public static let heartbeatFallbackIntervalSeconds: TimeInterval = 10.0 // Fixed fallback timer constant for upload liveness (10s)
+
+            /// Master switch for the heart rate delta gate. Real HR is always uploaded regardless
+            /// of this flag — this only controls whether a >= minHeartRateDeltaBpm swing is allowed
+            /// to force an early telemetry emit. Flip to false to send HR passively (still gated by
+            /// the position delta and 10*T heartbeat fallback) without HR jitter causing extra uploads.
+            public static let heartRateDeltaGatingEnabled: Bool = false
         }
         
         /// Theoretical aggregate bandwidth rate adaptation equation constants & schedule
         public enum ConstantBandwidth {
             public static let playerThreshold: Int = 12
             public static let baselineMaxUpdateRateHz: Double = 1.0
-            public static let refreshIntervalMultiplier: Double = 7.0
+            public static let refreshIntervalMultiplier: Double = 10.0
             public static let staleTimeoutMultiplier: Double = 15.0
             
             /// Computes the maximum update rate in Hz for a given player count.
             /// For P <= 12: 1.0 Hz
-            /// For P > 12: 1.0 * (12 / P)^2
+            /// For P > 12: 1.0 * (12 / P) — linear falloff, chosen so that
+            /// aggregate bandwidth (P * rate) stays constant at the P=12 ceiling
+            /// rather than continuing to shrink as the room grows further.
             public static func maxUpdateRateHz(forPlayerCount playerCount: Int) -> Double {
                 guard playerCount > 0 else { return baselineMaxUpdateRateHz }
                 if playerCount <= playerThreshold {
                     return baselineMaxUpdateRateHz
                 }
                 let ratio = Double(playerThreshold) / Double(playerCount)
-                return baselineMaxUpdateRateHz * (ratio * ratio)
+                return baselineMaxUpdateRateHz * ratio
             }
             
             /// Computes the minimum update interval in seconds.
@@ -263,9 +326,12 @@ public enum AppConstants {
         
         /// Inactivity room cleanup threshold & TTL duration
         public enum Inactivity {
-            public static let idleCutoffDays: Double = 7.0
-            public static let secondsPerDay: Double = 86400.0
-            public static let ttlDurationSeconds: TimeInterval = idleCutoffDays * secondsPerDay
+            public static let idleCutoffHours: Double = 12.0
+            public static let secondsPerHour: Double = 3600.0
+            public static let ttlDurationSeconds: TimeInterval = idleCutoffHours * secondsPerHour
+            /// Cadence at which the host re-pushes `exp` (see FirebaseSyncManager.refreshRoomExpiry)
+            /// to keep an actively-hosted room alive past idleCutoffHours.
+            public static let ttlRefreshIntervalSeconds: TimeInterval = secondsPerHour
         }
         
         /// Hold-to-Die gesture timing parameters
@@ -323,12 +389,9 @@ public enum AppConstants {
         public enum MetadataKeys {
             public static let memberId = "mid"
             public static let callsign = "csn"
-            public static let isHost = "hst"
+            public static let hostId = "hst"
             public static let maxCapacity = "cap"
             public static let pinHash = "pin"
-            public static let createdAt = "cts"
-            public static let updatedAt = "uts"
-            public static let lastActivity = "ats"
             public static let expireAt = "exp"
         }
     }
@@ -349,7 +412,28 @@ public enum AppConstants {
         }
         
         /// PIN Input formatting & length
-        public static let maxPinLength: Int = 4
+        public static let maxPinLength: Int = 16
+
+        /// Room / Squad id total length (user-entered name + PIN-derived padding suffix). This is
+        /// the actual Firebase path key length and must stay in sync with database.rules.json's
+        /// `$roomId.length <= 16` validation.
+        public static let maxRoomNameLength: Int = 16
+
+        /// Max characters a user may type into the Squad Name field. The remainder of
+        /// `maxRoomNameLength` (4 chars) is padding deterministically derived from the room's
+        /// (mandatory) PIN at creation/join time, so a joiner's client can recompute the full id
+        /// locally from the same name + PIN without any extra characters being relayed. See
+        /// CLOUD_DATA_MANAGEMENT.md.
+        public static let maxRoomNameEntryLength: Int = 12
+
+        /// Minimum characters required in the Squad Name field (see CLOUD_DATA_MANAGEMENT.md).
+        public static let minRoomNameEntryLength: Int = 4
+
+        /// Minimum characters required in the (mandatory) PIN field (see CLOUD_DATA_MANAGEMENT.md).
+        public static let minPinLength: Int = 4
+
+        /// Number of most-recently-used custom database URLs remembered for quick reselection.
+        public static let maxRecentDatabaseURLs: Int = 3
         
         /// Voice dictation word mapping for PIN entry
         public static let pinWordMapping: [String: String] = [
@@ -365,64 +449,41 @@ public enum AppConstants {
             "nine": "9"
         ]
         
-        /// Radar scale distance bounds (meters)
+        /// Radar scale distance bounds (meters) and canonical scale ladder policy
         public enum RadarScale {
-            public static let defaultScaleMeters: Double = 50.0
-            public static let minScaleMeters: Double = 1.0
-            public static let maxWatchScaleMeters: Double = 2500.0
-            public static let maxiOSScaleMeters: Double = 2500.0
-            public static let crownStepMeters: Double = 10.0
+            public static let defaultScaleMeters: Double = TacticalScalePolicy.defaultScale
+            public static let minScaleMeters: Double = TacticalScalePolicy.minScale
+            public static let maxScaleMeters: Double = TacticalScalePolicy.maxScale
+            public static let maxWatchScaleMeters: Double = TacticalScalePolicy.maxScale
+            public static let maxiOSScaleMeters: Double = TacticalScalePolicy.maxScale
             
-            /// Minor scale zoom ladder: decades of [1, 2.5, 5] from 1m to km scale (2.5km)
-            public static let discreteScales: [Double] = [
-                1.0,
-                2.5,
-                5.0,
-                10.0,
-                25.0,
-                50.0,
-                100.0,
-                250.0,
-                500.0,
-                1000.0,
-                2500.0
-            ]
+            /// Canonical discrete `[1, 2.5, 5]` decade scale ladder from 1m to 2.5km
+            public static let discreteScales: [Double] = TacticalScalePolicy.standardAllowedScales
+            
+            public static let policy = TacticalScalePolicy()
             
             /// Finds the closest discrete scale index for a given scale in meters
             public static func nearestScaleIndex(for scaleMeters: Double) -> Int {
-                var closestIndex = 0
-                var minDiff = Double.greatestFiniteMagnitude
-                for (index, scale) in discreteScales.enumerated() {
-                    let diff = abs(scale - scaleMeters)
-                    if diff < minDiff {
-                        minDiff = diff
-                        closestIndex = index
-                    }
-                }
-                return closestIndex
+                let target = policy.nearestAllowedScale(to: scaleMeters)
+                return discreteScales.firstIndex(of: target) ?? 0
             }
             
-            /// Snaps an arbitrary scale to the nearest discrete whole-number division scale
+            /// Snaps an arbitrary scale to the nearest discrete ladder scale using logarithmic comparison
             public static func snapToDiscreteScale(_ scaleMeters: Double) -> Double {
-                let index = nearestScaleIndex(for: scaleMeters)
-                return discreteScales[index]
+                return policy.nearestAllowedScale(to: scaleMeters)
             }
             
             /// Returns the next discrete scale zooming IN (smaller meter distance).
             public static func stepZoomIn(from scaleMeters: Double) -> Double {
-                let currentIndex = nearestScaleIndex(for: scaleMeters)
-                let targetIndex = max(0, currentIndex - 1)
-                return discreteScales[targetIndex]
+                return policy.previousScale(before: scaleMeters)
             }
             
             /// Returns the next discrete scale zooming OUT (larger meter distance).
             public static func stepZoomOut(from scaleMeters: Double) -> Double {
-                let currentIndex = nearestScaleIndex(for: scaleMeters)
-                let targetIndex = min(discreteScales.count - 1, currentIndex + 1)
-                return discreteScales[targetIndex]
+                return policy.nextScale(after: scaleMeters)
             }
             
-            /// Finds the crown index (reversed direction: 0 = max zoomed out 2500m, max index = max zoomed in 1m)
+            /// Finds the crown index (reversed direction: 0 = max zoomed out 50km, max index = max zoomed in 50m)
             public static func crownIndex(for scaleMeters: Double) -> Double {
                 let nearestIdx = nearestScaleIndex(for: scaleMeters)
                 return Double((discreteScales.count - 1) - nearestIdx)
@@ -435,11 +496,6 @@ public enum AppConstants {
                 let scaleIndex = maxIdx - intIndex
                 return discreteScales[scaleIndex]
             }
-            
-            /// Logarithmic crown parameters for proportional (Apple Maps-style) zoom
-            public static let minLogScale: Double = log(minScaleMeters)
-            public static let maxLogScaleWatch: Double = log(maxWatchScaleMeters)
-            public static let logCrownStep: Double = 0.22 // ~25% proportional rough zoom per detent (matching standard Apple Maps)
             
             /// Display geometry ratios
             public static let radarRadiusRatio: Double = 0.44
@@ -467,28 +523,15 @@ public enum AppConstants {
                 let visibleMetersLat = (mapSpanDelta * AppConstants.Location.metersPerDegreeLatitude) / referenceScreenAspectRatio
                 let outerRadarMeters = visibleMetersLat * radarRadiusRatio
                 let minorScaleMeters = outerRadarMeters / 4.0
-                #if os(watchOS)
-                let maxScale = maxWatchScaleMeters
-                #else
-                let maxScale = maxiOSScaleMeters
-                #endif
-                return min(max(minorScaleMeters, minScaleMeters), maxScale)
+                return policy.nearestAllowedScale(to: minorScaleMeters)
             }
             
             /// Converts a MapKit MapCamera distance (altitude) to an equivalent clamped minor radar scale in meters.
             public static func scaleMeters(forCameraDistance distance: Double) -> Double {
-                // MapKit MapCamera altitude calculation inverse:
-                // distance = visibleMetersLat / (2 * tan(15 deg))
-                // visibleMetersLat = distance * 2 * tan(15 deg)
                 let visibleMetersLat = distance * (2.0 * tan(15.0 * .pi / 180.0))
                 let outerRadarMeters = (visibleMetersLat / referenceScreenAspectRatio) * radarRadiusRatio
                 let minorScaleMeters = outerRadarMeters / 4.0
-                #if os(watchOS)
-                let maxScale = maxWatchScaleMeters
-                #else
-                let maxScale = maxiOSScaleMeters
-                #endif
-                return min(max(minorScaleMeters, minScaleMeters), maxScale)
+                return policy.nearestAllowedScale(to: minorScaleMeters)
             }
             
             /// Converts a minor radar scale in meters to an equivalent MapKit MapCamera distance (altitude).

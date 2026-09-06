@@ -8,7 +8,7 @@ It is structured to be **fully reproducible and parameterized**: whenever a netw
 
 ## ⚡ Quick Start: How to Re-evaluate Future Network Changes
 
-All benchmark outputs (evaluations, JSON dumps, and side-by-side comparison tables) are **automatically stored in the [`output/`](output/) folder**.
+All benchmark outputs (evaluations, JSON dumps, and side-by-side comparison tables) are **automatically stored in the [`output/`](../output/) folder**.
 
 When proposing or testing a network design update:
 1. **Define or update candidate parameters** in a JSON file (e.g. `benchmarks/candidate_scheme_v2_optimized.json`) or modify `scripts/network_benchmark.py`.
@@ -223,7 +223,7 @@ For a revenue target $R_{\text{target}}$ (e.g. $50\%$ of gross $\approx \$9.995$
 
 ### C. Text & UID Shortening Specification (Hardened Wire Schema)
 
-Per [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md) and [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md), all text on the wire is systematically shortened to eliminate JSON and path overhead:
+Per [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md), all text on the wire is systematically shortened to eliminate JSON and path overhead:
 
 #### 1. RTDB Path Segments (Single-Character Endpoints)
 | Original Segment | Hardened Segment | Byte Savings | Code Mapping |
@@ -249,10 +249,10 @@ Per [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md) and [`CLOUD_DATA_MANA
 #### 3. Property Key Elimination via Compact Positional Arrays
 Instead of JSON key-value dictionaries `{"lat": 37.78, "lon": -122.40, ...}`, payloads are serialized as zero-key positional arrays:
 * **Telemetry Array (4 elements):** `[lat, lng, hr, ts]`
-  * Code: [`TelemetryPacket.toCompactArray()`](RadarMap/Models/TelemetryPacket.swift#L53-L60)
+  * Code: [`TelemetryPacket.toCompactArray()`](../RadarMap/Models/TelemetryPacket.swift#L53-L60)
   * Eliminates all field name overhead (`latitude`, `longitude`, `heartRate`, `timestamp`, `memberId`, `roomId`).
 * **Tactical Array (5 elements):** `[type_code, lat, lng, ts, memberId]`
-  * Code: [`TacticalIndicator.compactArray`](RadarMap/Models/TacticalIndicator.swift#L262-L270)
+  * Code: [`TacticalIndicator.compactArray`](../RadarMap/Models/TacticalIndicator.swift#L262-L270)
   * Eliminates keys `type`, `latitude`, `longitude`, `timestamp`, `placedByMemberId`.
 
 #### 4. Centralized 3-Letter Tactical Type Codes
@@ -264,9 +264,9 @@ Tactical indicator type strings are shortened to 3 ASCII letters (`AppConstants.
 #### 5. UID Length Hardening & Implementation Status
 | Identifier Type | Planned Length & Encoding | Live Code Status | Rationale / Reference |
 | :--- | :---: | :---: | :--- |
-| **Room ID** | **16 chars** (12-char squad name + 4-char PIN-derived Crockford Base32 padding) | ✅ Active in code | Prevents dictionary room enumeration (`CLOUD_DATA_MANAGEMENT.md` §1) |
-| **Member ID** | **8 chars** (Crockford Base32: `[2-9A-HJKMNP-Z]`) | ✅ Active in code | Generated via `GameStateManager.generateShortMemberId()` (shaves 28 B off 36-char UUID) |
-| **Tactical Indicator ID** | **8 chars** (Crockford Base32) | ⚠️ **Gap: Defaults to 36-char UUID** | Planned in `CLOUD_DATA_MANAGEMENT.md` §4; `TacticalIndicator.swift:242` currently defaults to `UUID().uuidString` |
+| **Room ID** | **16 chars** (4–12 char squad name + dynamic Crockford Base32 padding) | ✅ Active in code | Prevents dictionary room enumeration (see [`CLOUD_DATA_MANAGEMENT.md`](CLOUD_DATA_MANAGEMENT.md) §7.A) |
+| **Member ID** | **8 chars** (Crockford Base32: `[2-9A-HJKMNP-Z]`) | ✅ Active in code | Deterministically derived from callsign via `GameStateManager.deriveMemberId(fromCallsign:)` (SHA256, same pattern as `deriveRoomPadding`) rather than randomly generated, so the phone and watch companion apps — which run independent `GameStateManager` instances with no shared `UserDefaults` (no App Group entitlement) — converge on the same member id for the same callsign without a WatchConnectivity sync round-trip. `GameStateManager.generateShortMemberId()` still exists for constructing/decoding an *other* member with an unknown id. |
+| **Tactical Indicator ID** | **8 chars** (Crockford Base32) | ✅ Active in code | `TacticalIndicator.swift:242` defaults `id` to `GameStateManager.generateShortMemberId()` (was `UUID().uuidString`) |
 
 ---
 
@@ -295,11 +295,11 @@ flowchart LR
    * Inspect the framed WebSocket text frames.
    * Verify the JSON payload length and add WebSocket + TLS overhead (~40–60 bytes per packet).
 3. **Using In-App Metrics:**
-   * [`FirebaseSyncManager.swift`](RadarMap/Managers/FirebaseSyncManager.swift) maintains `_uploadMetrics.telemetryWritesCompleted` and `_uploadMetrics.tacticalWritesCompleted`.
+   * [`FirebaseSyncManager.swift`](../RadarMap/Managers/FirebaseSyncManager.swift) maintains `_uploadMetrics.telemetryWritesCompleted` and `_uploadMetrics.tacticalWritesCompleted`.
    * Cross-reference completed write counts against elapsed match duration to confirm $R_{\text{up}} \approx 0.5\text{ Hz}$.
 
 ### Step 2: Measuring Delta-Gated Upload Frequency ($R_{\text{up}}$)
-* Use [`player_simulator.py`](notebooks/player_simulator.py) to simulate standard tactical patrol movement (run once per simulated player, joining the same room, to build up a 12-player room):
+* Use [`player_simulator.py`](../notebooks/player_simulator.py) to simulate standard tactical patrol movement (run once per simulated player, joining the same room, to build up a 12-player room):
   ```bash
   python3 notebooks/player_simulator.py --mode host --room ALPHA --pin 1234 --callsign VIPER-1 --speed 1.5 --radius 50
   ```
@@ -362,10 +362,10 @@ flowchart LR
 
 ## 5. Automated Evaluation CLI & Comparison Engine
 
-The benchmark evaluation script is committed at [`scripts/network_benchmark.py`](scripts/network_benchmark.py). It has **zero external dependencies** (standard Python 3 only) and generates all markdown tables deterministically.
+The benchmark evaluation script is committed at [`scripts/network_benchmark.py`](../scripts/network_benchmark.py). It has **zero external dependencies** (standard Python 3 only) and generates all markdown tables deterministically.
 
 ### Output Storage Policy & CLI Usage:
-All benchmark outputs are written directly to the [`output/`](output/) directory by default:
+All benchmark outputs are written directly to the [`output/`](../output/) directory by default:
 * **Evaluation Reports:** `output/benchmark_<scheme_name>.md` and `output/benchmark_<scheme_name>.json`
 * **Comparison Reports:** `output/benchmark_comparison_<scheme_a>_vs_<scheme_b>.md`
 
