@@ -192,10 +192,51 @@ public final class GameStateManager: ObservableObject {
     }
     
     public func distanceToLocalPlayer(from coordinate: CLLocationCoordinate2D) -> Double {
-        let playerCoord = localPlayerMember.coordinate
-        let dLat = (coordinate.latitude - playerCoord.latitude) * AppConstants.Location.metersPerDegreeLatitude
-        let dLon = (coordinate.longitude - playerCoord.longitude) * AppConstants.Location.metersPerDegreeLatitude * cos(coordinate.latitude * AppConstants.Location.degreesToRadiansFactor)
+        Self.distance(from: localPlayerMember.coordinate, to: coordinate)
+    }
+
+    /// Equirectangular approximation, accurate enough at tactical (sub-kilometer) ranges.
+    public static func distance(from a: CLLocationCoordinate2D, to b: CLLocationCoordinate2D) -> Double {
+        let dLat = (b.latitude - a.latitude) * AppConstants.Location.metersPerDegreeLatitude
+        let dLon = (b.longitude - a.longitude) * AppConstants.Location.metersPerDegreeLatitude * cos(b.latitude * AppConstants.Location.degreesToRadiansFactor)
         return hypot(dLat, dLon)
+    }
+
+    // MARK: - Tap-to-Measure Distance Line (local UI state only, never synced)
+
+    public enum MeasuredAnnotationSelection: Equatable {
+        case squadMember(id: String)
+        case tacticalIndicator(id: String)
+    }
+
+    /// The annotation currently selected for the tap-to-measure distance line, if any. This is
+    /// purely local UI state (not part of any synced/Codable payload) — never read or written by
+    /// FirebaseSyncManager.
+    @Published public var selectedAnnotationForDistance: MeasuredAnnotationSelection? = nil
+
+    public func toggleAnnotationSelection(_ selection: MeasuredAnnotationSelection) {
+        selectedAnnotationForDistance = (selectedAnnotationForDistance == selection) ? nil : selection
+    }
+
+    /// Resolves a selection to its live display coordinate, or nil if the underlying entity no
+    /// longer exists (already removed/expired).
+    public func coordinate(for selection: MeasuredAnnotationSelection) -> CLLocationCoordinate2D? {
+        switch selection {
+        case .squadMember(let id):
+            guard let member = otherSquadMembers.first(where: { $0.id == id }) else { return nil }
+            return remoteDisplayPositions[id] ?? member.coordinate
+        case .tacticalIndicator(let id):
+            return allTacticalIndicators.first(where: { $0.id == id })?.coordinate
+        }
+    }
+
+    /// Clears `selectedAnnotationForDistance` if the entity it refers to has disappeared. Called
+    /// after `otherSquadMembers`/`allTacticalIndicators` are recomputed.
+    private func pruneSelectionIfStale() {
+        guard let selection = selectedAnnotationForDistance else { return }
+        if coordinate(for: selection) == nil {
+            selectedAnnotationForDistance = nil
+        }
     }
     
     // MARK: - State Machine Action Handlers
@@ -323,6 +364,7 @@ public final class GameStateManager: ObservableObject {
         if rawIndicators.isEmpty {
             if !allTacticalIndicators.isEmpty { allTacticalIndicators = [] }
             syncTacticalToWatchConnectivity()
+            pruneSelectionIfStale()
             return
         }
         
@@ -372,6 +414,7 @@ public final class GameStateManager: ObservableObject {
             allTacticalIndicators = sorted
             syncTacticalToWatchConnectivity()
         }
+        pruneSelectionIfStale()
     }
     
     /// Sweep of expired non-order indicators plus `mti` cap enforcement, run by every member.
@@ -405,6 +448,7 @@ public final class GameStateManager: ObservableObject {
         guard let currentRoom = currentRoom else {
             if !otherSquadMembers.isEmpty { otherSquadMembers = [] }
             syncMembershipToWatchConnectivity()
+            pruneSelectionIfStale()
             return
         }
         let filtered = currentRoom.members.values.filter { $0.id != myMemberId }.sorted { $0.id < $1.id }
@@ -412,6 +456,7 @@ public final class GameStateManager: ObservableObject {
             otherSquadMembers = filtered
         }
         syncMembershipToWatchConnectivity()
+        pruneSelectionIfStale()
     }
     
     public var isProUser: Bool {

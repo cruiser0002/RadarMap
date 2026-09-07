@@ -17,12 +17,43 @@ final class SquadMemberAnnotation: NSObject, MKAnnotation {
     }
 }
 
+/// Marker for the midpoint label of the tap-to-measure distance line (single instance, local UI state only).
+final class DistanceLabelMKAnnotation: NSObject, MKAnnotation {
+    dynamic var coordinate: CLLocationCoordinate2D
+    var text: String
+
+    init(coordinate: CLLocationCoordinate2D, text: String) {
+        self.coordinate = coordinate
+        self.text = text
+        super.init()
+    }
+}
+
+/// Small label badge, styled consistently with the callsign/order-callsign badges, shown at the
+/// midpoint of the tap-to-measure distance line.
+private struct DistanceLabelView: View {
+    let text: String
+    let radarColor: Color
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: AppConstants.UI.MapMarkers.callsignFontSize, weight: .bold, design: .monospaced))
+            .foregroundColor(radarColor)
+            .lineLimit(1)
+            .padding(.horizontal, 3.0)
+            .padding(.vertical, 1.0)
+            .background(Color.black.opacity(0.85))
+            .cornerRadius(3)
+            .fixedSize()
+    }
+}
+
 /// Custom MKAnnotation representation for tactical indicator annotations.
 final class TacticalIndicatorMKAnnotation: NSObject, MKAnnotation {
     let indicatorId: String
     dynamic var coordinate: CLLocationCoordinate2D
     var indicator: TacticalIndicator
-    
+
     init(indicator: TacticalIndicator) {
         self.indicatorId = indicator.id
         self.coordinate = indicator.coordinate
@@ -173,6 +204,11 @@ public struct TacticalMKMapView: UIViewRepresentable {
         private var memberHosts: [ObjectIdentifier: UIHostingController<MemberAnnotationView>] = [:]
         private var tacticalHosts: [ObjectIdentifier: UIHostingController<TacticalIndicatorOverlayView>] = [:]
 
+        // Tap-to-Measure Distance Line: at most one polyline + midpoint label exist at a time.
+        private var distanceLabelHosts: [ObjectIdentifier: UIHostingController<DistanceLabelView>] = [:]
+        private var distancePolyline: MKPolyline?
+        private var distanceLabelAnnotation: DistanceLabelMKAnnotation?
+
         init(_ parent: TacticalMKMapView) {
             self.parent = parent
             self.lastObservedCenterTrigger = parent.gameState.radarCenterTrigger
@@ -187,13 +223,21 @@ public struct TacticalMKMapView: UIViewRepresentable {
             view.centerOffset = .zero
             view.bounds = CGRect(x: 0, y: 0, width: size, height: size)
             let radarColor = parent.gameState.radarColorTheme.color
+            let onTap: () -> Void = { [weak self] in
+                guard let self, self.parent.gameState.pendingIndicatorPlacementType == nil else { return }
+                if isMe {
+                    self.parent.gameState.selectedAnnotationForDistance = nil
+                } else {
+                    self.parent.gameState.toggleAnnotationSelection(.squadMember(id: member.id))
+                }
+            }
             let key = ObjectIdentifier(view)
             if let host = memberHosts[key] {
-                host.rootView = MemberAnnotationView(member: member, isMe: isMe, radarColor: radarColor)
+                host.rootView = MemberAnnotationView(member: member, isMe: isMe, radarColor: radarColor, onTap: onTap)
                 host.view.frame = view.bounds
             } else {
                 view.subviews.forEach { $0.removeFromSuperview() }
-                let host = UIHostingController(rootView: MemberAnnotationView(member: member, isMe: isMe, radarColor: radarColor))
+                let host = UIHostingController(rootView: MemberAnnotationView(member: member, isMe: isMe, radarColor: radarColor, onTap: onTap))
                 host.view.backgroundColor = .clear
                 host.view.frame = view.bounds
                 view.addSubview(host.view)
@@ -218,12 +262,17 @@ public struct TacticalMKMapView: UIViewRepresentable {
             let onDelete: () -> Void = { [weak self] in
                 self?.parent.gameState.removeTacticalIndicator(id: indicator.id)
             }
-            
+            let onTap: () -> Void = { [weak self] in
+                guard let self, self.parent.gameState.pendingIndicatorPlacementType == nil else { return }
+                self.parent.gameState.toggleAnnotationSelection(.tacticalIndicator(id: indicator.id))
+            }
+
             if let host = tacticalHosts[key] {
                 host.rootView = TacticalIndicatorOverlayView(
                     indicator: indicator,
                     radarColor: radarColor,
-                    onDelete: onDelete
+                    onDelete: onDelete,
+                    onTap: onTap
                 )
                 host.view.frame = CGRect(x: -half, y: -half, width: touchTargetSize, height: touchTargetSize)
             } else {
@@ -231,7 +280,8 @@ public struct TacticalMKMapView: UIViewRepresentable {
                 let host = UIHostingController(rootView: TacticalIndicatorOverlayView(
                     indicator: indicator,
                     radarColor: radarColor,
-                    onDelete: onDelete
+                    onDelete: onDelete,
+                    onTap: onTap
                 ))
                 host.view.backgroundColor = .clear
                 host.view.frame = CGRect(x: -half, y: -half, width: touchTargetSize, height: touchTargetSize)
@@ -244,7 +294,88 @@ public struct TacticalMKMapView: UIViewRepresentable {
         private func releaseTacticalContent(for view: MKAnnotationView) {
             tacticalHosts.removeValue(forKey: ObjectIdentifier(view))
         }
-        
+
+        /// Creates or updates the hosted DistanceLabelView content for `view`, auto-sizing the
+        /// hosting view's bounds to the label's intrinsic size.
+        private func applyDistanceLabelContent(text: String, to view: MKAnnotationView) {
+            let radarColor = parent.gameState.radarColorTheme.color
+            let key = ObjectIdentifier(view)
+            let rootView = DistanceLabelView(text: text, radarColor: radarColor)
+            let host: UIHostingController<DistanceLabelView>
+            if let existing = distanceLabelHosts[key] {
+                existing.rootView = rootView
+                host = existing
+            } else {
+                view.subviews.forEach { $0.removeFromSuperview() }
+                host = UIHostingController(rootView: rootView)
+                host.view.backgroundColor = .clear
+                view.addSubview(host.view)
+                distanceLabelHosts[key] = host
+            }
+            let size = host.sizeThatFits(in: CGSize(width: 200, height: 40))
+            view.bounds = CGRect(origin: .zero, size: size)
+            host.view.frame = view.bounds
+            view.centerOffset = .zero
+        }
+
+        /// Drops the cached hosting controller for a removed distance-label view.
+        private func releaseDistanceLabelContent(for view: MKAnnotationView) {
+            distanceLabelHosts.removeValue(forKey: ObjectIdentifier(view))
+        }
+
+        /// Adds/updates the single tap-to-measure polyline + midpoint label, or removes both when
+        /// no annotation is selected. Purely local UI state — never synced.
+        private func updateDistanceLine(in mapView: MKMapView) {
+            guard let selection = parent.gameState.selectedAnnotationForDistance,
+                  let selectedCoordinate = parent.gameState.coordinate(for: selection) else {
+                clearDistanceLine(in: mapView)
+                return
+            }
+
+            let meCoordinate = parent.gameState.localPlayerMember.coordinate
+            let midpoint = CLLocationCoordinate2D(
+                latitude: (meCoordinate.latitude + selectedCoordinate.latitude) / 2,
+                longitude: (meCoordinate.longitude + selectedCoordinate.longitude) / 2
+            )
+            let labelText = AppConstants.UI.ScaleRuler.formatDistance(
+                meters: GameStateManager.distance(from: meCoordinate, to: selectedCoordinate)
+            )
+
+            if let existingPolyline = distancePolyline {
+                mapView.removeOverlay(existingPolyline)
+            }
+            let polyline = MKPolyline(coordinates: [meCoordinate, selectedCoordinate], count: 2)
+            distancePolyline = polyline
+            mapView.addOverlay(polyline)
+
+            if let existingLabel = distanceLabelAnnotation {
+                existingLabel.coordinate = midpoint
+                existingLabel.text = labelText
+                if let view = mapView.view(for: existingLabel) {
+                    applyDistanceLabelContent(text: labelText, to: view)
+                }
+            } else {
+                let label = DistanceLabelMKAnnotation(coordinate: midpoint, text: labelText)
+                distanceLabelAnnotation = label
+                mapView.addAnnotation(label)
+            }
+        }
+
+        private func clearDistanceLine(in mapView: MKMapView) {
+            if let existingPolyline = distancePolyline {
+                mapView.removeOverlay(existingPolyline)
+                distancePolyline = nil
+            }
+            if let existingLabel = distanceLabelAnnotation {
+                if let view = mapView.view(for: existingLabel) {
+                    releaseDistanceLabelContent(for: view)
+                }
+                mapView.removeAnnotation(existingLabel)
+                distanceLabelAnnotation = nil
+            }
+        }
+
+
         func setupDisplayLink(for mapView: MKMapView) {
             self.activeMapView = mapView
             let link = CADisplayLink(target: self, selector: #selector(readLiveRulerGeometry))
@@ -385,8 +516,10 @@ public struct TacticalMKMapView: UIViewRepresentable {
                     mapView.addAnnotation(newAnno)
                 }
             }
+
+            updateDistanceLine(in: mapView)
         }
-        
+
         // MARK: - MKMapViewDelegate
         
         public func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
@@ -431,8 +564,32 @@ public struct TacticalMKMapView: UIViewRepresentable {
                 }
                 return view
             }
-            
+
+            if let distanceLabelAnno = annotation as? DistanceLabelMKAnnotation {
+                let identifier = "DistanceLabelAnnotationView"
+                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                if view == nil {
+                    view = MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    view?.canShowCallout = false
+                }
+                view?.annotation = annotation
+                if let view {
+                    applyDistanceLabelContent(text: distanceLabelAnno.text, to: view)
+                }
+                return view
+            }
+
             return nil
+        }
+
+        public func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
+            if let polyline = overlay as? MKPolyline {
+                let renderer = MKPolylineRenderer(polyline: polyline)
+                renderer.strokeColor = UIColor(parent.gameState.radarColorTheme.color).withAlphaComponent(0.85)
+                renderer.lineWidth = 1.0
+                return renderer
+            }
+            return MKOverlayRenderer(overlay: overlay)
         }
 
         public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool {

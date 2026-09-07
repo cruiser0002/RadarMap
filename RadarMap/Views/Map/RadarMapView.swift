@@ -102,38 +102,77 @@ public struct RadarMapView: View {
                         MemberAnnotationView(
                             member: member,
                             isMe: false,
-                            radarColor: themeColor
+                            radarColor: themeColor,
+                            onTap: {
+                                guard gameState.pendingIndicatorPlacementType == nil else { return }
+                                gameState.toggleAnnotationSelection(.squadMember(id: member.id))
+                            }
                         )
                         .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
                         .animation(.linear(duration: 0), value: displayCoordinate)
                     }
                 }
-                
+
                 // Active Tactical Indicators within outer radar distance (d <= 4S)
                 ForEach(gameState.allTacticalIndicators) { indicator in
                     let d = gameState.distanceToLocalPlayer(from: indicator.coordinate)
                     if d <= outerRadarDistanceMeters {
                         let offset = pointOffset(for: indicator.coordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
-                        
+
                         TacticalIndicatorOverlayView(
                             indicator: indicator,
                             radarColor: themeColor,
                             onDelete: {
                                 gameState.removeTacticalIndicator(id: indicator.id)
+                            },
+                            onTap: {
+                                guard gameState.pendingIndicatorPlacementType == nil else { return }
+                                gameState.toggleAnnotationSelection(.tacticalIndicator(id: indicator.id))
                             }
                         )
                         .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
                     }
                 }
-                
+
                 // Local Player "Me" (Always pinned to local player offset / center)
                 let meOffset = pointOffset(for: meMember.coordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
                 MemberAnnotationView(
                     member: meMember,
                     isMe: true,
-                    radarColor: themeColor
+                    radarColor: themeColor,
+                    onTap: {
+                        gameState.selectedAnnotationForDistance = nil
+                    }
                 )
                 .position(x: centerPoint.x + meOffset.x, y: centerPoint.y + meOffset.y)
+
+                // Tap-to-Measure Distance Line: single thin line from "me" to the selected
+                // annotation, with the distance labeled at its midpoint. Purely local UI state.
+                if let selection = gameState.selectedAnnotationForDistance,
+                   let selectedCoordinate = gameState.coordinate(for: selection) {
+                    let mePoint = CGPoint(x: centerPoint.x + meOffset.x, y: centerPoint.y + meOffset.y)
+                    let selectedOffset = pointOffset(for: selectedCoordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
+                    let selectedPoint = CGPoint(x: centerPoint.x + selectedOffset.x, y: centerPoint.y + selectedOffset.y)
+                    let midpoint = CGPoint(x: (mePoint.x + selectedPoint.x) / 2, y: (mePoint.y + selectedPoint.y) / 2)
+                    let distanceMeters = GameStateManager.distance(from: meMember.coordinate, to: selectedCoordinate)
+
+                    Path { path in
+                        path.move(to: mePoint)
+                        path.addLine(to: selectedPoint)
+                    }
+                    .stroke(themeColor.opacity(0.85), lineWidth: 1.0)
+
+                    Text(AppConstants.UI.ScaleRuler.formatDistance(meters: distanceMeters))
+                        .font(.system(size: AppConstants.UI.MapMarkers.callsignFontSize, weight: .bold, design: .monospaced))
+                        .foregroundColor(themeColor)
+                        .lineLimit(1)
+                        .padding(.horizontal, 3.0)
+                        .padding(.vertical, 1.0)
+                        .background(Color.black.opacity(0.85))
+                        .cornerRadius(3)
+                        .fixedSize()
+                        .position(midpoint)
+                }
             }
             .contentShape(Rectangle())
             .simultaneousGesture(

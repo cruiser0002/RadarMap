@@ -112,13 +112,17 @@ struct NativeSwiftUIMapView: View {
                         MemberAnnotationView(
                             member: member,
                             isMe: false,
-                            radarColor: radarThemeColor
+                            radarColor: radarThemeColor,
+                            onTap: {
+                                guard gameState.pendingIndicatorPlacementType == nil else { return }
+                                gameState.toggleAnnotationSelection(.squadMember(id: member.id))
+                            }
                         )
                         .animation(.linear(duration: 0), value: displayCoordinate)
                     }
                     .annotationTitles(.hidden)
                 }
-                
+
                 // Tactical Indicators
                 ForEach(gameState.allTacticalIndicators, id: \.id) { indicator in
                     Annotation(
@@ -131,18 +135,53 @@ struct NativeSwiftUIMapView: View {
                             radarColor: radarThemeColor,
                             onDelete: {
                                 gameState.removeTacticalIndicator(id: indicator.id)
+                            },
+                            onTap: {
+                                guard gameState.pendingIndicatorPlacementType == nil else { return }
+                                gameState.toggleAnnotationSelection(.tacticalIndicator(id: indicator.id))
                             }
                         )
                     }
                 }
-                
+
                 // Native User Location customized without owning coordinates
                 UserAnnotation {
                     MemberAnnotationView(
                         member: meMember,
                         isMe: true,
-                        radarColor: radarThemeColor
+                        radarColor: radarThemeColor,
+                        onTap: {
+                            gameState.selectedAnnotationForDistance = nil
+                        }
                     )
+                }
+
+                // Tap-to-Measure Distance Line: single thin line from "me" to the selected
+                // annotation, with the distance labeled at its midpoint. Purely local UI state.
+                if let selection = gameState.selectedAnnotationForDistance,
+                   let selectedCoordinate = gameState.coordinate(for: selection) {
+                    let meCoordinate = meMember.coordinate
+                    let midpoint = CLLocationCoordinate2D(
+                        latitude: (meCoordinate.latitude + selectedCoordinate.latitude) / 2,
+                        longitude: (meCoordinate.longitude + selectedCoordinate.longitude) / 2
+                    )
+                    let distanceMeters = GameStateManager.distance(from: meCoordinate, to: selectedCoordinate)
+
+                    MapPolyline(coordinates: [meCoordinate, selectedCoordinate])
+                        .stroke(radarThemeColor.opacity(0.85), lineWidth: 1.0)
+
+                    Annotation("", coordinate: midpoint, anchor: .center) {
+                        Text(AppConstants.UI.ScaleRuler.formatDistance(meters: distanceMeters))
+                            .font(.system(size: AppConstants.UI.MapMarkers.callsignFontSize, weight: .bold, design: .monospaced))
+                            .foregroundColor(radarThemeColor)
+                            .lineLimit(1)
+                            .padding(.horizontal, 3.0)
+                            .padding(.vertical, 1.0)
+                            .background(Color.black.opacity(0.85))
+                            .cornerRadius(3)
+                            .fixedSize()
+                    }
+                    .annotationTitles(.hidden)
                 }
             }
             .mapStyle(.standard(elevation: .flat, pointsOfInterest: .excludingAll))

@@ -4,11 +4,13 @@ public struct MemberAnnotationView: View {
     public let member: SquadMember
     public let isMe: Bool
     public let radarColor: Color
-    
-    public init(member: SquadMember, isMe: Bool = false, radarColor: Color = .green) {
+    public let onTap: (() -> Void)?
+
+    public init(member: SquadMember, isMe: Bool = false, radarColor: Color = .green, onTap: (() -> Void)? = nil) {
         self.member = member
         self.isMe = isMe
         self.radarColor = radarColor
+        self.onTap = onTap
     }
     
     /// Determines whether the player is considered KIA / Downed
@@ -97,5 +99,7 @@ public struct MemberAnnotationView: View {
                     .offset(y: markers.callsignYOffset)
             }
         }
+        .contentShape(Rectangle())
+        .onTapGesture { onTap?() }
     }
 }

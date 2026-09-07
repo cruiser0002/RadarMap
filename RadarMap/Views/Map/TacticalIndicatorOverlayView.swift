@@ -26,20 +26,24 @@ public struct TacticalIndicatorOverlayView: View {
     public let indicator: TacticalIndicator
     public let radarColor: Color
     public let onDelete: () -> Void
-    
+    public let onTap: (() -> Void)?
+
     @State private var isHolding: Bool = false
     @State private var holdProgress: Double = 0.0
     @State private var holdTimer: Timer? = nil
     @State private var holdStartTime: Date? = nil
-    
+    @State private var didTriggerDelete: Bool = false
+
     public init(
         indicator: TacticalIndicator,
         radarColor: Color,
-        onDelete: @escaping () -> Void
+        onDelete: @escaping () -> Void,
+        onTap: (() -> Void)? = nil
     ) {
         self.indicator = indicator
         self.radarColor = radarColor
         self.onDelete = onDelete
+        self.onTap = onTap
     }
     
     /// Calculate color taking into account the 5-minute fade to gray rule for enemy indicators
@@ -108,7 +112,12 @@ public struct TacticalIndicatorOverlayView: View {
                     startHold()
                 }
                 .onEnded { _ in
+                    let wasDeleting = didTriggerDelete
+                    didTriggerDelete = false
                     cancelHold()
+                    if !wasDeleting {
+                        onTap?()
+                    }
                 }
         )
         .onDisappear {
@@ -157,6 +166,7 @@ public struct TacticalIndicatorOverlayView: View {
         holdStartTime = nil
         isHolding = false
         holdProgress = 0.0
+        didTriggerDelete = true
         onDelete()
     }
 }
