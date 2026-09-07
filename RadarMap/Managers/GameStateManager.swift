@@ -328,11 +328,41 @@ public final class GameStateManager: ObservableObject {
         
         let mapped = rawIndicators.map { ind -> TacticalIndicator in
             var updated = ind
-            // Dynamically resolve callsign from current roster using placedByMemberId
-            if let member = currentRoom?.members[ind.placedByMemberId], !member.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let trimmedPlacedBy = ind.placedByMemberId.trimmingCharacters(in: .whitespacesAndNewlines)
+            
+            // 1. Direct or case-insensitive match in current room members by member ID or dictionary key
+            var resolvedMember: SquadMember? = nil
+            if let members = currentRoom?.members {
+                if let direct = members[trimmedPlacedBy] ?? members[ind.placedByMemberId] {
+                    resolvedMember = direct
+                } else if let caseMatch = members.first(where: {
+                    $0.key.caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame ||
+                    $0.value.id.caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame
+                })?.value {
+                    resolvedMember = caseMatch
+                } else if let callsignMatch = members.values.first(where: {
+                    !$0.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+                    $0.callsign.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame
+                }) {
+                    resolvedMember = callsignMatch
+                }
+            }
+            
+            let trimmedLocalId = self.myMemberId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedLocalCallsign = self.myCallsign.trimmingCharacters(in: .whitespacesAndNewlines)
+            let isLocalPlayer = !trimmedPlacedBy.isEmpty && (
+                trimmedPlacedBy.caseInsensitiveCompare(trimmedLocalId) == .orderedSame ||
+                (!trimmedLocalCallsign.isEmpty && trimmedPlacedBy.caseInsensitiveCompare(trimmedLocalCallsign) == .orderedSame)
+            )
+            
+            if let member = resolvedMember, !member.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 updated.placedByCallsign = member.callsign
-            } else if let localCallsign = (ind.placedByMemberId == myMemberId ? myCallsign : nil), !localCallsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                updated.placedByCallsign = localCallsign
+            } else if isLocalPlayer, !trimmedLocalCallsign.isEmpty {
+                updated.placedByCallsign = trimmedLocalCallsign
+            } else if let existing = ind.placedByCallsign?.trimmingCharacters(in: .whitespacesAndNewlines), !existing.isEmpty {
+                updated.placedByCallsign = existing
+            } else {
+                updated.placedByCallsign = ""
             }
             return updated
         }
@@ -344,18 +374,26 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
-    /// Local-only instant-UI-feedback sweep of this device's own expired non-order indicators.
-    /// Cap eviction and cross-member expiry pruning now live server-side (Cloud Function
-    /// `pruneExcessTacticalIndicators`, see CLOUD_DATA_MANAGEMENT.md) — this no longer performs any
-    /// remote deletion.
-    public func enforceHostTacticalIndicatorMaintenance() {
-        guard isHosting else { return }
+    /// Sweep of expired non-order indicators plus `mti` cap enforcement, run by every member.
+    /// The Cloud Function `pruneExcessTacticalIndicators` (see CLOUD_DATA_MANAGEMENT.md) is the
+    /// authoritative pruner when it's deployed, but self-hosted rooms may not run Cloud Functions
+    /// at all — this mirrors its oldest-first eviction so the cap still holds without one. Every
+    /// member computes the same oldest-first overflow from the same merged `allTacticalIndicators`
+    /// view, so their deletes target the same IDs; a delete on an already-deleted path is a no-op,
+    /// so redundant deletes from multiple members are harmless rather than a race.
+    public func enforceTacticalIndicatorMaintenance() {
         let expiredIds = localIndicators.values.filter { $0.category != .squadOrder && $0.isExpired }.map { $0.id }
-        guard !expiredIds.isEmpty else { return }
         let now = Date().timeIntervalSince1970
         for id in expiredIds {
             localIndicators.removeValue(forKey: id)
             deletedIndicatorTombstones[id] = now
+        }
+
+        let cap = firebaseManager.activeRoom?.maxTacticalIndicators ?? AppConstants.Subscription.freeTierMaxTacticalIndicators
+        let cappedIndicators = allTacticalIndicators.filter { $0.category != .squadOrder }.sorted { $0.timestamp < $1.timestamp }
+        guard cappedIndicators.count > cap else { return }
+        for indicator in cappedIndicators.prefix(cappedIndicators.count - cap) {
+            removeTacticalIndicator(id: indicator.id)
         }
     }
     
@@ -883,6 +921,7 @@ public final class GameStateManager: ObservableObject {
                 self.updateOtherSquadMembers(room: newRoom)
                 self.updateAllTacticalIndicators(room: newRoom)
                 self.updateLocalPlayerMember()
+                self.enforceTacticalIndicatorMaintenance()
             }
             .store(in: &cancellables)
             
@@ -1003,7 +1042,8 @@ public final class GameStateManager: ObservableObject {
         isHosting = false
         isInitiatingHost = false
         isJoining = false
-        locationHeadingManager.stopUpdates()
+        // Compass + GPS keep running even when logged out so the "me" icon on the map
+        // always reflects live heading (see LocationHeadingManager.startUpdates/stopUpdates).
         healthKitManager.stopLiveHeartRateSession()
         timer?.cancel()
         timer = nil
@@ -1287,7 +1327,8 @@ public final class GameStateManager: ObservableObject {
         sendSessionAction(.startHost(name: cleanedName, pin: cleanedPin))
         errorMessage = nil
         purgeLocalSessionAndIcons()
-        
+        firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: squadId)
+
         firebaseManager.createRoom(room) { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -1372,6 +1413,7 @@ public final class GameStateManager: ObservableObject {
         sendSessionAction(.startJoin(id: cleanId, pin: cleanedPin))
         errorMessage = nil
         purgeLocalSessionAndIcons()
+        firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: cleanId)
 
         let localMember = makeCurrentSquadMember(role: .player)
 
@@ -1426,7 +1468,9 @@ public final class GameStateManager: ObservableObject {
         self.isJoining = false
         self.clearFieldErrors()
         self.errorMessage = nil
-        
+
+        firebaseManager.setEncryptionContext(pin: self.savedPin, roomId: cleanId)
+
         self.isApplyingRemoteSync = true
         firebaseManager.connectToExistingRoom(roomId: cleanId) { [weak self] success in
             guard let self = self else { return }
@@ -1707,14 +1751,14 @@ public final class GameStateManager: ObservableObject {
         let currentIndicators = allTacticalIndicators
         
         if type.category == .squadOrder {
-            let existingSameType = currentIndicators.filter { $0.type == type && $0.placedByMemberId == myMemberId }
-            for ind in existingSameType {
+            let existingFromIssuer = currentIndicators.filter { $0.category == .squadOrder && $0.placedByMemberId == myMemberId }
+            for ind in existingFromIssuer {
                 removeTacticalIndicator(id: ind.id)
             }
         }
         
         let cleanCallsign = myCallsign.trimmingCharacters(in: .whitespacesAndNewlines)
-        let resolvedCallsign = cleanCallsign.isEmpty ? (firebaseManager.activeRoom?.members[myMemberId]?.callsign ?? "OPERATOR") : cleanCallsign
+        let resolvedCallsign = cleanCallsign.isEmpty ? (firebaseManager.activeRoom?.members[myMemberId]?.callsign ?? "") : cleanCallsign
         
         let newIndicator = TacticalIndicator(
             type: type,
@@ -1722,29 +1766,29 @@ public final class GameStateManager: ObservableObject {
             placedByMemberId: myMemberId,
             placedByCallsign: resolvedCallsign
         )
-        
-        deletedIndicatorTombstones.removeValue(forKey: newIndicator.id)
-        localIndicators[newIndicator.id] = newIndicator
-        
-        // Rule 2: enemy + environment indicators share one cap (mti) — local FIFO eviction here
-        // is just for instant feedback; the Cloud Function is authoritative (see §6).
+
+        // Rule 2: enemy + environment indicators share one cap (mti). Compute overflow against
+        // the prospective post-add set and stream those deletes to Firebase BEFORE the new
+        // indicator's create write, so no observer's stream (or the Cloud Function's onWrite
+        // trigger) ever briefly sees more than `cap` indicators on the wire.
         if type.category != .squadOrder {
             let cap = subscriptionManager.hasUnlimitedSquadUnlock ? AppConstants.Subscription.proTierMaxTacticalIndicators : AppConstants.Subscription.freeTierMaxTacticalIndicators
-            let localCapped = localIndicators.values.filter { $0.category != .squadOrder }.sorted { $0.timestamp < $1.timestamp }
-            if localCapped.count > cap {
-                let overflow = localCapped.count - cap
-                for old in localCapped.prefix(overflow) {
-                    localIndicators.removeValue(forKey: old.id)
-                    deletedIndicatorTombstones[old.id] = Date().timeIntervalSince1970
+            let prospective = (localIndicators.values.filter { $0.category != .squadOrder } + [newIndicator]).sorted { $0.timestamp < $1.timestamp }
+            if prospective.count > cap {
+                for old in prospective.prefix(prospective.count - cap) {
+                    removeTacticalIndicator(id: old.id)
                 }
             }
         }
-        
+
+        deletedIndicatorTombstones.removeValue(forKey: newIndicator.id)
+        localIndicators[newIndicator.id] = newIndicator
+
         if let roomId = roomId {
             firebaseManager.addOrUpdateIndicator(roomId: roomId, indicator: newIndicator)
         }
         updateAllTacticalIndicators()
-        enforceHostTacticalIndicatorMaintenance()
+        enforceTacticalIndicatorMaintenance()
     }
     
     public func removeTacticalIndicator(id: String) {
