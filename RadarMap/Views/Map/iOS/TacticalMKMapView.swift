@@ -171,6 +171,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
         // annotation view. Updating an existing controller's rootView instead is an in-place
         // SwiftUI update with no transition, so the content always stays glued to its container.
         private var memberHosts: [ObjectIdentifier: UIHostingController<MemberAnnotationView>] = [:]
+        private var tacticalHosts: [ObjectIdentifier: UIHostingController<TacticalIndicatorOverlayView>] = [:]
 
         init(_ parent: TacticalMKMapView) {
             self.parent = parent
@@ -203,6 +204,45 @@ public struct TacticalMKMapView: UIViewRepresentable {
         /// Drops the cached hosting controller for a removed annotation view, if any.
         private func releaseMemberContent(for view: MKAnnotationView) {
             memberHosts.removeValue(forKey: ObjectIdentifier(view))
+        }
+        
+        /// Creates or updates the hosted TacticalIndicatorOverlayView content for `view`.
+        private func applyTacticalContent(indicator: TacticalIndicator, to view: MKAnnotationView) {
+            let touchTargetSize = AppConstants.UI.MapMarkers.tacticalIndicatorRingSize
+            let half = touchTargetSize / 2
+            view.frame = CGRect(x: 0, y: 0, width: touchTargetSize, height: touchTargetSize)
+            view.centerOffset = .zero
+            
+            let key = ObjectIdentifier(view)
+            let radarColor = parent.gameState.radarColorTheme.color
+            let onDelete: () -> Void = { [weak self] in
+                self?.parent.gameState.removeTacticalIndicator(id: indicator.id)
+            }
+            
+            if let host = tacticalHosts[key] {
+                host.rootView = TacticalIndicatorOverlayView(
+                    indicator: indicator,
+                    radarColor: radarColor,
+                    onDelete: onDelete
+                )
+                host.view.frame = CGRect(x: -half, y: -half, width: touchTargetSize, height: touchTargetSize)
+            } else {
+                view.subviews.forEach { $0.removeFromSuperview() }
+                let host = UIHostingController(rootView: TacticalIndicatorOverlayView(
+                    indicator: indicator,
+                    radarColor: radarColor,
+                    onDelete: onDelete
+                ))
+                host.view.backgroundColor = .clear
+                host.view.frame = CGRect(x: -half, y: -half, width: touchTargetSize, height: touchTargetSize)
+                view.addSubview(host.view)
+                tacticalHosts[key] = host
+            }
+        }
+        
+        /// Drops the cached hosting controller for a removed tactical indicator view.
+        private func releaseTacticalContent(for view: MKAnnotationView) {
+            tacticalHosts.removeValue(forKey: ObjectIdentifier(view))
         }
         
         func setupDisplayLink(for mapView: MKMapView) {
@@ -327,6 +367,9 @@ public struct TacticalMKMapView: UIViewRepresentable {
             let currentTacticalIds = Set(currentTactical.map { $0.id })
             
             for anno in existingTactical where !currentTacticalIds.contains(anno.indicatorId) {
+                if let view = mapView.view(for: anno) {
+                    releaseTacticalContent(for: view)
+                }
                 mapView.removeAnnotation(anno)
             }
             
@@ -334,6 +377,9 @@ public struct TacticalMKMapView: UIViewRepresentable {
                 if let existing = existingTactical.first(where: { $0.indicatorId == indicator.id }) {
                     existing.coordinate = indicator.coordinate
                     existing.indicator = indicator
+                    if let view = mapView.view(for: existing) {
+                        applyTacticalContent(indicator: indicator, to: view)
+                    }
                 } else {
                     let newAnno = TacticalIndicatorMKAnnotation(indicator: indicator)
                     mapView.addAnnotation(newAnno)
@@ -380,26 +426,9 @@ public struct TacticalMKMapView: UIViewRepresentable {
                     view?.canShowCallout = false
                 }
                 view?.annotation = annotation
-                view?.subviews.forEach { $0.removeFromSuperview() }
-                
-                // touchTargetSize must match TacticalIndicatorOverlayView's touchTargetSize
-                // (= tacticalIndicatorRingSize on iOS = 32 pt) so UIKit hit-testing routes
-                // touches into the hosted SwiftUI content and the hold-to-delete DragGesture fires.
-                let touchTargetSize = AppConstants.UI.MapMarkers.tacticalIndicatorRingSize
-                let half = touchTargetSize / 2
-                view?.frame = CGRect(x: 0, y: 0, width: touchTargetSize, height: touchTargetSize)
-                view?.centerOffset = .zero
-                
-                let host = UIHostingController(rootView: TacticalIndicatorOverlayView(
-                    indicator: tacticalAnno.indicator,
-                    radarColor: parent.gameState.radarColorTheme.color,
-                    onDelete: { [weak self] in
-                        self?.parent.gameState.removeTacticalIndicator(id: tacticalAnno.indicatorId)
-                    }
-                ))
-                host.view.backgroundColor = .clear
-                host.view.frame = CGRect(x: -half, y: -half, width: touchTargetSize, height: touchTargetSize)
-                view?.addSubview(host.view)
+                if let view {
+                    applyTacticalContent(indicator: tacticalAnno.indicator, to: view)
+                }
                 return view
             }
             

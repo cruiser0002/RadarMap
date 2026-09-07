@@ -371,6 +371,38 @@ class TestRadarPlayerSimulatorIntegration(unittest.TestCase):
         pin_hash = RadarPlayerSimulator.hash_pin("1234", "ALPHA")
         self.assertEqual(pin_hash, "d5b93eba76c149bafd2bc09099eff86e3f9b89624220f6c1c194f379ccdd438c")
 
+    def test_tactical_squad_order_codes_and_point_indicators(self):
+        """Verifies numbered tactical indicator parity: only point1-3 are defined,
+        and point4-10 are excluded."""
+        self.assertIn("pt1", RadarPlayerSimulator.SQUAD_ORDER_CODES)
+        self.assertIn("pt2", RadarPlayerSimulator.SQUAD_ORDER_CODES)
+        self.assertIn("pt3", RadarPlayerSimulator.SQUAD_ORDER_CODES)
+        for i in range(4, 11):
+            self.assertNotIn(f"pt{i}", RadarPlayerSimulator.SQUAD_ORDER_CODES)
+            self.assertNotIn(f"p{i}", RadarPlayerSimulator.SQUAD_ORDER_CODES)
+
+        with patch("player_simulator._get_or_create_firebase_app", return_value=MagicMock(name="FakeFirebaseApp")):
+            coordinator = FirebaseUploadCoordinator(
+                "https://test-rtdb.firebaseio.com", credentials_path="/fake/credentials.json"
+            )
+        sim = RadarPlayerSimulator(room_name="ALPHA", pin="1234", coordinator=coordinator)
+        self.assertIn("point1", sim.type_codes)
+        self.assertIn("point2", sim.type_codes)
+        self.assertIn("point3", sim.type_codes)
+        for i in range(4, 11):
+            self.assertNotIn(f"point{i}", sim.type_codes)
+        coordinator.close()
+
+    def test_tactical_enemy_indicators_canonical_types(self):
+        """Verifies enemy indicators match canonical types (infantry, vehicle, armor, drone)
+        and do not expose legacy aliases (lightVehicle, heavyVehicle)."""
+        self.assertIn("infantry", RadarPlayerSimulator.ENEMY_INDICATORS)
+        self.assertIn("vehicle", RadarPlayerSimulator.ENEMY_INDICATORS)
+        self.assertIn("armor", RadarPlayerSimulator.ENEMY_INDICATORS)
+        self.assertIn("drone", RadarPlayerSimulator.ENEMY_INDICATORS)
+        self.assertNotIn("lightVehicle", RadarPlayerSimulator.ENEMY_INDICATORS)
+        self.assertNotIn("heavyVehicle", RadarPlayerSimulator.ENEMY_INDICATORS)
+
 
 if __name__ == "__main__":
     unittest.main()

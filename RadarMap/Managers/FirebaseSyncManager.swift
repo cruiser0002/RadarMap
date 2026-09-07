@@ -77,6 +77,24 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
     public var onRemoteTelemetryPacketsReceived: (([TelemetryPacket]) -> Void)?
 
+    /// Symmetric key for the active room's telemetry/tactical encryption, or nil when
+    /// encryption is disabled (`AppConstants.Debug.isEncryptionEnabled == false`) or no room
+    /// context has been established yet. Set via `setEncryptionContext(pin:roomId:)`.
+    private(set) var activeTelemetryKey: SymmetricKey?
+
+    /// Establishes (or clears) the active room's telemetry/tactical encryption key. Call as soon
+    /// as both the room's pin and id are known — on host create, join, and reconnect. Gated on
+    /// `AppConstants.Debug.isEncryptionEnabled` so the debug-panel toggle takes effect on the
+    /// next room join/host rather than needing an app relaunch. See
+    /// docs/CLOUD_DATA_MANAGEMENT.md §5.E.
+    public func setEncryptionContext(pin: String, roomId: String) {
+        guard AppConstants.Debug.isEncryptionEnabled, !pin.isEmpty, !roomId.isEmpty else {
+            activeTelemetryKey = nil
+            return
+        }
+        activeTelemetryKey = FirebaseSyncManager.deriveTelemetryKey(pin: pin, roomId: roomId)
+    }
+
     public let networkQualityMonitor = NetworkQualityMonitor()
     private var cancellables = Set<AnyCancellable>()
 
@@ -268,6 +286,16 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
     public static func hashPassword(_ pin: String, salt: String) -> String {
         return hashPin(pin, salt: salt)
+    }
+
+    /// Derives the AES-256 key used to encrypt telemetry/tactical compact arrays for a room.
+    /// Domain-separated from `hashPin` (bare "salt:pin") and `deriveRoomPadding` ("roompad:...")
+    /// via the "telemetrykey:" prefix, so this key is never equal to or derivable from either of
+    /// those two publicly-stored hashes. See docs/CLOUD_DATA_MANAGEMENT.md §5.E.
+    public static func deriveTelemetryKey(pin: String, roomId: String) -> SymmetricKey {
+        let combined = "telemetrykey:\(roomId):\(pin)"
+        let digest = SHA256.hash(data: Data(combined.utf8))
+        return SymmetricKey(data: Data(digest))
     }
 
     /// Derives a deterministic room-id padding suffix from (name, PIN), domain-separated from
@@ -537,8 +565,15 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     private func executeTelemetryWrite(roomId: String, memberId: String, packet: TelemetryPacket, payload: [Any], isReconnectFlush: Bool = false) {
         _uploadMetrics.telemetryWritesSubmitted += 1
 
+        let wireValue: Any
+        if let key = activeTelemetryKey, let encrypted = try? CompactArrayCipher.encrypt(payload, key: key) {
+            wireValue = encrypted
+        } else {
+            wireValue = payload
+        }
+
         let startTime = Date()
-        transport.setValue(payload, at: telemetryMemberPath(roomId: roomId, memberId: memberId)) { [weak self] isSuccess in
+        transport.setValue(wireValue, at: telemetryMemberPath(roomId: roomId, memberId: memberId)) { [weak self] isSuccess in
             guard let self = self else { return }
 
             self.telemetrySchedulerQueue.async {
@@ -813,6 +848,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         self.memberLatestSequences.removeAll()
         self.unacknowledgedIndicators.removeAll()
         self.pendingMemberFetches.removeAll()
+        self.activeTelemetryKey = nil
     }
 
     public func disbandRoom(roomId: String, completion: ((Bool) -> Void)? = nil) {
@@ -977,7 +1013,14 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             ? tacticalOrderPath(roomId: roomId, indicatorId: indicator.id)
             : tacticalCappedIndicatorPath(roomId: roomId, indicatorId: indicator.id)
 
-        transport.setValue(indicator.compactArray, at: path) { [weak self] success in
+        let wireValue: Any
+        if let key = activeTelemetryKey, let encrypted = try? CompactArrayCipher.encrypt(indicator.compactArray, key: key) {
+            wireValue = encrypted
+        } else {
+            wireValue = indicator.compactArray
+        }
+
+        transport.setValue(wireValue, at: path) { [weak self] success in
             guard let self = self else { return }
             self.telemetrySchedulerQueue.async {
                 if success {
@@ -1051,7 +1094,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         let orders = (json["o"] as? [String: Any]) ?? [:]
         let capped = (json["i"] as? [String: Any]) ?? [:]
         for (key, val) in orders.merging(capped, uniquingKeysWith: { a, _ in a }) {
-            if let ind = TacticalIndicator.parse(id: key, rawValue: val), !ind.isExpired {
+            if let ind = TacticalIndicator.parse(id: key, rawValue: val, key: activeTelemetryKey), !ind.isExpired {
                 decodedIndicators[ind.id] = ind
             }
         }
@@ -1405,7 +1448,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             return
         }
 
-        if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: snapshot.value as Any) {
+        if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: snapshot.value as Any, key: activeTelemetryKey) {
             validateAndProcessPacket(packet)
             DispatchQueue.main.async { [weak self] in
                 self?.onRemoteTelemetryPacketsReceived?([packet])
@@ -1429,9 +1472,14 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
     }
 
-    /// Helper to parse a TelemetryPacket from compact array format or JSON dictionary
-    public static func parseTelemetryPacket(memberId: String, roomId: String, rawValue: Any) -> TelemetryPacket? {
-        if let array = rawValue as? [Any] {
+    /// Helper to parse a TelemetryPacket from compact array format, JSON dictionary, or (when
+    /// `key` is supplied) an AES-256-GCM encrypted compact array string. `key` is nil for
+    /// device-local channels (e.g. the Watch high-speed relay) that never carry ciphertext.
+    public static func parseTelemetryPacket(memberId: String, roomId: String, rawValue: Any, key: SymmetricKey? = nil) -> TelemetryPacket? {
+        if let ciphertext = rawValue as? String, let key {
+            guard let array = try? CompactArrayCipher.decrypt(ciphertext, key: key) else { return nil }
+            return TelemetryPacket.fromCompactArray(memberId: memberId, roomId: roomId, array: array)
+        } else if let array = rawValue as? [Any] {
             return TelemetryPacket.fromCompactArray(memberId: memberId, roomId: roomId, array: array)
         } else if let telemetryData = rawValue as? [String: Any] {
             guard let lat = telemetryData["lat"] as? Double,
@@ -1514,7 +1562,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                     if let localId = self.localMemberId, memberId == localId {
                         continue
                     }
-                    if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: rawValue) {
+                    if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: rawValue, key: self.activeTelemetryKey) {
                         batchPackets.append(packet)
                     }
                     let needsFetch = self.activeRoom?.members[memberId] == nil ||

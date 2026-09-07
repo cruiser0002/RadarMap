@@ -1614,7 +1614,6 @@ final class RadarMapTests: XCTestCase {
         // Storage Keys
         XCTAssertEqual(AppConstants.Storage.userCallsignKey, "user_callsign")
         XCTAssertEqual(AppConstants.Storage.savedRoomNameKey, "saved_room_name")
-        XCTAssertEqual(AppConstants.Storage.userMemberIdKey, "user_member_id")
         XCTAssertEqual(AppConstants.Storage.radarColorThemeKey, "radar_color_theme")
         XCTAssertEqual(AppConstants.Storage.hasUnlimitedSquadUnlockKey, "hasUnlimitedSquadUnlock")
         XCTAssertEqual(AppConstants.Storage.savedPinKey, "saved_pin")
@@ -1630,9 +1629,6 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(AppConstants.Subscription.lifetimePriceString, "$29.99")
         XCTAssertEqual(AppConstants.Subscription.entitlementID, "radarmap_pro")
         XCTAssertEqual(AppConstants.Subscription.productID, "com.radarmap.watch.pro")
-        XCTAssertEqual(AppConstants.Subscription.offeringID, "default")
-        XCTAssertEqual(AppConstants.Subscription.packageID, "$rc_lifetime")
-        XCTAssertFalse(AppConstants.Subscription.revenueCatApiKey.isEmpty)
         
         // Health
         XCTAssertFalse(AppConstants.Health.defaultIsDead, "defaultIsDead must be false (player starts alive)")
@@ -1983,6 +1979,53 @@ final class RadarMapTests: XCTestCase {
         let indicators = gameState.allTacticalIndicators
         XCTAssertEqual(indicators.count, 1)
         XCTAssertEqual(indicators.first?.placedByCallsign, "SHADOW", "Callsign must be resolved dynamically from room roster when nil in indicator packet")
+    }
+    
+    func testTacticalIndicatorRobustMIDResolution() {
+        let gameState = createMockGameState()
+        let memberA = SquadMember(id: "OP_RECON", callsign: "SHADOW", latitude: 37.78, longitude: -122.40)
+        let memberB = SquadMember(id: "ID_BRAVO", callsign: "TITAN", latitude: 37.79, longitude: -122.41)
+        
+        // 1. Case-insensitive / whitespace match on member ID
+        let ind1 = TacticalIndicator(
+            id: "IND_1",
+            type: .attackHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.785, longitude: -122.406),
+            placedByMemberId: "  op_recon  "
+        )
+        
+        // 2. Placed using member callsign rather than member ID
+        let ind2 = TacticalIndicator(
+            id: "IND_2",
+            type: .goHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.786, longitude: -122.407),
+            placedByMemberId: "titan"
+        )
+        
+        // 3. Unknown member ID -> defaults to empty string
+        let ind3 = TacticalIndicator(
+            id: "IND_3",
+            type: .watchHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.787, longitude: -122.408),
+            placedByMemberId: "UNKNOWN_ID"
+        )
+        
+        let room = SquadRoom(
+            id: "SQUAD_TEST",
+            hostId: "OP_RECON",
+            members: ["OP_RECON": memberA, "ID_BRAVO": memberB],
+            indicators: [ind1.id: ind1, ind2.id: ind2, ind3.id: ind3]
+        )
+        gameState.firebaseManager.activeRoom = room
+        
+        let resolved = gameState.allTacticalIndicators
+        let r1 = resolved.first { $0.id == "IND_1" }
+        let r2 = resolved.first { $0.id == "IND_2" }
+        let r3 = resolved.first { $0.id == "IND_3" }
+        
+        XCTAssertEqual(r1?.placedByCallsign, "SHADOW", "Case-insensitive and trimmed member ID must resolve to member callsign")
+        XCTAssertEqual(r2?.placedByCallsign, "TITAN", "Indicator placed with callsign as member ID must resolve to member callsign")
+        XCTAssertEqual(r3?.placedByCallsign, "", "Indicator with unknown member ID must default to empty string")
     }
     
     func testTacticalIndicatorCallsignCodableRoundtrip() throws {
@@ -2343,15 +2386,14 @@ final class RadarMapTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
     }
     
-    func testSubscriptionManagerRevenueCatConfiguration() {
+    func testSubscriptionManagerStoreKitConfiguration() {
         let subManager = SubscriptionManager(engineMode: .mock)
         XCTAssertEqual(subManager.activeEngineMode, .mock)
         
-        subManager.configureRevenueCat(apiKey: "appl_test_api_key_123")
-        XCTAssertEqual(subManager.activeEngineMode, .revenueCat)
+        let skManager = SubscriptionManager(engineMode: .storeKit2)
+        XCTAssertEqual(skManager.activeEngineMode, .storeKit2)
         XCTAssertEqual(SubscriptionManager.entitlementID, "radarmap_pro")
-        XCTAssertEqual(SubscriptionManager.offeringID, "default")
-        XCTAssertEqual(SubscriptionManager.packageID, "$rc_lifetime")
+        XCTAssertEqual(SubscriptionManager.productID, "com.radarmap.watch.pro")
     }
     
     func testSubscriptionManagerPromotionalPriceMessage() {
@@ -2757,16 +2799,14 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testPersistentMemberIdDistinctFromCallsign() {
-        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.userMemberIdKey)
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.userCallsignKey)
         
         let gameState = GameStateManager()
         XCTAssertFalse(gameState.myMemberId.isEmpty)
-        XCTAssertNotEqual(gameState.myMemberId, gameState.myCallsign, "myMemberId should be a distinct persistent UUID, not identical to callsign")
+        XCTAssertNotEqual(gameState.myMemberId, gameState.myCallsign, "myMemberId should be a distinct derived ID, not identical to callsign")
         
-        let initialMemberId = gameState.myMemberId
         gameState.myCallsign = "RECON_1"
-        XCTAssertEqual(gameState.myMemberId, initialMemberId, "myMemberId should stay stable when callsign is edited")
+        XCTAssertEqual(gameState.myMemberId, GameStateManager.deriveMemberId(fromCallsign: "RECON_1"), "myMemberId should derive from updated callsign")
     }
     
     // MARK: - Dead Reckoning Delta Gating & SSE Stream Optimization Tests
@@ -3146,6 +3186,7 @@ final class RadarMapTests: XCTestCase {
         XCTAssertFalse(AppConstants.Policy.locationDataDescription.isEmpty)
         XCTAssertFalse(AppConstants.Policy.healthDataDescription.isEmpty)
         XCTAssertFalse(AppConstants.Policy.dataRetentionDescription.isEmpty)
+        XCTAssertFalse(AppConstants.Policy.encryptionDescription.isEmpty)
     }
     
     // MARK: - Callsign, Room Name & PIN Retention Tests
@@ -3655,7 +3696,7 @@ final class RadarMapTests: XCTestCase {
         
         let indicators = gameState.allTacticalIndicators
         XCTAssertEqual(indicators.count, 1)
-        XCTAssertEqual(indicators.first?.placedByCallsign, "OPERATOR", "Squad order should default to OPERATOR if callsign is empty")
+        XCTAssertEqual(indicators.first?.placedByCallsign, "", "Squad order should default to empty string if callsign is empty")
         
         // Custom callsign
         gameState.myCallsign = "VIPER"
@@ -4020,7 +4061,7 @@ final class RadarMapTests: XCTestCase {
         // Incoming Low-Speed Snapshot from companion Watch hosting "BRAVO"
         let incomingLS = LowSpeedSnapshot(
             syncTs: 100,
-            config: ConfigSnapshot(callsign: "VIPER", roomName: "BRAVO", pin: "", memberId: "OP_WATCH", configTs: 100),
+            config: ConfigSnapshot(callsign: "VIPER", roomName: "BRAVO", pin: "", configTs: 100),
             loginCycle: LoginCycleSnapshot(loginCycle: .hostActive, loginCycleTs: 100)
         )
         gameState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(incomingLS)
@@ -4040,7 +4081,7 @@ final class RadarMapTests: XCTestCase {
         // Companion leaves room -> Phone resets tactical session
         let inactiveLS = LowSpeedSnapshot(
             syncTs: 150,
-            config: ConfigSnapshot(callsign: "VIPER", roomName: "BRAVO", pin: "", memberId: "OP_WATCH", configTs: 100),
+            config: ConfigSnapshot(callsign: "VIPER", roomName: "BRAVO", pin: "", configTs: 100),
             loginCycle: LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 150)
         )
         gameState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(inactiveLS)
@@ -4603,6 +4644,34 @@ final class RadarMapTests: XCTestCase {
             XCTAssertFalse(callout.gestureHint.isEmpty, "\(callout.rawValue) gestureHint must not be empty")
         }
     }
+
+    func testQRJoinPayloadEncodingAndDecoding() {
+        // Custom BYO Firebase with PIN
+        let payloadWithCustomDB = QRJoinPayload(roomName: "ALPHA", pin: "1234", databaseURL: "https://your-project.firebaseio.com")
+        let encoded = payloadWithCustomDB.encodedString()
+        XCTAssertEqual(encoded, "{\"d\":\"https:\\/\\/your-project.firebaseio.com\",\"p\":\"1234\",\"r\":\"ALPHA\"}")
+        
+        let decoded = QRJoinPayload.decode(encoded!)
+        XCTAssertNotNil(decoded)
+        XCTAssertEqual(decoded?.r, "ALPHA")
+        XCTAssertEqual(decoded?.p, "1234")
+        XCTAssertEqual(decoded?.d, "https://your-project.firebaseio.com")
+
+        // Default RTDB without PIN
+        let defaultPayload = QRJoinPayload(roomName: "BRAVO", pin: "", databaseURL: "")
+        let encodedDefault = defaultPayload.encodedString()
+        XCTAssertEqual(encodedDefault, "{\"d\":\"\",\"r\":\"BRAVO\"}")
+
+        let decodedDefault = QRJoinPayload.decode(encodedDefault!)
+        XCTAssertNotNil(decodedDefault)
+        XCTAssertEqual(decodedDefault?.r, "BRAVO")
+        XCTAssertNil(decodedDefault?.p)
+        XCTAssertEqual(decodedDefault?.d, "")
+
+        // Malformed string fails decoding gracefully
+        XCTAssertNil(QRJoinPayload.decode("radarmap://join?room=ALPHA"))
+        XCTAssertNil(QRJoinPayload.decode("not-json"))
+    }
     
     func testTacticalIndicatorFadeOpacityCalculation() {
         let now = Date()
@@ -4648,8 +4717,7 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(TacticalIndicatorType.flag.title, "Flag")
         
         let numbers: [TacticalIndicatorType] = [
-            .point1, .point2, .point3, .point4, .point5,
-            .point6, .point7, .point8, .point9, .point10
+            .point1, .point2, .point3
         ]
         for (index, num) in numbers.enumerated() {
             let n = index + 1
@@ -5214,7 +5282,7 @@ final class RadarMapTests: XCTestCase {
     func testCompanionSync_15_GameStateManagerInitPreservesPersistedTimestamps() {
         let savedLS = LowSpeedSnapshot(
             syncTs: 100,
-            config: ConfigSnapshot(callsign: "ALPHA_LEADER", roomName: "ROOM_A", pin: "1234", theme: "Green", isPro: false, memberId: "USER_PERSISTED", configTs: 50),
+            config: ConfigSnapshot(callsign: "ALPHA_LEADER", roomName: "ROOM_A", pin: "1234", theme: "Green", isPro: false, configTs: 50),
             loginCycle: LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 50),
             playerState: PlayerStateSnapshot(isDead: false, isDeadTs: 50)
         )
@@ -5237,7 +5305,7 @@ final class RadarMapTests: XCTestCase {
     func testCompanionSync_16_CompanionLaunchDoesNotDropActiveSession() {
         let peerActiveLS = LowSpeedSnapshot(
             syncTs: 200,
-            config: ConfigSnapshot(callsign: "WATCH_USER", roomName: "ACTIVE_SQUAD", pin: "", theme: "Green", isPro: true, memberId: "MEMBER_1", configTs: 200),
+            config: ConfigSnapshot(callsign: "WATCH_USER", roomName: "ACTIVE_SQUAD", pin: "", theme: "Green", isPro: true, configTs: 200),
             loginCycle: LoginCycleSnapshot(loginCycle: .joinActive, loginCycleTs: 200),
             playerState: PlayerStateSnapshot(isDead: false, isDeadTs: 200)
         )
@@ -5539,7 +5607,7 @@ final class RadarMapTests: XCTestCase {
         // Watch sends an active game with timestamp > 0 (e.g. 500)
         let watchActiveLS = LowSpeedSnapshot(
             syncTs: 500,
-            config: ConfigSnapshot(callsign: "WATCH_LEADER", roomName: "WATCH_SQUAD", pin: "", theme: "Green", isPro: false, memberId: "MEMBER_WATCH", configTs: 500),
+            config: ConfigSnapshot(callsign: "WATCH_LEADER", roomName: "WATCH_SQUAD", pin: "", theme: "Green", isPro: false, configTs: 500),
             loginCycle: LoginCycleSnapshot(loginCycle: .hostActive, loginCycleTs: 500),
             playerState: PlayerStateSnapshot(isDead: false, isDeadTs: 500)
         )
@@ -5571,7 +5639,7 @@ final class RadarMapTests: XCTestCase {
         
         let phoneActiveLS = LowSpeedSnapshot(
             syncTs: 600,
-            config: ConfigSnapshot(callsign: "PHONE_LEADER", roomName: "PHONE_SQUAD", pin: "", theme: "Green", isPro: false, memberId: "MEMBER_PHONE", configTs: 600),
+            config: ConfigSnapshot(callsign: "PHONE_LEADER", roomName: "PHONE_SQUAD", pin: "", theme: "Green", isPro: false, configTs: 600),
             loginCycle: LoginCycleSnapshot(loginCycle: .joinActive, loginCycleTs: 600),
             playerState: PlayerStateSnapshot(isDead: false, isDeadTs: 600)
         )
@@ -5816,7 +5884,6 @@ final class RadarMapTests: XCTestCase {
             pin: "1234",
             theme: "Green",
             isPro: true,
-            memberId: "M1",
             isUploadHeartRateEnabled: false,
             isUploadLocationEnabled: false,
             configTs: 100

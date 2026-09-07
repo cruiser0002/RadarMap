@@ -28,6 +28,18 @@ except ImportError as _import_error:
         "`pip install firebase-admin`."
     ) from _import_error
 
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError as _import_error:
+    raise ImportError(
+        "cryptography is required for optional telemetry/tactical encryption. Install it with "
+        "`pip install -r requirements.txt` (see notebooks/requirements.txt) or "
+        "`pip install cryptography`."
+    ) from _import_error
+
+import base64
+import json
+
 
 # MARK: - Firebase App Registry
 # firebase-admin only allows a given app *name* to be initialized once per process (it raises
@@ -153,6 +165,7 @@ class TacticalOperation:
     created_at: float = field(default_factory=time.time)
     retry_count: int = 0
     next_retry_time: float = 0.0
+    encryption_key: Optional[bytes] = None
 
 
 class FirebaseUploadCoordinator:
@@ -449,7 +462,9 @@ class FirebaseUploadCoordinator:
         if op.op_type == "place":
             type_code = op.indicator_type or "wat"
             branch = "o" if type_code in RadarPlayerSimulator.SQUAD_ORDER_CODES else "i"
-            payload = [type_code, op.lat, op.lon, now, op.placed_by or ""]
+            payload: Any = [type_code, op.lat, op.lon, now, op.placed_by or ""]
+            if op.encryption_key is not None:
+                payload = RadarPlayerSimulator.encrypt_compact_array(payload, op.encryption_key)
             status_code, resp_data, category = self._execute_db(
                 "PUT", f"t/{op.room_name}/{branch}/{op.indicator_id}.json", payload
             )
@@ -546,12 +561,12 @@ class RadarPlayerSimulator:
     # enemy+environment cap under /t/{roomId}/i (see CLOUD_DATA_MANAGEMENT.md).
     SQUAD_ORDER_CODES = frozenset({
         "wat", "goh", "atk", "def", "flg",
-        "pt1", "pt2", "pt3", "pt4", "pt5", "pt6", "pt7", "pt8", "pt9", "p10",
+        "pt1", "pt2", "pt3",
     })
 
     # Tactical Indicator types
     SQUAD_ORDERS = ["watchHere", "goHere", "attackHere"]
-    ENEMY_INDICATORS = ["infantry", "lightVehicle", "heavyVehicle"]
+    ENEMY_INDICATORS = ["infantry", "vehicle", "armor", "drone"]
 
     def __init__(
         self,
@@ -570,6 +585,7 @@ class RadarPlayerSimulator:
         member_id: Optional[str] = None,
         color_hex: str = "#00FF66",
         telemetry_format: str = "compact4",  # "compact4", "compact6", "compact7", or "dict"
+        encrypted: bool = False,
         enable_delta_gating: bool = False,
         min_movement_delta_meters: float = 3.5,
         min_hr_delta_bpm: float = 12.0,
@@ -598,7 +614,16 @@ class RadarPlayerSimulator:
         self.database_url = database_url.rstrip("/")
         self.member_id = (member_id or self.derive_member_id(self.callsign)).strip()
         self.color_hex = color_hex
+        if encrypted and telemetry_format == "dict":
+            raise ValueError(
+                "encrypted=True requires an array-based telemetry_format (compact4/compact6/"
+                "compact7) — the app's decrypt path only accepts a decrypted JSON array, not a dict."
+            )
         self.telemetry_format = telemetry_format
+        self.encrypted = encrypted
+        self.telemetry_key: Optional[bytes] = (
+            self.derive_telemetry_key(self.pin, self.room_id) if encrypted else None
+        )
 
         # Dedicated Upload Coordinator (only resolves/validates credentials when this instance
         # creates its own coordinator — a shared coordinator passed in already has them)
@@ -627,8 +652,7 @@ class RadarPlayerSimulator:
         # 3-letter tactical type codes mapping
         self.type_codes = {
             "watchHere": "wat", "goHere": "goh", "attackHere": "atk", "protectHere": "def", "flag": "flg",
-            "point1": "pt1", "point2": "pt2", "point3": "pt3", "point4": "pt4", "point5": "pt5",
-            "point6": "pt6", "point7": "pt7", "point8": "pt8", "point9": "pt9", "point10": "p10",
+            "point1": "pt1", "point2": "pt2", "point3": "pt3",
             "infantry": "inf", "vehicle": "veh", "lightVehicle": "veh", "armor": "arm", "heavyVehicle": "arm", "drone": "drn",
             "water": "wtr", "hazard": "haz", "fire": "fir", "snow": "snw", "closure": "cls", "emergency": "emg"
         }
@@ -671,6 +695,31 @@ class RadarPlayerSimulator:
         combined = f"roompad:{name}:{pin}"
         digest = hashlib.sha256(combined.encode("utf-8")).digest()
         return "".join(alphabet[b % len(alphabet)] for b in digest[:pad_length])
+
+    @staticmethod
+    def derive_telemetry_key(pin: str, room_id: str) -> bytes:
+        """Derives the AES-256 key matching FirebaseSyncManager.deriveTelemetryKey —
+        domain-separated from hash_pin ("salt:pin") and derive_room_padding ("roompad:...")
+        via the "telemetrykey:" prefix. See docs/CLOUD_DATA_MANAGEMENT.md §5.E."""
+        combined = f"telemetrykey:{room_id}:{pin}"
+        return hashlib.sha256(combined.encode("utf-8")).digest()
+
+    @staticmethod
+    def encrypt_compact_array(array: List[Any], key: bytes) -> str:
+        """Encrypts a compact telemetry/tactical array matching CompactArrayCipher.encrypt:
+        AES-256-GCM with a fresh random 12-byte nonce, output as base64(nonce + ciphertext + tag)."""
+        plaintext = json.dumps(array, separators=(",", ":")).encode("utf-8")
+        nonce = os.urandom(12)
+        ciphertext = AESGCM(key).encrypt(nonce, plaintext, None)
+        return base64.b64encode(nonce + ciphertext).decode("ascii")
+
+    @staticmethod
+    def decrypt_compact_array(value: str, key: bytes) -> List[Any]:
+        """Reverses encrypt_compact_array, matching CompactArrayCipher.decrypt."""
+        raw = base64.b64decode(value)
+        nonce, ciphertext = raw[:12], raw[12:]
+        plaintext = AESGCM(key).decrypt(nonce, ciphertext, None)
+        return json.loads(plaintext.decode("utf-8"))
 
     @staticmethod
     def derive_member_id(callsign: str, length: int = 8) -> str:
@@ -933,6 +982,9 @@ class RadarPlayerSimulator:
             if alt is not None:
                 payload["alt"] = alt
 
+        if self.encrypted:
+            payload = self.encrypt_compact_array(payload, self.telemetry_key)
+
         self.coordinator.submit_telemetry(self.room_id, self.member_id, payload)
         self.last_sent_lat = lat
         self.last_sent_lon = lon
@@ -957,7 +1009,8 @@ class RadarPlayerSimulator:
             indicator_type=type_code,
             lat=lat,
             lon=lon,
-            placed_by=self.member_id
+            placed_by=self.member_id,
+            encryption_key=self.telemetry_key if self.encrypted else None
         )
         enqueued = self.coordinator.submit_tactical_op(op)
         if enqueued:
@@ -1139,6 +1192,7 @@ def main():
     parser.add_argument("--speed", type=float, default=4.0, help="Speed in m/s")
     parser.add_argument("--interval", type=float, default=1.0, help="Update interval in seconds")
     parser.add_argument("--format", choices=["compact4", "compact6", "compact7", "dict"], default="compact4", help="Telemetry format")
+    parser.add_argument("--encrypted", action="store_true", help="Encrypt telemetry/tactical compact arrays with AES-256-GCM (requires an array-based --format, not dict)")
     parser.add_argument("--duration", type=float, default=None, help="Run duration in seconds (optional)")
     parser.add_argument(
         "--credentials",
@@ -1163,6 +1217,7 @@ def main():
         speed_mps=args.speed,
         update_interval_sec=args.interval,
         telemetry_format=args.format,
+        encrypted=args.encrypted,
         credentials_path=credentials_path,
     )
 

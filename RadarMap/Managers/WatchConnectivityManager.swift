@@ -258,6 +258,9 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     }
     
     private func rollSyncTimestampAndPublish() {
+        #if canImport(WatchConnectivity)
+        guard WCSession.default.isReachable else { return }
+        #endif
         contextQueue.async { [weak self] in
             guard let self = self else { return }
             self.localLS.syncTs = Date().timeIntervalSince1970
@@ -413,6 +416,9 @@ extension WatchConnectivityManager: WCSessionDelegate {
         DispatchQueue.main.async {
             self.isReachable = session.isReachable
             self.onReachabilityChanged?(session.isReachable)
+        }
+        if session.isReachable, isRollingSync {
+            rollSyncTimestampAndPublish()
         }
     }
     

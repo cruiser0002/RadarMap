@@ -257,7 +257,7 @@ Instead of JSON key-value dictionaries `{"lat": 37.78, "lon": -122.40, ...}`, pa
 
 #### 4. Centralized 3-Letter Tactical Type Codes
 Tactical indicator type strings are shortened to 3 ASCII letters (`AppConstants.Encoding.Tactical`):
-* **Squad Orders:** `wat` (watch), `goh` (go), `atk` (target), `def` (protect), `flg` (flag), `pt1`...`p10` (points 1–10).
+* **Squad Orders:** `wat` (watch), `goh` (go), `atk` (target), `def` (protect), `flg` (flag), `pt1`...`pt3` (points 1–3).
 * **Enemy Contacts:** `inf` (personnel), `veh` (vehicle), `arm` (armor), `drn` (drone).
 * **Environmental:** `wtr` (water), `haz` (hazard), `fir` (fire), `snw` (snow), `cls` (closure), `emg` (emergency).
 

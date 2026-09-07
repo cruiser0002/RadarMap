@@ -34,6 +34,8 @@
 		2F0001120000000000000002 /* MapCenterLockState.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001120000000000000001 /* MapCenterLockState.swift */; };
 		FF0001130000000000000002 /* TelemetryPacket.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001130000000000000001 /* TelemetryPacket.swift */; };
 		2F0001130000000000000002 /* TelemetryPacket.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001130000000000000001 /* TelemetryPacket.swift */; };
+		FF0001470000000000000002 /* CompactArrayCipher.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001470000000000000001 /* CompactArrayCipher.swift */; };
+		2F0001470000000000000002 /* CompactArrayCipher.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001470000000000000001 /* CompactArrayCipher.swift */; };
 		FF0001140000000000000002 /* SquadMember.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001140000000000000001 /* SquadMember.swift */; };
 		2F0001140000000000000002 /* SquadMember.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001140000000000000001 /* SquadMember.swift */; };
 		FF0001150000000000000002 /* TacticalIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001150000000000000001 /* TacticalIndicator.swift */; };
@@ -68,40 +70,38 @@
 		2F0001290000000000000002 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001290000000000000001 /* SettingsView.swift */; };
 		FF0001300000000000000002 /* PolicyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001300000000000000001 /* PolicyView.swift */; };
 		2F0001300000000000000002 /* PolicyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001300000000000000001 /* PolicyView.swift */; };
-		FF0001310000000000000002 /* RoomDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001310000000000000001 /* RoomDiscoveryView.swift */; };
-		2F0001310000000000000002 /* RoomDiscoveryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001310000000000000001 /* RoomDiscoveryView.swift */; };
-		FF0001320000000000000002 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001320000000000000001 /* QRScannerView.swift */; };
-		2F0001320000000000000002 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001320000000000000001 /* QRScannerView.swift */; };
-		FF0001330000000000000002 /* JoinQRBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001330000000000000001 /* JoinQRBox.swift */; };
-		2F0001330000000000000002 /* JoinQRBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001330000000000000001 /* JoinQRBox.swift */; };
-		FF0001340000000000000002 /* QRCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001340000000000000001 /* QRCodeView.swift */; };
-		2F0001340000000000000002 /* QRCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001340000000000000001 /* QRCodeView.swift */; };
-		FF0001350000000000000002 /* DatabaseURLField.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001350000000000000001 /* DatabaseURLField.swift */; };
-		2F0001350000000000000002 /* DatabaseURLField.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001350000000000000001 /* DatabaseURLField.swift */; };
-		FF0001360000000000000002 /* CreateRoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001360000000000000001 /* CreateRoomView.swift */; };
-		2F0001360000000000000002 /* CreateRoomView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001360000000000000001 /* CreateRoomView.swift */; };
-		FF0001370000000000000002 /* SquadLobbyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001370000000000000001 /* SquadLobbyView.swift */; };
-		2F0001370000000000000002 /* SquadLobbyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001370000000000000001 /* SquadLobbyView.swift */; };
-		FF0001380000000000000002 /* MemberAnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001380000000000000001 /* MemberAnnotationView.swift */; };
-		2F0001380000000000000002 /* MemberAnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001380000000000000001 /* MemberAnnotationView.swift */; };
-		FF0001390000000000000002 /* StandardMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001390000000000000001 /* StandardMapView.swift */; };
-		2F0001390000000000000002 /* StandardMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001390000000000000001 /* StandardMapView.swift */; };
-		FF0001400000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001400000000000000001 /* TacticalIndicatorOverlayView.swift */; };
-		2F0001400000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001400000000000000001 /* TacticalIndicatorOverlayView.swift */; };
-		FF0001410000000000000002 /* TacticalRadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001410000000000000001 /* TacticalRadarMapView.swift */; };
-		2F0001410000000000000002 /* TacticalRadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001410000000000000001 /* TacticalRadarMapView.swift */; };
-		FF0001420000000000000002 /* CrownInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001420000000000000001 /* CrownInputView.swift */; };
-		2F0001420000000000000002 /* CrownInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001420000000000000001 /* CrownInputView.swift */; };
-		FF0001430000000000000002 /* TacticalIndicatorMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001430000000000000001 /* TacticalIndicatorMenuView.swift */; };
-		2F0001430000000000000002 /* TacticalIndicatorMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001430000000000000001 /* TacticalIndicatorMenuView.swift */; };
-		FF0001440000000000000002 /* SquadTacticalIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001440000000000000001 /* SquadTacticalIcons.swift */; };
-		2F0001440000000000000002 /* SquadTacticalIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001440000000000000001 /* SquadTacticalIcons.swift */; };
-		FF0001450000000000000002 /* RadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001450000000000000001 /* RadarMapView.swift */; };
-		2F0001450000000000000002 /* RadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001450000000000000001 /* RadarMapView.swift */; };
-		FF0001460000000000000002 /* TacticalMKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001460000000000000001 /* TacticalMKMapView.swift */; };
-		2F0001460000000000000002 /* TacticalMKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001460000000000000001 /* TacticalMKMapView.swift */; };
-		FF0001470000000000000002 /* PaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001470000000000000001 /* PaywallView.swift */; };
-		2F0001470000000000000002 /* PaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001470000000000000001 /* PaywallView.swift */; };
+		FF0001310000000000000002 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001310000000000000001 /* QRScannerView.swift */; };
+		2F0001310000000000000002 /* QRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001310000000000000001 /* QRScannerView.swift */; };
+		FF0001320000000000000002 /* JoinQRBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001320000000000000001 /* JoinQRBox.swift */; };
+		2F0001320000000000000002 /* JoinQRBox.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001320000000000000001 /* JoinQRBox.swift */; };
+		FF0001330000000000000002 /* QRCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001330000000000000001 /* QRCodeView.swift */; };
+		2F0001330000000000000002 /* QRCodeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001330000000000000001 /* QRCodeView.swift */; };
+		FF0001340000000000000002 /* DatabaseURLField.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001340000000000000001 /* DatabaseURLField.swift */; };
+		2F0001340000000000000002 /* DatabaseURLField.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001340000000000000001 /* DatabaseURLField.swift */; };
+		FF0001350000000000000002 /* MemberAnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001350000000000000001 /* MemberAnnotationView.swift */; };
+		2F0001350000000000000002 /* MemberAnnotationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001350000000000000001 /* MemberAnnotationView.swift */; };
+		FF0001360000000000000002 /* StandardMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001360000000000000001 /* StandardMapView.swift */; };
+		2F0001360000000000000002 /* StandardMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001360000000000000001 /* StandardMapView.swift */; };
+		FF0001370000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001370000000000000001 /* TacticalIndicatorOverlayView.swift */; };
+		2F0001370000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001370000000000000001 /* TacticalIndicatorOverlayView.swift */; };
+		FF0001380000000000000002 /* TacticalRadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001380000000000000001 /* TacticalRadarMapView.swift */; };
+		2F0001380000000000000002 /* TacticalRadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001380000000000000001 /* TacticalRadarMapView.swift */; };
+		FF0001390000000000000002 /* CrownInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001390000000000000001 /* CrownInputView.swift */; };
+		2F0001390000000000000002 /* CrownInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001390000000000000001 /* CrownInputView.swift */; };
+		FF0001400000000000000002 /* TacticalIndicatorMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001400000000000000001 /* TacticalIndicatorMenuView.swift */; };
+		2F0001400000000000000002 /* TacticalIndicatorMenuView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001400000000000000001 /* TacticalIndicatorMenuView.swift */; };
+		FF0001410000000000000002 /* SquadTacticalIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001410000000000000001 /* SquadTacticalIcons.swift */; };
+		2F0001410000000000000002 /* SquadTacticalIcons.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001410000000000000001 /* SquadTacticalIcons.swift */; };
+		FF0001420000000000000002 /* RadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001420000000000000001 /* RadarMapView.swift */; };
+		2F0001420000000000000002 /* RadarMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001420000000000000001 /* RadarMapView.swift */; };
+		FF0001430000000000000002 /* TacticalMKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001430000000000000001 /* TacticalMKMapView.swift */; };
+		2F0001430000000000000002 /* TacticalMKMapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001430000000000000001 /* TacticalMKMapView.swift */; };
+		FF0001440000000000000002 /* PaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001440000000000000001 /* PaywallView.swift */; };
+		2F0001440000000000000002 /* PaywallView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001440000000000000001 /* PaywallView.swift */; };
+		FF0001450000000000000002 /* DebugSecrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001450000000000000001 /* DebugSecrets.swift */; };
+		2F0001450000000000000002 /* DebugSecrets.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001450000000000000001 /* DebugSecrets.swift */; };
+		FF0001460000000000000002 /* DebugUnlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001460000000000000001 /* DebugUnlockView.swift */; };
+		2F0001460000000000000002 /* DebugUnlockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF0001460000000000000001 /* DebugUnlockView.swift */; };
 		FF0000020000000000000002 /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = FF0000020000000000000001 /* GoogleService-Info.plist */; };
 		2F0000020000000000000002 /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 2F0000020000000000000003 /* GoogleService-Info.plist */; };
 		FF0000030000000000000002 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FF0000030000000000000001 /* Assets.xcassets */; };
@@ -157,6 +157,7 @@
 		FF0001110000000000000001 /* DeadReckoning.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/DeadReckoning.swift"; sourceTree = "<group>"; };
 		FF0001120000000000000001 /* MapCenterLockState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/MapCenterLockState.swift"; sourceTree = "<group>"; };
 		FF0001130000000000000001 /* TelemetryPacket.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/TelemetryPacket.swift"; sourceTree = "<group>"; };
+		FF0001470000000000000001 /* CompactArrayCipher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/CompactArrayCipher.swift"; sourceTree = "<group>"; };
 		FF0001140000000000000001 /* SquadMember.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/SquadMember.swift"; sourceTree = "<group>"; };
 		FF0001150000000000000001 /* TacticalIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/TacticalIndicator.swift"; sourceTree = "<group>"; };
 		FF0001160000000000000001 /* AppBuildVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Models/AppBuildVersion.swift"; sourceTree = "<group>"; };
@@ -174,23 +175,22 @@
 		FF0001280000000000000001 /* HUDGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Guide/HUDGuideView.swift"; sourceTree = "<group>"; };
 		FF0001290000000000000001 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Settings/SettingsView.swift"; sourceTree = "<group>"; };
 		FF0001300000000000000001 /* PolicyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Settings/PolicyView.swift"; sourceTree = "<group>"; };
-		FF0001310000000000000001 /* RoomDiscoveryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/RoomDiscoveryView.swift"; sourceTree = "<group>"; };
-		FF0001320000000000000001 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/QRScannerView.swift"; sourceTree = "<group>"; };
-		FF0001330000000000000001 /* JoinQRBox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/JoinQRBox.swift"; sourceTree = "<group>"; };
-		FF0001340000000000000001 /* QRCodeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/QRCodeView.swift"; sourceTree = "<group>"; };
-		FF0001350000000000000001 /* DatabaseURLField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/DatabaseURLField.swift"; sourceTree = "<group>"; };
-		FF0001360000000000000001 /* CreateRoomView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/CreateRoomView.swift"; sourceTree = "<group>"; };
-		FF0001370000000000000001 /* SquadLobbyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/SquadLobbyView.swift"; sourceTree = "<group>"; };
-		FF0001380000000000000001 /* MemberAnnotationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/MemberAnnotationView.swift"; sourceTree = "<group>"; };
-		FF0001390000000000000001 /* StandardMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/StandardMapView.swift"; sourceTree = "<group>"; };
-		FF0001400000000000000001 /* TacticalIndicatorOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/TacticalIndicatorOverlayView.swift"; sourceTree = "<group>"; };
-		FF0001410000000000000001 /* TacticalRadarMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/TacticalRadarMapView.swift"; sourceTree = "<group>"; };
-		FF0001420000000000000001 /* CrownInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/CrownInputView.swift"; sourceTree = "<group>"; };
-		FF0001430000000000000001 /* TacticalIndicatorMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/TacticalIndicatorMenuView.swift"; sourceTree = "<group>"; };
-		FF0001440000000000000001 /* SquadTacticalIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/SquadTacticalIcons.swift"; sourceTree = "<group>"; };
-		FF0001450000000000000001 /* RadarMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/RadarMapView.swift"; sourceTree = "<group>"; };
-		FF0001460000000000000001 /* TacticalMKMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/iOS/TacticalMKMapView.swift"; sourceTree = "<group>"; };
-		FF0001470000000000000001 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Paywall/PaywallView.swift"; sourceTree = "<group>"; };
+		FF0001310000000000000001 /* QRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/QRScannerView.swift"; sourceTree = "<group>"; };
+		FF0001320000000000000001 /* JoinQRBox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/JoinQRBox.swift"; sourceTree = "<group>"; };
+		FF0001330000000000000001 /* QRCodeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/QRCodeView.swift"; sourceTree = "<group>"; };
+		FF0001340000000000000001 /* DatabaseURLField.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Room/DatabaseURLField.swift"; sourceTree = "<group>"; };
+		FF0001350000000000000001 /* MemberAnnotationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/MemberAnnotationView.swift"; sourceTree = "<group>"; };
+		FF0001360000000000000001 /* StandardMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/StandardMapView.swift"; sourceTree = "<group>"; };
+		FF0001370000000000000001 /* TacticalIndicatorOverlayView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/TacticalIndicatorOverlayView.swift"; sourceTree = "<group>"; };
+		FF0001380000000000000001 /* TacticalRadarMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/TacticalRadarMapView.swift"; sourceTree = "<group>"; };
+		FF0001390000000000000001 /* CrownInputView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/CrownInputView.swift"; sourceTree = "<group>"; };
+		FF0001400000000000000001 /* TacticalIndicatorMenuView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/TacticalIndicatorMenuView.swift"; sourceTree = "<group>"; };
+		FF0001410000000000000001 /* SquadTacticalIcons.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/SquadTacticalIcons.swift"; sourceTree = "<group>"; };
+		FF0001420000000000000001 /* RadarMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/RadarMapView.swift"; sourceTree = "<group>"; };
+		FF0001430000000000000001 /* TacticalMKMapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Map/iOS/TacticalMKMapView.swift"; sourceTree = "<group>"; };
+		FF0001440000000000000001 /* PaywallView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Paywall/PaywallView.swift"; sourceTree = "<group>"; };
+		FF0001450000000000000001 /* DebugSecrets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "DebugSecrets.swift"; sourceTree = "<group>"; };
+		FF0001460000000000000001 /* DebugUnlockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/Settings/DebugUnlockView.swift"; sourceTree = "<group>"; };
 		FF0000010000000000000001 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Resources/Info.plist"; sourceTree = "<group>"; };
 		FF0000020000000000000001 /* GoogleService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Resources/GoogleService-Info.plist"; sourceTree = "<group>"; };
 		2F0000020000000000000003 /* GoogleService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "../RadarMap/Resources/GoogleService-Info.plist"; sourceTree = "<group>"; };
@@ -262,6 +262,7 @@
 				FF0001110000000000000001 /* DeadReckoning.swift */,
 				FF0001120000000000000001 /* MapCenterLockState.swift */,
 				FF0001130000000000000001 /* TelemetryPacket.swift */,
+				FF0001470000000000000001 /* CompactArrayCipher.swift */,
 				FF0001140000000000000001 /* SquadMember.swift */,
 				FF0001150000000000000001 /* TacticalIndicator.swift */,
 				FF0001160000000000000001 /* AppBuildVersion.swift */,
@@ -279,23 +280,22 @@
 				FF0001280000000000000001 /* HUDGuideView.swift */,
 				FF0001290000000000000001 /* SettingsView.swift */,
 				FF0001300000000000000001 /* PolicyView.swift */,
-				FF0001310000000000000001 /* RoomDiscoveryView.swift */,
-				FF0001320000000000000001 /* QRScannerView.swift */,
-				FF0001330000000000000001 /* JoinQRBox.swift */,
-				FF0001340000000000000001 /* QRCodeView.swift */,
-				FF0001350000000000000001 /* DatabaseURLField.swift */,
-				FF0001360000000000000001 /* CreateRoomView.swift */,
-				FF0001370000000000000001 /* SquadLobbyView.swift */,
-				FF0001380000000000000001 /* MemberAnnotationView.swift */,
-				FF0001390000000000000001 /* StandardMapView.swift */,
-				FF0001400000000000000001 /* TacticalIndicatorOverlayView.swift */,
-				FF0001410000000000000001 /* TacticalRadarMapView.swift */,
-				FF0001420000000000000001 /* CrownInputView.swift */,
-				FF0001430000000000000001 /* TacticalIndicatorMenuView.swift */,
-				FF0001440000000000000001 /* SquadTacticalIcons.swift */,
-				FF0001450000000000000001 /* RadarMapView.swift */,
-				FF0001460000000000000001 /* TacticalMKMapView.swift */,
-				FF0001470000000000000001 /* PaywallView.swift */,
+				FF0001310000000000000001 /* QRScannerView.swift */,
+				FF0001320000000000000001 /* JoinQRBox.swift */,
+				FF0001330000000000000001 /* QRCodeView.swift */,
+				FF0001340000000000000001 /* DatabaseURLField.swift */,
+				FF0001350000000000000001 /* MemberAnnotationView.swift */,
+				FF0001360000000000000001 /* StandardMapView.swift */,
+				FF0001370000000000000001 /* TacticalIndicatorOverlayView.swift */,
+				FF0001380000000000000001 /* TacticalRadarMapView.swift */,
+				FF0001390000000000000001 /* CrownInputView.swift */,
+				FF0001400000000000000001 /* TacticalIndicatorMenuView.swift */,
+				FF0001410000000000000001 /* SquadTacticalIcons.swift */,
+				FF0001420000000000000001 /* RadarMapView.swift */,
+				FF0001430000000000000001 /* TacticalMKMapView.swift */,
+				FF0001440000000000000001 /* PaywallView.swift */,
+				FF0001450000000000000001 /* DebugSecrets.swift */,
+				FF0001460000000000000001 /* DebugUnlockView.swift */,
 				FF0000010000000000000001 /* Info.plist */,
 				FF0000020000000000000001 /* GoogleService-Info.plist */,
 				FF0000030000000000000001 /* Assets.xcassets */,
@@ -470,6 +470,7 @@
 				2F0001110000000000000002 /* DeadReckoning.swift in Sources */,
 				2F0001120000000000000002 /* MapCenterLockState.swift in Sources */,
 				2F0001130000000000000002 /* TelemetryPacket.swift in Sources */,
+				2F0001470000000000000002 /* CompactArrayCipher.swift in Sources */,
 				2F0001140000000000000002 /* SquadMember.swift in Sources */,
 				2F0001150000000000000002 /* TacticalIndicator.swift in Sources */,
 				2F0001160000000000000002 /* AppBuildVersion.swift in Sources */,
@@ -487,23 +488,22 @@
 				2F0001280000000000000002 /* HUDGuideView.swift in Sources */,
 				2F0001290000000000000002 /* SettingsView.swift in Sources */,
 				2F0001300000000000000002 /* PolicyView.swift in Sources */,
-				2F0001310000000000000002 /* RoomDiscoveryView.swift in Sources */,
-				2F0001320000000000000002 /* QRScannerView.swift in Sources */,
-				2F0001330000000000000002 /* JoinQRBox.swift in Sources */,
-				2F0001340000000000000002 /* QRCodeView.swift in Sources */,
-				2F0001350000000000000002 /* DatabaseURLField.swift in Sources */,
-				2F0001360000000000000002 /* CreateRoomView.swift in Sources */,
-				2F0001370000000000000002 /* SquadLobbyView.swift in Sources */,
-				2F0001380000000000000002 /* MemberAnnotationView.swift in Sources */,
-				2F0001390000000000000002 /* StandardMapView.swift in Sources */,
-				2F0001400000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */,
-				2F0001410000000000000002 /* TacticalRadarMapView.swift in Sources */,
-				2F0001420000000000000002 /* CrownInputView.swift in Sources */,
-				2F0001430000000000000002 /* TacticalIndicatorMenuView.swift in Sources */,
-				2F0001440000000000000002 /* SquadTacticalIcons.swift in Sources */,
-				2F0001450000000000000002 /* RadarMapView.swift in Sources */,
-				2F0001460000000000000002 /* TacticalMKMapView.swift in Sources */,
-				2F0001470000000000000002 /* PaywallView.swift in Sources */,
+				2F0001310000000000000002 /* QRScannerView.swift in Sources */,
+				2F0001320000000000000002 /* JoinQRBox.swift in Sources */,
+				2F0001330000000000000002 /* QRCodeView.swift in Sources */,
+				2F0001340000000000000002 /* DatabaseURLField.swift in Sources */,
+				2F0001350000000000000002 /* MemberAnnotationView.swift in Sources */,
+				2F0001360000000000000002 /* StandardMapView.swift in Sources */,
+				2F0001370000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */,
+				2F0001380000000000000002 /* TacticalRadarMapView.swift in Sources */,
+				2F0001390000000000000002 /* CrownInputView.swift in Sources */,
+				2F0001400000000000000002 /* TacticalIndicatorMenuView.swift in Sources */,
+				2F0001410000000000000002 /* SquadTacticalIcons.swift in Sources */,
+				2F0001420000000000000002 /* RadarMapView.swift in Sources */,
+				2F0001430000000000000002 /* TacticalMKMapView.swift in Sources */,
+				2F0001440000000000000002 /* PaywallView.swift in Sources */,
+				2F0001450000000000000002 /* DebugSecrets.swift in Sources */,
+				2F0001460000000000000002 /* DebugUnlockView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -525,6 +525,7 @@
 				FF0001110000000000000002 /* DeadReckoning.swift in Sources */,
 				FF0001120000000000000002 /* MapCenterLockState.swift in Sources */,
 				FF0001130000000000000002 /* TelemetryPacket.swift in Sources */,
+				FF0001470000000000000002 /* CompactArrayCipher.swift in Sources */,
 				FF0001140000000000000002 /* SquadMember.swift in Sources */,
 				FF0001150000000000000002 /* TacticalIndicator.swift in Sources */,
 				FF0001160000000000000002 /* AppBuildVersion.swift in Sources */,
@@ -542,23 +543,22 @@
 				FF0001280000000000000002 /* HUDGuideView.swift in Sources */,
 				FF0001290000000000000002 /* SettingsView.swift in Sources */,
 				FF0001300000000000000002 /* PolicyView.swift in Sources */,
-				FF0001310000000000000002 /* RoomDiscoveryView.swift in Sources */,
-				FF0001320000000000000002 /* QRScannerView.swift in Sources */,
-				FF0001330000000000000002 /* JoinQRBox.swift in Sources */,
-				FF0001340000000000000002 /* QRCodeView.swift in Sources */,
-				FF0001350000000000000002 /* DatabaseURLField.swift in Sources */,
-				FF0001360000000000000002 /* CreateRoomView.swift in Sources */,
-				FF0001370000000000000002 /* SquadLobbyView.swift in Sources */,
-				FF0001380000000000000002 /* MemberAnnotationView.swift in Sources */,
-				FF0001390000000000000002 /* StandardMapView.swift in Sources */,
-				FF0001400000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */,
-				FF0001410000000000000002 /* TacticalRadarMapView.swift in Sources */,
-				FF0001420000000000000002 /* CrownInputView.swift in Sources */,
-				FF0001430000000000000002 /* TacticalIndicatorMenuView.swift in Sources */,
-				FF0001440000000000000002 /* SquadTacticalIcons.swift in Sources */,
-				FF0001450000000000000002 /* RadarMapView.swift in Sources */,
-				FF0001460000000000000002 /* TacticalMKMapView.swift in Sources */,
-				FF0001470000000000000002 /* PaywallView.swift in Sources */,
+				FF0001310000000000000002 /* QRScannerView.swift in Sources */,
+				FF0001320000000000000002 /* JoinQRBox.swift in Sources */,
+				FF0001330000000000000002 /* QRCodeView.swift in Sources */,
+				FF0001340000000000000002 /* DatabaseURLField.swift in Sources */,
+				FF0001350000000000000002 /* MemberAnnotationView.swift in Sources */,
+				FF0001360000000000000002 /* StandardMapView.swift in Sources */,
+				FF0001370000000000000002 /* TacticalIndicatorOverlayView.swift in Sources */,
+				FF0001380000000000000002 /* TacticalRadarMapView.swift in Sources */,
+				FF0001390000000000000002 /* CrownInputView.swift in Sources */,
+				FF0001400000000000000002 /* TacticalIndicatorMenuView.swift in Sources */,
+				FF0001410000000000000002 /* SquadTacticalIcons.swift in Sources */,
+				FF0001420000000000000002 /* RadarMapView.swift in Sources */,
+				FF0001430000000000000002 /* TacticalMKMapView.swift in Sources */,
+				FF0001440000000000000002 /* PaywallView.swift in Sources */,
+				FF0001450000000000000002 /* DebugSecrets.swift in Sources */,
+				FF0001460000000000000002 /* DebugUnlockView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -644,7 +644,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = RadarMapCompanion/Resources/RadarMapCompanion.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 479;
+				CURRENT_PROJECT_VERSION = 480;
 				DEVELOPMENT_TEAM = 2VUBR7QPFD;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RadarMapCompanion/Resources/Info.plist;
@@ -670,7 +670,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = RadarMapCompanion/Resources/RadarMapCompanion.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 479;
+				CURRENT_PROJECT_VERSION = 480;
 				DEVELOPMENT_TEAM = 2VUBR7QPFD;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RadarMapCompanion/Resources/Info.plist;
@@ -697,7 +697,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = RadarMap/Resources/RadarMapWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 479;
+				CURRENT_PROJECT_VERSION = 480;
 				DEVELOPMENT_TEAM = 2VUBR7QPFD;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RadarMap/Resources/Info.plist;
@@ -725,7 +725,7 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = RadarMap/Resources/RadarMapWatch.entitlements;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 479;
+				CURRENT_PROJECT_VERSION = 480;
 				DEVELOPMENT_TEAM = 2VUBR7QPFD;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = RadarMap/Resources/Info.plist;

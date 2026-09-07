@@ -163,9 +163,6 @@ RadarMap/
 │   ├── Guide/
 │   │   └── HUDGuideView.swift              # Interactive HUD field manual & visual onboarding guide
 │   ├── Room/
-│   │   ├── RoomDiscoveryView.swift         # Squad creation & direct PIN join interface
-│   │   ├── CreateRoomView.swift            # Room creator with capacity selector & paywall trigger
-│   │   ├── SquadLobbyView.swift            # Squad roster, member ready states & mission countdown
 │   │   ├── DatabaseURLField.swift          # Custom RTDB URL input with Live Text camera OCR scanning
 │   │   ├── JoinQRBox.swift                 # Join QR code display box and scanner trigger
 │   │   ├── QRCodeView.swift                # CIQRCodeGenerator vector QR barcode renderer

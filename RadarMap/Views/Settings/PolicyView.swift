@@ -1,14 +1,17 @@
 import SwiftUI
 
 public struct PolicyView: View {
+    @EnvironmentObject var gameState: GameStateManager
+    @State private var showDebugUnlock: Bool = false
+
     public init() {}
-    
+
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 // Header
                 VStack(spacing: 4) {
-                    Image(systemName: "hand.raised.shield.fill")
+                    Image(systemName: "hand.raised.fill")
                         .font(.system(size: 26))
                         .foregroundColor(.cyan)
                     
@@ -55,6 +58,13 @@ public struct PolicyView: View {
                         iconColor: .yellow,
                         title: "Ephemeral Storage",
                         description: AppConstants.Policy.dataRetentionDescription
+                    )
+                    
+                    PolicyItemRow(
+                        icon: "lock.shield.fill",
+                        iconColor: .cyan,
+                        title: "End-to-End Encryption (E2EE)",
+                        description: AppConstants.Policy.encryptionDescription
                     )
                     
                     PolicyItemRow(
@@ -197,6 +207,15 @@ public struct PolicyView: View {
             }
             .padding(.horizontal, 8)
             .padding(.bottom, 16)
+        }
+        .contentShape(Rectangle())
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 5.0)
+                .onEnded { _ in showDebugUnlock = true }
+        )
+        .sheet(isPresented: $showDebugUnlock) {
+            DebugUnlockView()
+                .environmentObject(gameState)
         }
         .navigationTitle("Policy")
         #if os(watchOS) || os(iOS)

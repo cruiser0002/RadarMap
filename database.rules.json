@@ -3,6 +3,7 @@
     ".read": false,
     ".write": false,
     "r": {
+      ".indexOn": ["exp", "expireAt"],
       "$roomId": {
         ".read": true,
         ".write": "data.exists() || newData.child('id').exists()",

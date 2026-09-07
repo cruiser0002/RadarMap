@@ -78,7 +78,7 @@ In the setup section of the notebook (or CLI arguments), you can configure:
 
 3. **Tactical Indicators (`/t/{roomId}`)**:
    - **Squad Orders** (`/t/{roomId}/o/{indicatorId}`): `watchHere`, `goHere`, `attackHere` — self-pruning per type per member, uncapped.
-   - **Enemy & Environmental Indicators** (`/t/{roomId}/i/{indicatorId}`): `infantry`, `lightVehicle`, `heavyVehicle`, plus environmental types — capped at `mti`.
+   - **Enemy & Environmental Indicators** (`/t/{roomId}/i/{indicatorId}`): `infantry`, `vehicle`, `armor`, `drone`, plus environmental types — capped at `mti`.
    - Legacy flat mirrors, `meta/`, and `_updatedAt`/`uts` timestamps have been removed; sync relies on persistent SDK listeners.
 
 4. **Constant Bandwidth Adaptation**:

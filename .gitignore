@@ -4,6 +4,7 @@
 *.xcodeproj/xcuserdata/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 Config.xcconfig
+RadarMap/DebugSecrets.swift
 node_modules/
 functions/node_modules/
 __pycache__/

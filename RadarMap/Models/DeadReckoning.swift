@@ -13,6 +13,14 @@ import CoreLocation
 public enum DeadReckoning {
     private static let metersPerDegreeLatitude: Double = AppConstants.Location.metersPerDegreeLatitude
 
+    /// Debug-only kill switch, shared by both call sites (sender-side upload gating in
+    /// `GameStateManager.predictedPositionError` and receiver-side rendering in
+    /// `SquadMember.extrapolatedCoordinate`). Flip to `false` and rebuild to test them in
+    /// isolation: `predictedCoordinate` always returns `nil`, so both sides fall back to their
+    /// raw/no-prediction behavior consistently — the sender gates purely on raw displacement,
+    /// and remote members render at their raw last-telemetry position with no extrapolation.
+    public static let isEnabled = false
+
     /// Flat-earth (equirectangular) approximation of north/east displacement, in meters, between
     /// two nearby coordinates. Adequate for gating/rendering over the sub-kilometer distances
     /// relevant here; not intended for geodesic accuracy at longer range.
@@ -40,6 +48,8 @@ public enum DeadReckoning {
         sampleB: (coordinate: CLLocationCoordinate2D, timestamp: TimeInterval),
         atTime: TimeInterval
     ) -> CLLocationCoordinate2D? {
+        guard isEnabled else { return nil }
+
         let dtHistory = sampleB.timestamp - sampleA.timestamp
         guard dtHistory > 0.01 else { return nil }
 

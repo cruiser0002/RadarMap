@@ -21,8 +21,24 @@ public enum AppConstants {
     
     // MARK: - Debug Configuration
     public enum Debug {
-        /// Set to true to display the 8-character text-based debug field in the HUD.
-        public static let isDebugFieldEnabled: Bool = true
+        /// Whether the version/netcode debug field is shown in the HUD. Off by default; toggled at
+        /// runtime from the hidden debug panel (hold the Policy screen for 5 seconds).
+        public static var isDebugFieldEnabled: Bool {
+            get { UserDefaults.standard.bool(forKey: AppConstants.Storage.isDebugDisplayEnabledKey) }
+            set { UserDefaults.standard.set(newValue, forKey: AppConstants.Storage.isDebugDisplayEnabledKey) }
+        }
+
+        /// Whether data encryption is enabled. On by default; toggled at runtime from the hidden
+        /// debug panel (hold the Policy screen for 5 seconds).
+        public static var isEncryptionEnabled: Bool {
+            get {
+                if UserDefaults.standard.object(forKey: AppConstants.Storage.isEncryptionEnabledKey) == nil {
+                    return true
+                }
+                return UserDefaults.standard.bool(forKey: AppConstants.Storage.isEncryptionEnabledKey)
+            }
+            set { UserDefaults.standard.set(newValue, forKey: AppConstants.Storage.isEncryptionEnabledKey) }
+        }
     }
     
     // MARK: - Local Storage & UserDefaults Keys
@@ -37,6 +53,8 @@ public enum AppConstants {
         public static let customDatabaseURLKey = "custom_database_url"
         public static let isCustomDatabaseURLEnabledKey = "is_custom_database_url_enabled"
         public static let recentDatabaseURLsKey = "recent_database_urls"
+        public static let isDebugDisplayEnabledKey = "is_debug_display_enabled"
+        public static let isEncryptionEnabledKey = "is_encryption_enabled"
     }
     
     // MARK: - Networking & Realtime Database
@@ -112,11 +130,7 @@ public enum AppConstants {
     
     // MARK: - In-App Purchase & Subscriptions
     public enum Subscription {
-        public static let mockRevenueCatApiKey = "appl_BImCxHPjqYqcXAVSdaxcyvcHhbw"
-        public static let revenueCatApiKey: String = Bundle.main.infoDictionary?["REVENUECAT_API_KEY"] as? String ?? mockRevenueCatApiKey
         public static let entitlementID = "radarmap_pro"
-        public static let offeringID = "default"
-        public static let packageID = "$rc_lifetime"
         public static let productID = "com.radarmap.watch.pro"
         public static let lifetimePriceString = "$29.99"
         public static let promotionalPriceMessage: String? = nil
@@ -149,6 +163,7 @@ public enum AppConstants {
         public static let locationDataDescription = "Location data (GPS coordinates, heading, course over ground) is streamed in real time to your squad room and is automatically purged when the room is disbanded or after 24 hours of inactivity. Continued use of GPS running in the background can dramatically decrease battery life. You can opt out of location uploading at any time in Settings."
         public static let healthDataDescription = "Heart rate biometrics are read via Apple HealthKit during outdoor workouts to display team exertion levels and vital status. This data is never sold, used for advertising, or shared with third parties. You can opt out of HR uploading at any time in Settings."
         public static let dataRetentionDescription = "We do not sell your data or use tracking cookies. All session data is ephemeral and tied to temporary squad rooms."
+        public static let encryptionDescription = "Telemetry (GPS coordinates, heading, heart rate) and tactical markers are end-to-end encrypted (E2EE) using AES-256-GCM derived from your squad room PIN, ensuring data remains secure and unreadable in transit and at rest on any cloud database."
         public static let batteryDisclaimer = "Continued use of GPS running in the background can dramatically decrease battery life."
     }
     
@@ -236,16 +251,8 @@ public enum AppConstants {
         public enum AdaptiveRate {
             public static let criticalInterval: TimeInterval = 5.0
             public static let poorInterval: TimeInterval = 4.0
-            public static let largeSquadInterval: TimeInterval = 3.0
-            public static let mediumSquadInterval: TimeInterval = 2.0
             public static let baselineInterval: TimeInterval = 1.0
-            public static let minimumInterval: TimeInterval = 1.0
             public static let wristDownPollingInterval: TimeInterval = 10.0 // Low power throttle when wrist is down
-            
-            // Member count thresholds for throttling
-            public static let largeSquadMemberCount: Int = 50
-            public static let mediumSquadMemberCount: Int = 20
-            public static let smallSquadMemberCount: Int = 4
             
             // Threshold for triggering interval update
             public static let intervalChangeEpsilon: Double = 0.01
@@ -339,8 +346,6 @@ public enum AppConstants {
             public static let delayBeforeChargeSeconds: TimeInterval = 1.0
             public static let chargeDurationSeconds: TimeInterval = 3.0
             public static let timerTickIntervalSeconds: TimeInterval = 0.03
-            public static let actionHoldDurationSeconds: TimeInterval = 1.2
-            public static let holdTimerTickIntervalSeconds: TimeInterval = 0.02
         }
     }
     
@@ -355,13 +360,6 @@ public enum AppConstants {
             public static let point1 = "pt1"
             public static let point2 = "pt2"
             public static let point3 = "pt3"
-            public static let point4 = "pt4"
-            public static let point5 = "pt5"
-            public static let point6 = "pt6"
-            public static let point7 = "pt7"
-            public static let point8 = "pt8"
-            public static let point9 = "pt9"
-            public static let point10 = "p10"
             
             public static let infantry = "inf"
             public static let vehicle = "veh"
@@ -395,7 +393,7 @@ public enum AppConstants {
             public static let expireAt = "exp"
         }
     }
-    
+
     // MARK: - UI, Display & Styling
     public enum UI {
         public static let defaultCallsign = ""
@@ -454,7 +452,6 @@ public enum AppConstants {
             public static let defaultScaleMeters: Double = TacticalScalePolicy.defaultScale
             public static let minScaleMeters: Double = TacticalScalePolicy.minScale
             public static let maxScaleMeters: Double = TacticalScalePolicy.maxScale
-            public static let maxWatchScaleMeters: Double = TacticalScalePolicy.maxScale
             public static let maxiOSScaleMeters: Double = TacticalScalePolicy.maxScale
             
             /// Canonical discrete `[1, 2.5, 5]` decade scale ladder from 1m to 2.5km
@@ -545,7 +542,6 @@ public enum AppConstants {
         
         /// Tactical scale ruler display thresholds
         public enum ScaleRuler {
-            public static let rulerWidthPoints: Double = 40.0
             #if os(watchOS)
             public static let referenceScreenHeight: Double = 200.0
             #else
@@ -605,7 +601,8 @@ public enum AppConstants {
             public static let rulerBarWidth: CGFloat = 19.0
             public static let rulerBarHeight: CGFloat = 1.0
             public static let rulerFontSize: CGFloat = 8.0
-            
+            public static let heartRateFontSize: CGFloat = 20.0
+
             public static let circleHitboxSize: CGSize = CGSize(width: 48.0, height: 48.0)
             public static let rectHitboxSize: CGSize = CGSize(width: 52.0, height: 48.0)
             #else
@@ -630,7 +627,8 @@ public enum AppConstants {
             public static let rulerBarWidth: CGFloat = 40.0
             public static let rulerBarHeight: CGFloat = 2.0
             public static let rulerFontSize: CGFloat = 13.0
-            
+            public static let heartRateFontSize: CGFloat = 40.0
+
             public static let circleHitboxSize: CGSize = CGSize(width: 68.0, height: 68.0)
             public static let rectHitboxSize: CGSize = CGSize(width: 112.0, height: 64.0)
             #endif

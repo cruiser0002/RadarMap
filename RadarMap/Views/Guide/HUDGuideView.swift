@@ -238,6 +238,3 @@ public struct HUDGuideView: View {
         #endif
     }
 }
-
-/// Typealias for backward compatibility
-public typealias WelcomeGuideView = HUDGuideView

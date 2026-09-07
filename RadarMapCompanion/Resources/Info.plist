@@ -45,10 +45,6 @@
 	</dict>
 	<key>UILaunchScreen</key>
 	<dict/>
-	<key>NSHealthShareUsageDescription</key>
-	<string>Radar Map reads your heart rate to stream live team biometric exertion levels to teammates during active sessions.</string>
-	<key>NSHealthUpdateUsageDescription</key>
-	<string>Radar Map records outdoor workout and activity sessions to track physical exertion and maintain live heart rate streaming.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Radar Map requires your location to display your position on the team map and share live coordinates with your squad.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>

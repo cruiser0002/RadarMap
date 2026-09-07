@@ -70,6 +70,7 @@ Transmitted on state change or rolling convergence retry (`sync_ts`).
 4. **Rolling sync_ts Retransmission:**
    * A device rolls its local `sync_ts` (e.g. 1 Hz) while it advertises any structure that wins against the counterpart's last advertised structure, causing periodic re-advertisement of its latest low-speed snapshot.
    * Stop rolling `sync_ts` after the counterpart advertises an equivalent versioned state for all mergeable structures.
+   * **Reachability Gate:** Each rolling tick is skipped while `WCSession.isReachable` is `false`, avoiding wasted `updateApplicationContext` publishes into a dead link. When reachability returns, the tie-in `sessionReachabilityDidChange` delegate callback immediately republishes rather than waiting for the next tick, so convergence resumes without a stall.
 5. **Losing Side Adoption:** The losing device replaces its full local structure with the winner's value and `*_ts`.
 6. **Startup Sync:** Upon companion startup, timestamps default to 0 and inherently adopt the active peer's state.
 

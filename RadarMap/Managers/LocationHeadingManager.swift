@@ -110,7 +110,7 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
         locationManager.distanceFilter = kCLDistanceFilterNone
-        locationManager.activityType = .automotiveNavigation
+        locationManager.activityType = .fitness
         #if os(watchOS) || os(iOS)
         locationManager.headingFilter = AppConstants.Location.headingFilterDegrees
         locationManager.headingOrientation = .portrait
@@ -118,13 +118,12 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
         #if os(iOS)
         locationManager.allowsBackgroundLocationUpdates = true
         locationManager.pausesLocationUpdatesAutomatically = false
+        locationManager.showsBackgroundLocationIndicator = true
         #endif
     }
 
     public func requestPermissions() {
-        #if os(iOS)
-        locationManager.requestAlwaysAuthorization()
-        #elseif os(watchOS)
+        #if os(iOS) || os(watchOS)
         locationManager.requestWhenInUseAuthorization()
         #else
         locationManager.requestAlwaysAuthorization()
@@ -151,18 +150,12 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
         isUpdating = false
     }
     
+    /// Adjusts GPS accuracy/distance-filter for power mode. Heading updates are intentionally left
+    /// untouched here: the compass always runs alongside location (see startUpdates/stopUpdates),
+    /// regardless of power mode, so the blended heading never freezes.
     public func setHighAccuracy(_ high: Bool) {
         locationManager.desiredAccuracy = high ? kCLLocationAccuracyBestForNavigation : kCLLocationAccuracyHundredMeters
         locationManager.distanceFilter = high ? AppConstants.Location.distanceFilterMeters : 50.0
-        #if os(watchOS) || os(iOS)
-        if CLLocationManager.headingAvailable() {
-            if high && isUpdating {
-                locationManager.startUpdatingHeading()
-            } else {
-                locationManager.stopUpdatingHeading()
-            }
-        }
-        #endif
     }
     
     public func enterLowPowerMode() {

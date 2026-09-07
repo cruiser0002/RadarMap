@@ -2,8 +2,6 @@
 
 The single "Config" screen, opened via the gear icon in the upper-left of the map HUD. Implemented in [`SettingsView.swift`](../RadarMap/Views/Settings/SettingsView.swift), navigation title `"Config"`. It handles callsign, hosting/joining a squad, custom Firebase database URL, radar color, data-sharing toggles, the paywall, and roster display. Shared subcomponents: [`JoinQRBox.swift`](../RadarMap/Views/Room/JoinQRBox.swift) and [`DatabaseURLField.swift`](../RadarMap/Views/Room/DatabaseURLField.swift). Related: [BRING_YOUR_OWN_FIREBASE.md](BRING_YOUR_OWN_FIREBASE.md) for the custom-Firebase setup flow this UI supports, and [TACTICAL_UI_SPECIFICATION.md](TACTICAL_UI_SPECIFICATION.md) §6 for the HUD entry point.
 
-(A separate, largely redundant `RoomDiscoveryView.swift` / `CreateRoomView.swift` pair also exists in the codebase but is not the screen behind the gear icon.)
-
 ---
 
 ## ⚡ Key Constants & Parameters
@@ -22,6 +20,8 @@ The following centralized constants from [`AppConstants.swift`](../RadarMap/AppC
 | **Recent URLs** | `maxRecentDatabaseURLs` | `3` | Max entries kept in the recent custom URL dropdown (`UI`) |
 | **Data Sharing** | `isUploadLocationEnabledKey` | `"is_upload_location_enabled"` | UserDefaults key for GPS broadcast opt-out toggle (`Storage`) |
 | **Data Sharing** | `isUploadHeartRateEnabledKey`| `"is_upload_heart_rate_enabled"` | UserDefaults key for HealthKit broadcast opt-out toggle (`Storage`) |
+| **Debug Display** | `isDebugDisplayEnabledKey` | `"is_debug_display_enabled"` | UserDefaults key for the HUD version/netcode debug text, default `false` (`Storage`) |
+| **Encryption** | `isEncryptionEnabledKey` | `"is_encryption_enabled"` | UserDefaults key for the data-encryption flag, default `true` (`Storage`) |
 
 ---
 
@@ -84,3 +84,15 @@ Last two rows of the top squad section (right after the Database URL field, item
 - **Paywall** section — shows "Pro Unlocked" or an "Unlock Pro" button that presents `PaywallView`.
 - **HUD Guide** and **Policy** navigation links.
 - **Roster** section (only while in an active room) — lists squad members with callsign, host badge, heading, and live heart rate.
+
+---
+
+## Hidden debug panel (via Policy)
+
+`PolicyView` (opened from the **Policy** link above) carries an undocumented long-press gesture with no visual affordance: holding anywhere on the screen for 5 seconds (`.onLongPressGesture(minimumDuration: 5.0)`) presents [`DebugUnlockView.swift`](../RadarMap/Views/Settings/DebugUnlockView.swift) as a sheet.
+
+- **Password gate**: a `SecureField` checked against `DebugSecrets.debugPanelPassword`. `DebugSecrets.swift` is a local-only file (git-ignored — see `.gitignore`); a wrong entry shows an "Incorrect Password" alert and clears the field. There is no lockout or rate limiting.
+- Once matched, three toggles appear:
+  1. **Debug Display** (`AppConstants.Storage.isDebugDisplayEnabledKey`, default off) — shows/hides the version + `gameState.debugStatusString` text in the map HUD's upper-right corner (see [`TacticalRadarMapView.swift`](../RadarMap/Views/Map/TacticalRadarMapView.swift)). Backed by `@AppStorage` on both this sheet and the HUD, so it takes effect immediately without relaunching.
+  2. **Encryption** (`AppConstants.Storage.isEncryptionEnabledKey`, default on) — persists `AppConstants.Debug.isEncryptionEnabled`, which gates whether `GameStateManager.setEncryptionContext(pin:roomId:)` derives an AES-256-GCM key for this device's telemetry and tactical-indicator writes/reads (see [CLOUD_DATA_MANAGEMENT.md](CLOUD_DATA_MANAGEMENT.md) §5.E). Flipping it off makes this device write plaintext and skip decryption on read; every client syncing on the same room must agree on this setting.
+  3. **Pro** (bound to `gameState.subscriptionManager.hasUnlimitedSquadUnlock`) — initial position reflects the current pro state. Flipping it on calls `SubscriptionManager.debugForceUnlockPro()`, which grants the unlock and persists it to `AppConstants.Storage.hasUnlimitedSquadUnlockKey`. Flipping it off is a no-op — once unlocked (by this switch or a real purchase/restore) it can never be turned back off from here.

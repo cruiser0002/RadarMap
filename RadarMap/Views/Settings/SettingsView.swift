@@ -76,15 +76,11 @@ public struct SettingsView: View {
                     databaseURLField
                     locationUploadToggle
                     healthDataUploadToggle
+                    radarColorRow
+                    paywallRow
+                    hudGuideRow
+                    policyRow
                 }
-
-                radarColorSection
-
-                paywallSection
-                
-                hudGuideSection
-                
-                policySection
                 
                 if let room = gameState.firebaseManager.activeRoom {
                     rosterSection(room: room)
@@ -435,20 +431,18 @@ public struct SettingsView: View {
     }
     
     @ViewBuilder
-    private var radarColorSection: some View {
-        Section {
-            Toggle(isOn: Binding(
-                get: { gameState.radarColorTheme == .green },
-                set: { gameState.radarColorTheme = $0 ? .green : .red }
-            )) {
-                HStack {
-                    Text("Radar color")
-                        .font(.system(size: 11, weight: .semibold))
-                    Spacer()
-                    Text(gameState.radarColorTheme.rawValue)
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundColor(gameState.radarColorTheme.color)
-                }
+    private var radarColorRow: some View {
+        Toggle(isOn: Binding(
+            get: { gameState.radarColorTheme == .green },
+            set: { gameState.radarColorTheme = $0 ? .green : .red }
+        )) {
+            HStack {
+                Text("Radar color")
+                    .font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(gameState.radarColorTheme.rawValue)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(gameState.radarColorTheme.color)
             }
         }
     }
@@ -560,56 +554,50 @@ public struct SettingsView: View {
     }
     
     @ViewBuilder
-    private var paywallSection: some View {
-        Section {
-            if gameState.subscriptionManager.hasUnlimitedSquadUnlock {
+    private var paywallRow: some View {
+        if gameState.subscriptionManager.hasUnlimitedSquadUnlock {
+            HStack {
+                Image(systemName: "checkmark.seal.fill")
+                    .foregroundColor(.yellow)
+                Text("Pro Unlocked")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.yellow)
+            }
+        } else {
+            Button(action: {
+                showPaywall = true
+            }) {
                 HStack {
-                    Image(systemName: "checkmark.seal.fill")
+                    Image(systemName: "lock.shield.fill")
                         .foregroundColor(.yellow)
-                    Text("Pro Unlocked")
-                        .font(.system(size: 10, weight: .bold))
+                    Text("Unlock Pro")
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundColor(.yellow)
-                }
-            } else {
-                Button(action: {
-                    showPaywall = true
-                }) {
-                    HStack {
-                        Image(systemName: "lock.shield.fill")
-                            .foregroundColor(.yellow)
-                        Text("Unlock Pro")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.yellow)
-                    }
                 }
             }
         }
     }
     
     @ViewBuilder
-    private var hudGuideSection: some View {
-        Section {
-            NavigationLink(destination: HUDGuideView()) {
-                HStack(spacing: 8) {
-                    Image(systemName: "book.pages.fill")
-                        .foregroundColor(.green)
-                    Text("HUD Guide")
-                        .font(.system(size: 11, weight: .semibold))
-                }
+    private var hudGuideRow: some View {
+        NavigationLink(destination: HUDGuideView()) {
+            HStack(spacing: 8) {
+                Image(systemName: "book.pages.fill")
+                    .foregroundColor(.green)
+                Text("HUD Guide")
+                    .font(.system(size: 11, weight: .semibold))
             }
         }
     }
     
     @ViewBuilder
-    private var policySection: some View {
-        Section {
-            NavigationLink(destination: PolicyView()) {
-                HStack(spacing: 8) {
-                    Image(systemName: "hand.raised.shield.fill")
-                        .foregroundColor(.cyan)
-                    Text("Policy")
-                        .font(.system(size: 11, weight: .semibold))
-                }
+    private var policyRow: some View {
+        NavigationLink(destination: PolicyView()) {
+            HStack(spacing: 8) {
+                Image(systemName: "hand.raised.fill")
+                    .foregroundColor(.cyan)
+                Text("Policy")
+                    .font(.system(size: 11, weight: .semibold))
             }
         }
     }

@@ -56,6 +56,8 @@ Whenever creating or modifying settings views, paywalls, or policy documentation
   * Must explicitly state that biometric data is never sold, used for advertising, or repurposed for marketing (Guideline 5.1.3).
 * **Workout Recording Disclosure**:
   * Must state that an active squad session records an athletic training workout into the user's Apple Health database.
+* **End-to-End Encryption (E2EE) Disclosure**:
+  * Clearly declare that telemetry (GPS coordinates, heading, heart rate) and tactical markers are end-to-end encrypted using AES-256-GCM authenticated encryption derived from squad room credentials, ensuring privacy across shared and Bring-Your-Own Firebase instances (`AppConstants.Policy.encryptionDescription`).
 * **Ephemeral Data Retention & Automatic Purge**:
   * Clearly declare that room telemetry (coordinates, heading, markers, vitals) is temporary:
     * Purged immediately upon manual room disbandment.
@@ -130,16 +132,17 @@ Background location is architected differently across the two platforms:
      > *"Continued use of GPS running in the background can dramatically decrease battery life."*
 2. **Background Indicator Transparency:**
    * On iOS, when `allowsBackgroundLocationUpdates = true` is set, `locationManager.showsBackgroundLocationIndicator = true` should be enabled so the blue status bar pill / Dynamic Island indicator clearly indicates active tracking.
-3. **Strict Lifecycle Teardown:**
-   * When leaving or disbanding a room, `stopTacticalSession()` must immediately invoke `locationHeadingManager.stopUpdates()` and `healthKitManager.stopLiveHeartRateSession()`. Background location must never run when outside an active session.
+3. **Session Teardown Scope:**
+   * When leaving or disbanding a room, `stopTacticalSession()` invokes `healthKitManager.stopLiveHeartRateSession()` and tears down the network/telemetry timers, but deliberately leaves `locationHeadingManager` running. Location + heading are gated on the in-app "Location" toggle and OS permission (§4), not on room membership — see §4.D.
+   * `allowsBackgroundLocationUpdates`/background execution is still only meaningful while the app has a genuine reason to run in the background (an active tactical session, or a workout session on watchOS); outside of that, iOS/watchOS itself suspends the app regardless of whether `CLLocationManager` is still "updating," so this does not reintroduce unbounded background tracking.
 
 ---
 
 ## 4. Permission Lifecycles & In-App Opt-Out Controls
 
-### A. No Cold Launch Prompt Blasting (HIG)
-* Do not trigger modal permission requests (CoreLocation and HealthKit) simultaneously in `init()` on app launch before the user has taken an action.
-* Permissions should be requested contextually when the user creates/joins a room or interacts with map/sensor controls.
+### A. Location Permission & Sensors Are App-Lifetime, Not Session-Scoped
+* `GameStateManager.init()` calls `locationHeadingManager.requestPermissions()` / `startUpdates()` once, at app launch — this is the system prompt the user sees as the "Location" slider being on/off in Settings, and it is intentionally **not** gated on creating/joining a room.
+* Once permission is granted, location + heading updates run continuously for the life of the app process (see §3.C) — joining or leaving a tactical session neither starts nor stops the underlying `CLLocationManager` feed. This ensures the "me" icon's position/heading are always live, independent of room membership. The in-app "Location" toggle (§4.C, `isUploadLocationEnabled`) is a separate, upload-only gate — it decides whether `broadcastLocalTelemetry` sends your position to the server, not whether `LocationHeadingManager` keeps sensing locally. HealthKit heart-rate is the exception: `requestAuthorization()` is still requested contextually (first tactical session start / toggle interaction) since it isn't the app's headline capability and shouldn't cold-launch-prompt.
 
 ### B. Handling `.denied` and `.restricted` Permission States
 * Once a user selects "Don't Allow" on a system dialog, iOS/watchOS **permanently suppresses** future system prompts.

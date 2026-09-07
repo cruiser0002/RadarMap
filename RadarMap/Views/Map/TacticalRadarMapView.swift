@@ -10,6 +10,7 @@ public struct TacticalRadarMapView: View {
     #if os(watchOS)
     @Environment(\.isLuminanceReduced) private var isLuminanceReduced
     #endif
+    @AppStorage(AppConstants.Storage.isDebugDisplayEnabledKey) private var isDebugFieldEnabled: Bool = false
     @State private var showingSettingsSheet: Bool = false
     @State private var showingIndicatorMenuSheet: Bool = false
     @State private var showingPaywallSheet: Bool = false
@@ -30,6 +31,20 @@ public struct TacticalRadarMapView: View {
     private var sweepDuration: Double {
         let bpm = gameState.isDead ? AppConstants.Health.defaultRestingHeartRate : (gameState.healthKitManager.currentHeartRate > 0 ? gameState.healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
         return AppConstants.Health.referenceBpm / max(20.0, bpm)
+    }
+
+    // Numeric BPM readout — mirrors the same effective-heart-rate rule used when
+    // broadcasting telemetry (GameStateManager.sendTelemetry): flatline when KIA,
+    // pinned to the default resting rate when heart-rate upload is disabled.
+    private var displayedHeartRate: Int {
+        if gameState.isDead {
+            return Int(AppConstants.Health.flatlineHeartRate)
+        } else if !gameState.isUploadHeartRateEnabled {
+            return Int(AppConstants.Health.defaultRestingHeartRate)
+        } else {
+            let hr = gameState.healthKitManager.currentHeartRate
+            return Int(hr > 0 ? hr : AppConstants.Health.defaultRestingHeartRate)
+        }
     }
     
     public init() {}
@@ -109,13 +124,13 @@ public struct TacticalRadarMapView: View {
                         }
                         .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
                         .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                        .contentShape(Rectangle())
+                        .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
                     .focusable(false)
-                    
+
                     Spacer()
-                    
+
                     // Center Top: Squad Leader / Commander Button (Single star)
                     if gameState.subscriptionManager.hasUnlimitedSquadUnlock {
                         Button(action: {
@@ -193,7 +208,7 @@ public struct TacticalRadarMapView: View {
                     }
                     #else
                     VStack(alignment: .trailing, spacing: 2) {
-                        if AppConstants.Debug.isDebugFieldEnabled {
+                        if isDebugFieldEnabled {
                             Text(AppConstants.Version.formattedVersionString)
                                 .font(.system(size: 9, weight: .bold, design: .monospaced))
                                 .foregroundColor(uiThemeColor.opacity(0.6))
@@ -206,7 +221,7 @@ public struct TacticalRadarMapView: View {
                     #endif
                     #else
                     VStack(alignment: .trailing, spacing: 1) {
-                        if AppConstants.Debug.isDebugFieldEnabled {
+                        if isDebugFieldEnabled {
                             Text(AppConstants.Version.formattedVersionString)
                                 .font(.system(size: 6, weight: .bold, design: .monospaced))
                                 .foregroundColor(uiThemeColor.opacity(0.55))
@@ -239,6 +254,7 @@ public struct TacticalRadarMapView: View {
                                 .foregroundColor(uiThemeColor)
                         }
                         .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
+                        .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
                         .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
@@ -284,16 +300,16 @@ public struct TacticalRadarMapView: View {
                                                 themeColor.opacity(gameState.isDead ? 0.7 : 0.45),
                                                 style: StrokeStyle(lineWidth: AppConstants.UI.HUD.ekgLineWidth, lineCap: .round, lineJoin: .round)
                                             )
-                                        
+
                                         // Scanning dot riding along the EKG / flatline line
                                         let dotPos = ECGWaveShape.point(at: CGFloat(progress), in: ekgSize, isFlatline: gameState.isDead)
-                                        
+
                                         // Subtle glow halo
                                         Circle()
                                             .fill(themeColor.opacity(0.35))
                                             .frame(width: AppConstants.UI.HUD.ekgHaloSize, height: AppConstants.UI.HUD.ekgHaloSize)
                                             .position(dotPos)
-                                        
+
                                         // Bright center core dot
                                         Circle()
                                             .fill(Color.white)
@@ -301,6 +317,17 @@ public struct TacticalRadarMapView: View {
                                             .position(dotPos)
                                     }
                                     .frame(width: ekgSize.width, height: ekgSize.height)
+                                    // Numeric BPM readout, overlaid on top without affecting the EKG
+                                    // graphic's layout size — same theme color and dim opacity as the
+                                    // static pulse wave.
+                                    .overlay(
+                                        Text("\(displayedHeartRate)")
+                                            .font(.system(size: AppConstants.UI.HUD.heartRateFontSize, weight: .bold, design: .monospaced))
+                                            .foregroundColor(themeColor.opacity(gameState.isDead ? 0.7 : 0.45))
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.5)
+                                            .frame(width: buttonWidth, height: buttonHeight)
+                                    )
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                                     
                                     // Tactical outer border
@@ -391,7 +418,7 @@ public struct TacticalRadarMapView: View {
                         }
                         .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
                         .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                        .contentShape(Rectangle())
+                        .contentShape(Circle())
                     }
                     .buttonStyle(.plain)
                     .focusable(false)

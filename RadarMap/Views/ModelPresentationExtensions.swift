@@ -72,20 +72,6 @@ extension TacticalIndicatorType {
             return "2.circle"
         case .point3:
             return "3.circle"
-        case .point4:
-            return "4.circle"
-        case .point5:
-            return "5.circle"
-        case .point6:
-            return "6.circle"
-        case .point7:
-            return "7.circle"
-        case .point8:
-            return "8.circle"
-        case .point9:
-            return "9.circle"
-        case .point10:
-            return "10.circle"
             
         // Enemy Indicators
         case .infantry:

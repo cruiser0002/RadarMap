@@ -4,19 +4,14 @@ import StoreKit
 
 /// Backend purchase engine mode
 public enum PurchaseEngineMode: String, Codable, CaseIterable {
-    case revenueCat = "RevenueCat"
     case storeKit2 = "StoreKit 2"
     case mock = "Simulated / Mock"
 }
 
 public final class SubscriptionManager: ObservableObject {
-    public static let shared = RevenueCatSharedKey()
-    
-    // RevenueCat Entitlement & Product IDs
+    // StoreKit Entitlement & Product IDs
     public static let entitlementID = AppConstants.Subscription.entitlementID
     public static let productID = AppConstants.Subscription.productID
-    public static let offeringID = AppConstants.Subscription.offeringID
-    public static let packageID = AppConstants.Subscription.packageID
     public static let defaultLifetimePriceString = AppConstants.Subscription.lifetimePriceString
     public static let freeTierMaxCapacity = AppConstants.Subscription.freeTierMaxCapacity
     
@@ -37,6 +32,15 @@ public final class SubscriptionManager: ObservableObject {
     public var storeKitProduct: Product? = nil
     private var transactionListenerTask: Task<Void, Never>? = nil
     
+    /// Force-grants the unlimited squad unlock from the hidden debug panel. Only ever moves
+    /// the flag from locked to unlocked — never revokes an unlock, whether it was granted here
+    /// or by a real purchase/restore, since a debug toggle should never look like a lost purchase.
+    public func debugForceUnlockPro() {
+        guard !hasUnlimitedSquadUnlock else { return }
+        hasUnlimitedSquadUnlock = true
+        UserDefaults.standard.set(true, forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
+    }
+
     public init(engineMode: PurchaseEngineMode = .storeKit2) {
         self.activeEngineMode = engineMode
         // Load persisted unlock status from local storage
@@ -68,14 +72,7 @@ public final class SubscriptionManager: ObservableObject {
         return hasUnlimitedSquadUnlock
     }
     
-    // MARK: - Configuration & Setup
-    
-    /// Configures RevenueCat SDK with the provided API key if using RevenueCat
-    public func configureRevenueCat(apiKey: String = AppConstants.Subscription.revenueCatApiKey) {
-        self.activeEngineMode = .revenueCat
-        // Note: When linking the RevenueCat binary package, Purchases.configure(withAPIKey:) is executed here.
-    }
-    
+
     // MARK: - StoreKit 2 Product Loading
     
     @MainActor
@@ -108,7 +105,7 @@ public final class SubscriptionManager: ObservableObject {
         switch activeEngineMode {
         case .mock:
             return await executeMockPurchase()
-        case .storeKit2, .revenueCat:
+        case .storeKit2:
             return await executeStoreKitPurchase()
         }
     }
@@ -139,8 +136,12 @@ public final class SubscriptionManager: ObservableObject {
             }
             
             guard let product = self.storeKitProduct else {
-                // If in a testing or simulator environment without StoreKit Configuration, fallback gracefully
-                return await executeMockPurchase()
+                if activeEngineMode == .mock {
+                    return await executeMockPurchase()
+                }
+                self.errorMessage = "Unable to load product from App Store. Please check your network connection."
+                self.isPurchasing = false
+                return false
             }
             
             let result = try await product.purchase()
@@ -263,8 +264,4 @@ public final class SubscriptionManager: ObservableObject {
             }
         }
     }
-}
-
-public struct RevenueCatSharedKey {
-    public let apiKey = AppConstants.Subscription.revenueCatApiKey
 }

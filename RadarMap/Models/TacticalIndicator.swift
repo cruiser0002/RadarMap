@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import CryptoKit
 
 /// Category of tactical indicator
 public enum TacticalIndicatorCategory: String, Codable, CaseIterable, Identifiable {
@@ -32,13 +33,6 @@ public enum TacticalIndicatorType: String, Codable, CaseIterable, Identifiable {
     case point1 = "point1"
     case point2 = "point2"
     case point3 = "point3"
-    case point4 = "point4"
-    case point5 = "point5"
-    case point6 = "point6"
-    case point7 = "point7"
-    case point8 = "point8"
-    case point9 = "point9"
-    case point10 = "point10"
     
     // Enemy Indicators
     case infantry = "infantry"
@@ -63,8 +57,7 @@ public enum TacticalIndicatorType: String, Codable, CaseIterable, Identifiable {
     public var category: TacticalIndicatorCategory {
         switch self {
         case .watchHere, .goHere, .attackHere, .protectHere, .flag,
-             .point1, .point2, .point3, .point4, .point5,
-             .point6, .point7, .point8, .point9, .point10:
+             .point1, .point2, .point3:
             return .squadOrder
         case .infantry, .vehicle, .armor, .drone:
             return .enemyIndicator
@@ -91,20 +84,6 @@ public enum TacticalIndicatorType: String, Codable, CaseIterable, Identifiable {
             return "2"
         case .point3:
             return "3"
-        case .point4:
-            return "4"
-        case .point5:
-            return "5"
-        case .point6:
-            return "6"
-        case .point7:
-            return "7"
-        case .point8:
-            return "8"
-        case .point9:
-            return "9"
-        case .point10:
-            return "10"
         case .infantry:
             return "Personnel"
         case .vehicle:
@@ -158,13 +137,6 @@ public enum TacticalIndicatorType: String, Codable, CaseIterable, Identifiable {
         case .point1: return AppConstants.Encoding.Tactical.point1
         case .point2: return AppConstants.Encoding.Tactical.point2
         case .point3: return AppConstants.Encoding.Tactical.point3
-        case .point4: return AppConstants.Encoding.Tactical.point4
-        case .point5: return AppConstants.Encoding.Tactical.point5
-        case .point6: return AppConstants.Encoding.Tactical.point6
-        case .point7: return AppConstants.Encoding.Tactical.point7
-        case .point8: return AppConstants.Encoding.Tactical.point8
-        case .point9: return AppConstants.Encoding.Tactical.point9
-        case .point10: return AppConstants.Encoding.Tactical.point10
         case .infantry: return AppConstants.Encoding.Tactical.infantry
         case .vehicle: return AppConstants.Encoding.Tactical.vehicle
         case .armor: return AppConstants.Encoding.Tactical.armor
@@ -188,13 +160,6 @@ public enum TacticalIndicatorType: String, Codable, CaseIterable, Identifiable {
         case AppConstants.Encoding.Tactical.point1, "point1": return .point1
         case AppConstants.Encoding.Tactical.point2, "point2": return .point2
         case AppConstants.Encoding.Tactical.point3, "point3": return .point3
-        case AppConstants.Encoding.Tactical.point4, "point4": return .point4
-        case AppConstants.Encoding.Tactical.point5, "point5": return .point5
-        case AppConstants.Encoding.Tactical.point6, "point6": return .point6
-        case AppConstants.Encoding.Tactical.point7, "point7": return .point7
-        case AppConstants.Encoding.Tactical.point8, "point8": return .point8
-        case AppConstants.Encoding.Tactical.point9, "point9": return .point9
-        case AppConstants.Encoding.Tactical.point10, "point10": return .point10
         case AppConstants.Encoding.Tactical.infantry, "infantry": return .infantry
         case AppConstants.Encoding.Tactical.vehicle, "vehicle", "lightVehicle": return .vehicle
         case AppConstants.Encoding.Tactical.armor, "armor", "heavyVehicle": return .armor
@@ -269,8 +234,13 @@ public struct TacticalIndicator: Identifiable, Codable, Equatable {
         ]
     }
     
-    /// Deserializes a TacticalIndicator from compact 5-element (or 4-element) array or legacy map
-    public static func parse(id: String, rawValue: Any, defaultPlacedBy: String = "") -> TacticalIndicator? {
+    /// Deserializes a TacticalIndicator from compact 5-element (or 4-element) array, legacy map,
+    /// or (when `key` is supplied) an AES-256-GCM encrypted compact array string.
+    public static func parse(id: String, rawValue: Any, defaultPlacedBy: String = "", key: SymmetricKey? = nil) -> TacticalIndicator? {
+        if let ciphertext = rawValue as? String, let key {
+            guard let array = try? CompactArrayCipher.decrypt(ciphertext, key: key) else { return nil }
+            return parse(id: id, rawValue: array, defaultPlacedBy: defaultPlacedBy, key: key)
+        }
         if let array = rawValue as? [Any], array.count >= 4 {
             let typeStr = String(describing: array[0])
             guard let type = TacticalIndicatorType.fromCode(typeStr) ?? TacticalIndicatorType(rawValue: typeStr),

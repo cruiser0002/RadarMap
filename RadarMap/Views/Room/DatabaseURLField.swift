@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The "Default RTDB or enter custom URL" row shared by Host and Join screens: a normal
+/// The "Enter custom URL" row in the Config screen: a normal
 /// keyboard-editable text field, an enable toggle that switches between the shared default RTDB
 /// and a custom one, and — iOS only — a camera button that reads a URL directly off the Firebase
 /// console webpage via live text recognition, so a host never has to turn their own URL into a QR

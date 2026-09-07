@@ -43,6 +43,6 @@
 	<key>WKCompanionAppBundleIdentifier</key>
 	<string>com.radarmap.watch</string>
 	<key>WKRunsIndependentlyOfCompanionApp</key>
-	<false/>
+	<true/>
 </dict>
 </plist>

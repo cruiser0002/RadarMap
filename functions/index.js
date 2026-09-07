@@ -156,9 +156,14 @@ exports.pruneExcessTacticalIndicators = functions.database
 
     const entries = [];
     snap.forEach((child) => {
-      const arr = child.val(); // [type_code, lat, lon, ts, placedByMemberId]
-      const ts = Array.isArray(arr) ? arr[3] : arr["3"];
-      entries.push({ id: child.key, ts: Number(ts) });
+      const val = child.val();
+      let ts = 0;
+      if (Array.isArray(val)) {
+        ts = Number(val[3]) || 0;
+      } else if (val && typeof val === "object") {
+        ts = Number(val["3"] !== undefined ? val["3"] : (val.ts !== undefined ? val.ts : (val.timestamp !== undefined ? val.timestamp : 0))) || 0;
+      }
+      entries.push({ id: child.key, ts });
     });
 
     entries.sort((a, b) => a.ts - b.ts);

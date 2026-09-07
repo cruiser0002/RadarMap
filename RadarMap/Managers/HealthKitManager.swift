@@ -44,8 +44,7 @@ public final class HealthKitManager: NSObject, ObservableObject {
         let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
         let typesToRead: Set<HKObjectType> = [heartRateType]
         let typesToShare: Set<HKSampleType> = [
-            HKObjectType.workoutType(),
-            heartRateType
+            HKObjectType.workoutType()
         ]
 
         healthStore.requestAuthorization(toShare: typesToShare, read: typesToRead) { [weak self] success, _ in
@@ -113,34 +112,17 @@ public final class HealthKitManager: NSObject, ObservableObject {
     }
     
     #if os(watchOS)
-    /// Cycles optical PPG LEDs: active sampling duration followed by sleep duration to reduce optical power by ~80%
+    /// To preserve background execution runtime when the wrist is lowered,
+    /// HKWorkoutSession must remain running continuously. Pausing the session causes
+    /// watchOS to suspend background execution.
     private func startPPGDutyCycle() {
         ppgDutyCycleTimer?.cancel()
-        guard isLowPowerPPGEnabled, let session = workoutSession else { return }
+        ppgDutyCycleTimer = nil
+        guard let session = workoutSession else { return }
         
-        // Active pulse capture window
         if session.state == .paused {
             session.resume()
         }
-        
-        ppgDutyCycleTimer = Timer.publish(every: AppConstants.Health.lowPowerPPGActiveDurationSeconds, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in
-                guard let self = self, let activeSession = self.workoutSession else { return }
-                self.ppgDutyCycleTimer?.cancel()
-                
-                // Sleep optical LEDs
-                if activeSession.state == .running {
-                    activeSession.pause()
-                }
-                
-                // Schedule next wake-up pulse
-                self.ppgDutyCycleTimer = Timer.publish(every: AppConstants.Health.lowPowerPPGSleepDurationSeconds, on: .main, in: .common)
-                    .autoconnect()
-                    .sink { [weak self] _ in
-                        self?.startPPGDutyCycle()
-                    }
-            }
     }
     #endif
     

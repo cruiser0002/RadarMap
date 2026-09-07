@@ -65,15 +65,15 @@ public enum TacticalHUDCallout: String, CaseIterable, Identifiable {
             2. Open Build > Realtime Database, then Create Database.
             3. Open the Rules tab, set both .read and .write to true, and Publish — RadarMap needs \
             open read/write access on your own project to function.
-            4. In Settings or Host Squad, make sure the Custom URL switch next to the field is ON \
-            (it is by default), then tap the "Default RTDB or enter custom URL" field and type \
+            4. In Config, make sure the Custom URL switch next to the field is ON \
+            (it is by default), then tap the "Enter custom URL" field and type \
             your database URL, or tap the camera icon beside it and point your phone at the URL \
             on the Firebase console webpage — no need to turn it into a QR code yourself.
             5. Flip that switch OFF anytime to fall back to the shared default without losing what \
-            you typed — it's never shown as literal text, only as the placeholder.
+            you typed — the field switches to "using default server".
 
-            Not hosting yet? That same area shows "Scan Squad QR to Join" instead — tap it to \
-            scan another player's join code and fill in the room, PIN, and database URL at once.
+            Not hosting yet? Tap the "SCAN TO JOIN" QR box above to scan another player's join \
+            code and automatically fill in the room name, PIN, and database URL at once.
             """
         }
     }

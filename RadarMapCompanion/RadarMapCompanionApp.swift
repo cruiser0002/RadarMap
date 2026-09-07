@@ -15,9 +15,6 @@ struct RadarMapCompanionApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(gameState)
-                .task {
-                    gameState.subscriptionManager.configureRevenueCat()
-                }
         }
     }
 }

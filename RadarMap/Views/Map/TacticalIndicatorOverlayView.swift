@@ -87,14 +87,9 @@ public struct TacticalIndicatorOverlayView: View {
         .frame(width: touchTargetSize, height: touchTargetSize)
         .contentShape(Circle())
         .overlay(alignment: .top) {
-            if indicator.category == .squadOrder {
-                let callsign: String = {
-                    if let cs = indicator.placedByCallsign?.trimmingCharacters(in: .whitespacesAndNewlines), !cs.isEmpty {
-                        return cs
-                    }
-                    return "OPERATOR"
-                }()
-                
+            if indicator.category == .squadOrder,
+               let callsign = indicator.placedByCallsign?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !callsign.isEmpty {
                 Text(callsign)
                     .font(.system(size: markers.callsignFontSize, weight: .bold, design: .monospaced))
                     .foregroundColor(color)

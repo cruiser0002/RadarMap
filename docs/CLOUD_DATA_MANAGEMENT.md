@@ -149,7 +149,7 @@ Every row satisfies $P \times R(P) = 12$ for $P > 12$ (e.g. $16 \times 0.75 = 20
 ### A. Local Data ➔ Local Data (WCSession)
 * **Components:** [`WatchConnectivityManager.swift`](../RadarMap/Managers/WatchConnectivityManager.swift), [`CompanionSyncModels.swift`](../RadarMap/Models/CompanionSyncModels.swift), [`COMPANION_DATA_SYNC_MODEL.md`](COMPANION_DATA_SYNC_MODEL.md).
 * **Guarantees:** Resilient local synchronization between iPhone and Apple Watch using directional snapshots and per-structure timestamp resolution (`*_ts`).
-* **Mechanism:** High-speed stream via `WCSession.sendMessage` and low-speed snapshots via `WCSession.updateApplicationContext`. Watch wins equal-timestamp ties.
+* **Mechanism:** High-speed stream via `WCSession.sendMessage` and low-speed snapshots via `WCSession.updateApplicationContext`. Watch wins equal-timestamp ties. Rolling `sync_ts` retransmission is gated on `WCSession.isReachable` (see [`COMPANION_DATA_SYNC_MODEL.md`](COMPANION_DATA_SYNC_MODEL.md#3-merge-engine--conflict-resolution-rules)) to avoid publishing into a dead link, and resumes immediately on reachability change rather than waiting for the next tick.
 
 ---
 
@@ -207,6 +207,20 @@ Every row satisfies $P \times R(P) = 12$ for $P > 12$ (e.g. $16 \times 0.75 = 20
 * **Guarantees:** Automatic garbage collection of orphaned sessions, and a server-enforced ceiling on tactical indicator growth.
 * **Mechanism — expiry:** Scheduled Cloud Function (`cleanExpiredRooms`) executes hourly (`every 1 hours` UTC) to identify rooms with `exp <= now` and atomically purge their sub-trees across `/r/{roomId}`, `/t/{roomId}`, and `/p/{roomId}`. `cleanupEmptyRoom` (triggered on `/r/{roomId}/m` writes) additionally purges a room immediately if it becomes empty or its host leaves.
 * **Mechanism — tactical cap:** Client-side eviction is now the primary enforcement (see §7.B for the full mechanism); this Cloud Function (`pruneExcessTacticalIndicators`, triggered on writes to `/t/{roomId}/i/{indicatorId}`) is a redundant backup that evicts the oldest entries by timestamp whenever the branch exceeds the room's `mti` cap. In the common case every write already arrives at or under the cap (clients pruned before writing), so this fires and no-ops (`numChildren() <= MAX_TACTICAL`); it only does real work if a client is offline, stale, or otherwise doesn't run the client-side logic (e.g. a future or third-party client). Because both the clients and this function evict oldest-by-timestamp from the same data, they agree on which entries to remove — a redundant delete from either side is a no-op, not a conflict. This also means self-hosted deployments that never deploy Cloud Functions at all (no Blaze plan) still get the cap enforced, just client-side only. Squad orders (`/t/{roomId}/o`) are untouched by this function — they self-prune client-side (one per type per member) and don't share this cap. See §7.B.
+
+---
+
+### E. Payload Encryption (AES-256-GCM)
+
+* **Components:** [`CompactArrayCipher.swift`](../RadarMap/Models/CompactArrayCipher.swift), [`FirebaseSyncManager.swift`](../RadarMap/Managers/FirebaseSyncManager.swift) (`deriveTelemetryKey`, `setEncryptionContext`, `activeTelemetryKey`), [`TelemetryPacket.parseTelemetryPacket`](../RadarMap/Managers/FirebaseSyncManager.swift#L1478) / [`TacticalIndicator.parse`](../RadarMap/Models/TacticalIndicator.swift#L239).
+* **What it protects:** the compact wire arrays at `/p/{roomId}/{memberId}` (telemetry) and `/t/{roomId}/{i,o}/{id}` (tactical indicators) — see §7 for the plaintext schema. This closes the gap described in [`BRING_YOUR_OWN_FIREBASE.md`](BRING_YOUR_OWN_FIREBASE.md), whose documented rules are wide open (`.read: true, .write: true`); with encryption on, anyone who obtains a BYO database URL sees opaque base64 strings, not live GPS/heart-rate data, unless they also know the room's `(name, pin)`.
+* **Key derivation:** `FirebaseSyncManager.deriveTelemetryKey(pin:roomId:)` — `SHA256("telemetrykey:\(roomId):\(pin)")`, domain-separated by the `"telemetrykey:"` prefix from `hashPin`'s and `deriveRoomPadding`'s own prefixes (§7.A), so none of the three hashes is derivable from another despite sharing the same `(name/roomId, pin)` inputs. Note this keys off the full *derived* `roomId` (post-padding), not the plain typed room name.
+* **Cipher:** `CompactArrayCipher.encrypt`/`decrypt` — AES-256-GCM via CryptoKit, fresh random nonce per call. Output is `nonce (12B) + ciphertext + tag (16B)`, base64-encoded into a single string, since RTDB values must be JSON-representable. The entire compact array is encrypted atomically (position + heart rate together for telemetry; position + type + placer id together for indicators) — fields are never split.
+* **Wire dispatch, no version byte needed:** plaintext writes are a JSON array; encrypted writes are a JSON string. `TelemetryPacket.parseTelemetryPacket` and `TacticalIndicator.parse` both take an optional `key: SymmetricKey?` and branch on the raw value's type — a `String` is treated as ciphertext (decrypted with `key` if present, dropped if `key` is nil), an `[Any]`/`[String: Any]` falls through to the existing legacy array/dict parsing unchanged.
+* **Toggle mechanism — a device-local flag, not a per-room RTDB field:** `AppConstants.Debug.isEncryptionEnabled` (backed by `AppConstants.Storage.isEncryptionEnabledKey`, **default on**) is surfaced only via the hidden debug panel (`DebugUnlockView`, reached by a 5-second long-press on the Policy screen — see [`SETTINGS_VIEW.md`](SETTINGS_VIEW.md)), not a visible per-room Settings toggle. `GameStateManager.setEncryptionContext(pin:roomId:)` is called at host/join/reconnect time and sets `FirebaseSyncManager.activeTelemetryKey` to the derived key when the flag is on, or `nil` when it's off — a `nil` key means every write is plaintext and every read skips decryption. Because there's no `enc` flag traveling with the room, all clients that need to interoperate on a room must agree on this local setting (same caveat as `deriveRoomPadding`'s versioning note in §7.A); a client with encryption off simply cannot read a room whose writers have it on.
+* **Cross-implementation parity:** mirrored in `RadarPlayerSimulator.derive_telemetry_key`/`encrypt_compact_array` (`notebooks/player_simulator.py`, opt-in via `--encrypted`) and `scripts/stress_test_simulator.py` (opt-in per-player via `PlayerSpec.encrypted`) — both default to **off**, unlike the Swift app's default-on, since load-test scripts default to the cheapest/simplest path unless a test explicitly wants encrypted-traffic coverage. `RadarMapCompanion` (the standalone Watch companion) never touches RTDB directly and isn't a party to this at all; the Watch app *target* within the main Xcode project shares `GameStateManager`/`FirebaseSyncManager` source with the phone app, so it inherits this transparently.
+* **Cost:** measured ~42 plaintext bytes → ~96 base64 characters (~2.3x) for a 4-field telemetry array, incurred on every write/read when enabled — worth weighing against Spark/Blaze egress budgets for high-frequency telemetry.
+* **What this does and doesn't protect against:** protects a BYO database URL leaking to someone without the room's PIN. Does not protect against a squad member who legitimately has the PIN (the app's whole trust boundary), brute-forcing a weak PIN offline against a captured ciphertext (a 4-character PIN is only ~20.7 bits — see §7.A's "Accepted entropy tradeoff" — a 16-character PIN is ~82.7 bits and impractical to brute-force), or path/member-id metadata (never encrypted, since RTDB keys can't be). No `database.rules.json` or Cloud Function changes were needed — neither inspects `/p` or `/t` values, only path/key shape, so a string is exactly as valid there as an array. Already reflected in [`PRIVACY_AND_COMPLIANCE.md`](PRIVACY_AND_COMPLIANCE.md)'s E2EE disclosure — this is a transport-security detail, not a change to what data categories are collected.
 
 ---
 
@@ -268,15 +282,18 @@ r/                                          (was "rooms")
 p/                                          (was "telemetry")
   {roomId}/
     exp: 1789141367.378                     refreshed hourly alongside r/ and t/
-    {memberId}: [lat, lng, hr, ts]           4-element compact array
+    {memberId}: [lat, lng, hr, ts]           4-element compact array, OR a base64 string
+                                             (AES-256-GCM ciphertext) when encryption is on — see §5.E
 
 t/                                          (was "tactical")
   {roomId}/
     exp: 1789141367.378                     was expireAt — refreshed hourly
     o/                                      "orders" branch — squadOrder category only
       {indicatorId}: [type_code, lat, lng, ts, memberId]   self-pruning (1 per type per member), no numeric cap
+                                             (or a base64 ciphertext string — see §5.E)
     i/                                      was "indicators" — enemy + environment only
       {indicatorId}: [type_code, lat, lng, ts, memberId]   shares the room's `mti` cap
+                                             (or a base64 ciphertext string — see §5.E)
     # meta/ wrapper, flat legacy mirror, uts (updatedAt): removed entirely — see §2.C below
 ```
 
