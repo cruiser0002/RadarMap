@@ -126,52 +126,34 @@ exports.cleanupEmptyRoom = functions.database
         updates[`/p/${roomId}`] = null;
         await db.ref().update(updates);
         functions.logger.info(`Successfully purged disbanded room ${roomId} after host departure.`);
+        return null;
+      }
+
+      // Enforce room max capacity (cap) to protect against internal sabotage / ghost member floods
+      const maxCapacity = Number(roomVal.cap) || 12;
+      const memberKeys = Object.keys(membersData);
+
+      if (memberKeys.length > maxCapacity) {
+        functions.logger.warn(`Room ${roomId} has ${memberKeys.length} members, exceeding cap of ${maxCapacity}. Pruning excess...`);
+
+        // Always protect the host; select excess members from non-hosts
+        const nonHostKeys = memberKeys.filter((id) => id !== hostId);
+        const allowedNonHostCount = Math.max(0, maxCapacity - (hostId && membersData[hostId] ? 1 : 0));
+        const excessKeys = nonHostKeys.slice(allowedNonHostCount);
+
+        if (excessKeys.length > 0) {
+          const updates = {};
+          for (const excessId of excessKeys) {
+            updates[`/r/${roomId}/m/${excessId}`] = null;
+            updates[`/p/${roomId}/${excessId}`] = null;
+          }
+          await db.ref().update(updates);
+          functions.logger.info(`Successfully pruned ${excessKeys.length} excess member(s) from room ${roomId}.`);
+        }
       }
     } catch (err) {
-      functions.logger.error(`Error checking host presence for room ${roomId}:`, err);
+      functions.logger.error(`Error checking host presence or capacity for room ${roomId}:`, err);
     }
 
     return null;
   });
-
-/**
- * 2) Tactical Indicator Cap Enforcement:
- * Triggered on any write to /t/{roomId}/i/{indicatorId} (enemy + environment indicators only —
- * squad orders under /t/{roomId}/o self-prune client-side and never hit this cap). Evicts the
- * oldest entries once the branch exceeds the room's `mti` cap. See ROOM_ID_HARDENING.md §6.
- */
-exports.pruneExcessTacticalIndicators = functions.database
-  .ref("/t/{roomId}/i/{indicatorId}")
-  .onWrite(async (change, context) => {
-    if (!change.after.exists()) return null; // ignore deletes
-
-    const roomId = context.params.roomId;
-
-    const roomSnap = await db.ref(`/r/${roomId}`).once("value");
-    const roomVal = roomSnap.val() || {};
-    const MAX_TACTICAL = roomVal.mti !== undefined ? Number(roomVal.mti) : 20;
-
-    const snap = await db.ref(`/t/${roomId}/i`).once("value");
-    if (!snap.exists() || snap.numChildren() <= MAX_TACTICAL) return null;
-
-    const entries = [];
-    snap.forEach((child) => {
-      const val = child.val();
-      let ts = 0;
-      if (Array.isArray(val)) {
-        ts = Number(val[3]) || 0;
-      } else if (val && typeof val === "object") {
-        ts = Number(val["3"] !== undefined ? val["3"] : (val.ts !== undefined ? val.ts : (val.timestamp !== undefined ? val.timestamp : 0))) || 0;
-      }
-      entries.push({ id: child.key, ts });
-    });
-
-    entries.sort((a, b) => a.ts - b.ts);
-    const overflow = entries.slice(0, entries.length - MAX_TACTICAL);
-    const updates = {};
-    overflow.forEach((e) => { updates[`/t/${roomId}/i/${e.id}`] = null; });
-    await db.ref().update(updates);
-    logger.info(`Pruned ${overflow.length} excess tactical indicator(s) in room ${roomId}.`);
-    return null;
-  });
-

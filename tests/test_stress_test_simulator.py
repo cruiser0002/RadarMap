@@ -333,6 +333,41 @@ class TestStressTestSimulator(unittest.TestCase):
             self.assertNotIn(f"pt{i}", SQUAD_ORDER_CODES.values())
             self.assertNotIn(f"p{i}", SQUAD_ORDER_CODES.values())
 
+    def test_benchmark_presets(self):
+        """Tests that Free and Pro benchmark profiles match requirements."""
+        from stress_test_simulator import get_benchmark_players
+
+        free_players = get_benchmark_players("free")
+        self.assertEqual(len(free_players), 4)
+        self.assertEqual(free_players[0].glance_time_sec, 5.0)
+        self.assertEqual(free_players[0].inactivity_time_sec, 30.0)
+        self.assertEqual(free_players[0].telemetry_payload_bytes, 200)
+
+        pro_players = get_benchmark_players("pro")
+        self.assertEqual(len(pro_players), 12)
+        self.assertEqual(pro_players[0].glance_time_sec, 10.0)
+        self.assertEqual(pro_players[0].inactivity_time_sec, 20.0)
+        self.assertEqual(pro_players[0].telemetry_payload_bytes, 200)
+
+    def test_60_player_rate_adaptation(self):
+        """Tests that 60 players follow the heartbeat rate reduction schedule from CLOUD_DATA_MANAGEMENT.md §4."""
+        from stress_test_simulator import generate_squad_roster, StressTestCoordinator
+
+        players_60 = generate_squad_roster(60)
+        self.assertEqual(len(players_60), 60)
+
+        coordinator = StressTestCoordinator(
+            center_lat=37.7858,
+            center_lon=-122.4064,
+            players=players_60,
+            dry_run=True,
+        )
+        # R(60) = 1.0 * (12 / 60) = 0.20 Hz (interval T = 5.0s, heartbeat = 10 * T = 50.0s)
+        self.assertAlmostEqual(coordinator.target_rate_hz, 0.20, places=3)
+        self.assertAlmostEqual(coordinator.tick_interval, 5.0, places=3)
+        self.assertAlmostEqual(coordinator.refresh_heartbeat_sec, 50.0, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()
+

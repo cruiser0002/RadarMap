@@ -4,6 +4,7 @@ import Foundation
 public enum TacticalHUDCallout: String, CaseIterable, Identifiable {
     case config = "Configuration"
     case tacticalCommands = "POI Annotations"
+    case distanceMeasure = "Distance Line"
     case centerMap = "Center Map"
     case mapView = "Map View"
     case heartRate = "Heart Rate & Tag Out"
@@ -15,6 +16,7 @@ public enum TacticalHUDCallout: String, CaseIterable, Identifiable {
         switch self {
         case .config: return "SYS-CFG"
         case .tacticalCommands: return "POI-ANN"
+        case .distanceMeasure: return "RNG-CALC"
         case .centerMap: return "NAV-POS"
         case .mapView: return "HUD-MODE"
         case .heartRate: return "BIO-STAT"
@@ -26,6 +28,7 @@ public enum TacticalHUDCallout: String, CaseIterable, Identifiable {
         switch self {
         case .config: return "gearshape.fill"
         case .tacticalCommands: return "star.fill"
+        case .distanceMeasure: return "ruler"
         case .centerMap: return "location.fill"
         case .mapView: return "map"
         case .heartRate: return "waveform.path.ecg"
@@ -37,6 +40,7 @@ public enum TacticalHUDCallout: String, CaseIterable, Identifiable {
         switch self {
         case .config: return "Settings"
         case .tacticalCommands: return "POI Annotations"
+        case .distanceMeasure: return "Distance Line"
         case .centerMap: return "Center Map"
         case .mapView: return "Map View"
         case .heartRate: return "Pulse & Tag Out"
@@ -50,6 +54,8 @@ public enum TacticalHUDCallout: String, CaseIterable, Identifiable {
             return "Tap the top-left gear icon to open squad management, change radar color themes, adjust refresh rates, and configure audio/haptics."
         case .tacticalCommands:
             return "Tap the top center star button to place POI annotations, rally points, hazard alerts, and broadcast team orders."
+        case .distanceMeasure:
+            return "Tap any teammate or POI marker to draw a real-time range line from your position. Displays 2D horizontal ground (XY) distance at its midpoint (altitude is excluded). Tap the marker again or tap empty map space to dismiss."
         case .centerMap:
             return "Tap the bottom-left arrow to instantly snap the viewport back to your real-time GPS coordinate and reset zoom to default."
         case .mapView:
@@ -82,6 +88,7 @@ public enum TacticalHUDCallout: String, CaseIterable, Identifiable {
         switch self {
         case .config: return "TAP ICON"
         case .tacticalCommands: return "TAP ICON"
+        case .distanceMeasure: return "TAP TARGET"
         case .centerMap: return "TAP ICON"
         case .mapView: return "TAP ICON"
         case .heartRate: return "HOLD 1.2s"

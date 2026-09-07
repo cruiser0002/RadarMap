@@ -26,6 +26,7 @@ public struct TacticalRadarMapView: View {
     @State private var actionProgress: Double = 0.0
     @State private var holdTimer: Timer? = nil
     @State private var actionCompletedForCurrentTouch: Bool = false
+    @State private var heartRateTouchDate: Date = Date()
     
     // EKG scan speed — dynamically computed from live heart rate and KIA state.
     private var sweepDuration: Double {
@@ -279,6 +280,8 @@ public struct TacticalRadarMapView: View {
                             TimelineView(.periodic(from: .now, by: scanInterval)) { timeline in
                                 let elapsed = timeline.date.timeIntervalSinceReferenceDate
                                 let progress = (elapsed.truncatingRemainder(dividingBy: sweepDuration)) / sweepDuration
+                                let hrElapsed = max(0.0, timeline.date.timeIntervalSince(heartRateTouchDate))
+                                let hrOpacity = isHoldingActionButton ? 1.0 : max(0.0, min(1.0, 1.0 - (hrElapsed / AppConstants.UI.HUD.heartRateFadeDurationSeconds)))
                                 
                                 ZStack(alignment: .leading) {
                                     // Background
@@ -318,12 +321,14 @@ public struct TacticalRadarMapView: View {
                                     }
                                     .frame(width: ekgSize.width, height: ekgSize.height)
                                     // Numeric BPM readout, overlaid on top without affecting the EKG
-                                    // graphic's layout size — same theme color and dim opacity as the
-                                    // static pulse wave.
+                                    // graphic's layout size — full brightness matching the top center
+                                    // star button, fading over 3 seconds to 0 transparency; touching
+                                    // the button brings it back to full brightness.
                                     .overlay(
                                         Text("\(displayedHeartRate)")
                                             .font(.system(size: AppConstants.UI.HUD.heartRateFontSize, weight: .bold, design: .monospaced))
-                                            .foregroundColor(themeColor.opacity(gameState.isDead ? 0.7 : 0.45))
+                                            .foregroundColor(themeColor)
+                                            .opacity(hrOpacity)
                                             .lineLimit(1)
                                             .minimumScaleFactor(0.5)
                                             .frame(width: buttonWidth, height: buttonHeight)
@@ -344,9 +349,11 @@ public struct TacticalRadarMapView: View {
                             .highPriorityGesture(
                                 DragGesture(minimumDistance: 0)
                                     .onChanged { _ in
+                                        heartRateTouchDate = Date()
                                         startActionHold()
                                     }
                                     .onEnded { _ in
+                                        heartRateTouchDate = Date()
                                         cancelActionHold()
                                     }
                             )
@@ -511,7 +518,13 @@ public struct TacticalRadarMapView: View {
             if !isShowing { crownFocusTrigger += 1 }
         }
         #endif
+        .onChange(of: gameState.selectedPresentation) { _, newPresentation in
+            if newPresentation == .radar {
+                heartRateTouchDate = Date()
+            }
+        }
         .onAppear {
+            heartRateTouchDate = Date()
             #if os(watchOS)
             crownFocusTrigger += 1
             #endif

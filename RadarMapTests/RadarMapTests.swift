@@ -7,12 +7,28 @@ import Combine
 
 final class RadarMapTests: XCTestCase {
     
+    /// Legacy per-field keys `WatchConnectivityManager.init()` reads as a one-time migration
+    /// fallback when no persisted "wc_local_ls_snapshot" blob exists yet. Nothing in production
+    /// writes these anymore (localLS is the single persisted source of truth now), so unlike the
+    /// keys below, a test that sets one directly to simulate a pre-migration device must also be
+    /// the one to clean it up — these are cleared here purely so a value written by an aborted or
+    /// killed test run doesn't linger in the real on-disk UserDefaults domain and leak into a
+    /// later run's fresh GameStateManager() as a phantom migration.
+    private func clearLegacyMigrationKeys() {
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.userCallsignKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedRoomNameKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedPinKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.customDatabaseURLKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.radarColorThemeKey)
+    }
+
     override func setUp() {
         super.setUp()
         UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: "wc_peer_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadLocationEnabledKey)
+        clearLegacyMigrationKeys()
         // SquadMember.defaultUpdateInterval is a shared static mutated by
         // GameStateManager.recalculateAdaptiveUploadInterval() as a side effect of room-size
         // changes; reset it so tests don't leak room-size state into each other via test order.
@@ -20,10 +36,17 @@ final class RadarMapTests: XCTestCase {
     }
 
     override func tearDown() {
+        // WatchConnectivityManager persists localLS/peerLS via a private background queue whose
+        // closures capture `self` strongly, so a write from this test can still be in flight
+        // after the test method returns (its manager instance stays alive only to run that
+        // closure). Give it a moment to land before clearing, so it can't leak into the next
+        // test's fresh read of these keys.
+        Thread.sleep(forTimeInterval: 0.05)
         UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: "wc_peer_ls_snapshot")
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.isUploadLocationEnabledKey)
+        clearLegacyMigrationKeys()
         SquadMember.defaultUpdateInterval = AppConstants.Timing.Stale.defaultUpdateInterval
         super.tearDown()
     }
@@ -148,7 +171,49 @@ final class RadarMapTests: XCTestCase {
         // swiftlint:disable:next force_cast
         gameState.firebaseManager.transport as! MockRTDBTransport
     }
-    
+
+    /// Delivers `snapshot` to `manager` as if it just arrived over WCSession from its companion —
+    /// encodes it into an `ApplicationContextEnvelope` (on the correct `w2pLS`/`p2wLS` side for
+    /// `manager`'s own role) and feeds it through `handleIncomingApplicationContext`, the same
+    /// entrypoint `WCSessionDelegate` uses in production. `localLS` is the single source of truth
+    /// now, so a synthetic snapshot only takes effect on `manager`/its `GameStateManager` by
+    /// actually landing there via a real merge — poking `onLowSpeedConvergenceStateChanged`
+    /// directly (the old approach) no longer has anything to adopt into.
+    private func deliverPeerSnapshot(_ snapshot: LowSpeedSnapshot, to manager: WatchConnectivityManager) {
+        var envelope = ApplicationContextEnvelope()
+        if manager.localRole == .phone {
+            envelope.w2pLS = snapshot
+        } else {
+            envelope.p2wLS = snapshot
+        }
+        guard let data = try? JSONEncoder().encode(envelope),
+              let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            XCTFail("Failed to encode synthetic envelope")
+            return
+        }
+        manager.handleIncomingApplicationContext(dict)
+        // handleIncomingApplicationContext hops to DispatchQueue.main.async internally (matching
+        // production, where WCSessionDelegate callbacks can land off-main) — pump the run loop so
+        // the merge has actually landed in localLS by the time this call returns.
+        pumpMainRunLoop()
+    }
+
+    /// A single `DispatchQueue.main.async { exp.fulfill() }` only guarantees everything queued
+    /// *before* it has run — it does NOT guarantee everything queued *as a consequence of* it
+    /// (e.g. `handleIncomingApplicationContext`'s own internal main-queue hop, which itself
+    /// triggers `WatchConnectivityManager.$localLS`'s `.receive(on: .main)` sink in
+    /// `GameStateManager.bindManagers()`, a *second* hop) has also run — that second hop's
+    /// closure gets queued only once the first one actually executes, i.e. after this pump's own
+    /// fulfill may already be sitting ahead of it in line. Repeating the hop drains each
+    /// successive level.
+    private func pumpMainRunLoop(times: Int = 4) {
+        for _ in 0..<times {
+            let exp = XCTestExpectation(description: "main run loop pumped")
+            DispatchQueue.main.async { exp.fulfill() }
+            wait(for: [exp], timeout: 2.0)
+        }
+    }
+
     // MARK: - Paywall Capacity Tests
     
     func testPaywallCapacityEnforcement() {
@@ -449,16 +514,20 @@ final class RadarMapTests: XCTestCase {
     }
     
     func testPinRetentionInUserDefaultsAndGameState() {
+        // savedPin is no longer individually UserDefaults-backed — it's a view onto
+        // watchConnectivityManager.localLS.config.pin, persisted as one blob under
+        // "wc_local_ls_snapshot". AppConstants.Storage.savedPinKey is only ever *read* once, as a
+        // migration fallback when no such blob exists yet (which is what seeds it here).
         let testPin = "7412"
         UserDefaults.standard.set(testPin, forKey: AppConstants.Storage.savedPinKey)
-        
+
         let gameState = createMockGameState()
         XCTAssertEqual(gameState.savedPin, "7412", "GameStateManager should initialize with the retained PIN from UserDefaults")
-        
-        // Changing savedPin directly updates UserDefaults
+
+        // Changing savedPin directly updates the persisted localLS snapshot
         gameState.savedPin = "9876"
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey), "9876", "Updating savedPin should persist to UserDefaults")
-        
+        XCTAssertEqual(gameState.watchConnectivityManager.localLS.config.pin, "9876", "Updating savedPin should update localLS")
+
         // Hosting a room with PIN retains it
         let hostExp = expectation(description: "Host with PIN")
         gameState.hostRoom(name: "PIN SQUAD", pin: "4321") { _ in
@@ -466,8 +535,7 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [hostExp], timeout: 1.0)
         XCTAssertEqual(gameState.savedPin, "4321", "Hosting with PIN should retain the PIN")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey), "4321")
-        
+
         // Joining a room with PIN retains it
         let joinExp = expectation(description: "Join with PIN")
         gameState.joinRoom(id: "PIN SQUAD", pin: "5555") { (success: Bool) in
@@ -475,8 +543,7 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [joinExp], timeout: 1.0)
         XCTAssertEqual(gameState.savedPin, "5555", "Joining with PIN should retain the PIN")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey), "5555")
-        
+
         // Clean up
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedPinKey)
     }
@@ -2302,6 +2369,14 @@ final class RadarMapTests: XCTestCase {
         wait(for: [disbandExp], timeout: 1.0)
         
         XCTAssertTrue(transport.recordedRemoves.contains("t/ALPHA"), "Must delete /t/{roomId} node when room is disbanded")
+        XCTAssertTrue(transport.recordedRemoves.contains("p/ALPHA"), "Must delete /p/{roomId} node when room is disbanded")
+        XCTAssertTrue(transport.recordedRemoves.contains("r/ALPHA"), "Must delete /r/{roomId} node when room is disbanded")
+
+        let rIndex = transport.recordedRemoves.firstIndex(of: "r/ALPHA") ?? -1
+        let pIndex = transport.recordedRemoves.firstIndex(of: "p/ALPHA") ?? -1
+        let tIndex = transport.recordedRemoves.firstIndex(of: "t/ALPHA") ?? -1
+        XCTAssertTrue(rIndex < pIndex, "/r/{roomId} must be deleted before /p/{roomId} to prevent in-flight packet resurrection")
+        XCTAssertTrue(rIndex < tIndex, "/r/{roomId} must be deleted before /t/{roomId} to prevent in-flight packet resurrection")
     }
     
     func testIconsPurgedOnLogoutExceptMeIcon() {
@@ -3193,35 +3268,35 @@ final class RadarMapTests: XCTestCase {
     
     func testCallsignAndRoomNameRetentionInUserDefaultsAndGameState() {
         // Clear existing keys
-        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.userCallsignKey)
-        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedRoomNameKey)
-        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedPinKey)
-        
+        // callsign/roomName/pin are no longer individually UserDefaults-backed — they're views
+        // onto watchConnectivityManager.localLS.config, persisted as one blob under
+        // "wc_local_ls_snapshot" (cleared by setUp()/tearDown()). The legacy per-field keys below
+        // are only ever *read* once, as a migration fallback when no such blob exists yet.
+        UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
+
         // 1. Fresh state has no hardcoded values
-        var gameState = GameStateManager()
+        let gameState = GameStateManager()
         XCTAssertEqual(gameState.myCallsign, "", "Fresh gameState must have empty callsign by default (no hardcoded value)")
         XCTAssertEqual(gameState.savedRoomName, "", "Fresh gameState must have empty savedRoomName by default (no hardcoded value)")
         XCTAssertEqual(gameState.savedPin, "", "Fresh gameState must have empty savedPin by default (no hardcoded value)")
-        
-        // 2. Modifying properties updates UserDefaults
+
+        // 2. Modifying properties updates the persisted localLS snapshot
         gameState.myCallsign = "VIPER-7"
         gameState.savedRoomName = "BRAVO"
         gameState.savedPin = "1234"
-        
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppConstants.Storage.userCallsignKey), "VIPER-7")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppConstants.Storage.savedRoomNameKey), "BRAVO")
-        XCTAssertEqual(UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey), "1234")
-        
-        // 3. New launch prepopulates from UserDefaults
+        // Persistence itself happens on a private background queue inside
+        // WatchConnectivityManager (not the main queue pumpMainRunLoop() drains) — give it a
+        // moment to land before reading it back via a fresh instance below.
+        Thread.sleep(forTimeInterval: 0.1)
+
+        // 3. New launch prepopulates from the persisted localLS snapshot
         let newGameState = GameStateManager()
-        XCTAssertEqual(newGameState.myCallsign, "VIPER-7", "New GameStateManager instance should prepopulate callsign from UserDefaults")
-        XCTAssertEqual(newGameState.savedRoomName, "BRAVO", "New GameStateManager instance should prepopulate room name from UserDefaults")
-        XCTAssertEqual(newGameState.savedPin, "1234", "New GameStateManager instance should prepopulate PIN from UserDefaults")
-        
+        XCTAssertEqual(newGameState.myCallsign, "VIPER-7", "New GameStateManager instance should prepopulate callsign from persisted localLS")
+        XCTAssertEqual(newGameState.savedRoomName, "BRAVO", "New GameStateManager instance should prepopulate room name from persisted localLS")
+        XCTAssertEqual(newGameState.savedPin, "1234", "New GameStateManager instance should prepopulate PIN from persisted localLS")
+
         // Clean up
-        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.userCallsignKey)
-        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedRoomNameKey)
-        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedPinKey)
+        UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
     }
     
     // MARK: - Default User Map Centering Tests
@@ -3889,13 +3964,13 @@ final class RadarMapTests: XCTestCase {
         
         // 4. Remote KIA sync received over LowSpeedSnapshot -> updates local isDead
         let reviveLS = LowSpeedSnapshot(playerState: PlayerStateSnapshot(isDead: false, isDeadTs: Date().timeIntervalSince1970 + 10))
-        gameState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(reviveLS)
+        deliverPeerSnapshot(reviveLS, to: gameState.watchConnectivityManager)
         gameState.updateLocalPlayerMember()
         XCTAssertFalse(gameState.isDead, "Receiving revive over WatchConnectivity must update isDead to false")
         XCTAssertEqual(gameState.localPlayerMember.heartRate, 132.0, "Revived player resumes sensor heart rate")
-        
+
         let deadLS = LowSpeedSnapshot(playerState: PlayerStateSnapshot(isDead: true, isDeadTs: Date().timeIntervalSince1970 + 20))
-        gameState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(deadLS)
+        deliverPeerSnapshot(deadLS, to: gameState.watchConnectivityManager)
         gameState.updateLocalPlayerMember()
         XCTAssertTrue(gameState.isDead, "Receiving KIA over WatchConnectivity must update isDead to true")
         XCTAssertEqual(gameState.localPlayerMember.heartRate, 0.0, "KIA state must be 0 BPM")
@@ -3924,26 +3999,26 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(watchState.localPlayerMember.heartRate, 80.0)
         
         // 2. User presses KIA button on Watch
-        watchState.setDead(true, syncRemote: true)
+        watchState.setDead(true)
         XCTAssertTrue(watchState.isDead)
         XCTAssertEqual(watchState.localPlayerMember.status, .downed, "Watch icon must change to downed (X sprite)")
         XCTAssertEqual(watchState.localPlayerMember.heartRate, 0.0, "Watch heartrate monitor must flatline to 0.0 BPM")
-        
+
         // Low-speed snapshot reaches Phone
         let deadSnapshot = LowSpeedSnapshot(playerState: PlayerStateSnapshot(isDead: true, isDeadTs: Date().timeIntervalSince1970 + 10))
-        phoneState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(deadSnapshot)
+        deliverPeerSnapshot(deadSnapshot, to: phoneState.watchConnectivityManager)
         XCTAssertTrue(phoneState.isDead, "Phone must become dead when Watch triggers KIA")
         XCTAssertEqual(phoneState.localPlayerMember.status, .downed, "Phone icon must change to downed (X sprite)")
         XCTAssertEqual(phoneState.localPlayerMember.heartRate, 0.0, "Phone heartrate monitor must flatline to 0.0 BPM")
-        
+
         // 3. User presses Revive / Alive button on Phone
-        phoneState.setDead(false, syncRemote: true)
+        phoneState.setDead(false)
         XCTAssertFalse(phoneState.isDead)
         XCTAssertEqual(phoneState.localPlayerMember.status, .active, "Phone icon must change to active player sprite")
-        
+
         // Revive snapshot reaches Watch
         let reviveSnapshot = LowSpeedSnapshot(playerState: PlayerStateSnapshot(isDead: false, isDeadTs: Date().timeIntervalSince1970 + 20))
-        watchState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(reviveSnapshot)
+        deliverPeerSnapshot(reviveSnapshot, to: watchState.watchConnectivityManager)
         XCTAssertFalse(watchState.isDead, "Watch must become alive when Phone triggers Revive")
         XCTAssertEqual(watchState.localPlayerMember.status, .active, "Watch icon must change to active player sprite")
     }
@@ -3966,10 +4041,10 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(phoneState.localPlayerMember.status, .active)
         
         // 1. Watch toggles KIA -> Phone in standard map view receives KIA snapshot
-        watchState.setDead(true, syncRemote: true)
+        watchState.setDead(true)
         let deadSnapshot = LowSpeedSnapshot(playerState: PlayerStateSnapshot(isDead: true, isDeadTs: Date().timeIntervalSince1970 + 10))
-        phoneState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(deadSnapshot)
-        
+        deliverPeerSnapshot(deadSnapshot, to: phoneState.watchConnectivityManager)
+
         XCTAssertTrue(phoneState.isDead, "Phone isDead must be true when Watch toggles KIA")
         XCTAssertEqual(phoneState.localPlayerMember.status, .downed, "Phone local player member must be downed")
         XCTAssertEqual(phoneState.localPlayerMember.heartRate, 0.0, "Phone local player heart rate must flatline")
@@ -3983,10 +4058,10 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(phoneMeAnnotation.member.status, .downed)
         
         // 2. Vice versa: Phone revives/toggles alive -> Watch in standard map view receives Revive snapshot
-        phoneState.setDead(false, syncRemote: true)
+        phoneState.setDead(false)
         let reviveSnapshot = LowSpeedSnapshot(playerState: PlayerStateSnapshot(isDead: false, isDeadTs: Date().timeIntervalSince1970 + 20))
-        watchState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(reviveSnapshot)
-        
+        deliverPeerSnapshot(reviveSnapshot, to: watchState.watchConnectivityManager)
+
         XCTAssertFalse(watchState.isDead, "Watch isDead must be false when Phone toggles Revive")
         XCTAssertEqual(watchState.localPlayerMember.status, .active, "Watch local player member must be active")
         
@@ -4012,7 +4087,7 @@ final class RadarMapTests: XCTestCase {
             "REMOTE_USER": [37.77, -122.41, 75.0, 1700000000.0]
         }
         """
-        state.watchConnectivityManager.onHighSpeedTelemetryReceived?(remoteTelemetryJson, Date().timeIntervalSince1970 + 5.0)
+        state.watchConnectivityManager.onHighSpeedTelemetryReceived?(remoteTelemetryJson)
         XCTAssertTrue(state.isDead, "High-speed remote telemetry must NOT overwrite local KIA state")
         XCTAssertEqual(state.localPlayerMember.status, .downed)
     }
@@ -4634,7 +4709,7 @@ final class RadarMapTests: XCTestCase {
     
     func testWelcomeGuideHUDCalloutsCompleteness() {
         let callouts = TacticalHUDCallout.allCases
-        XCTAssertEqual(callouts.count, 6)
+        XCTAssertEqual(callouts.count, 7)
         
         for callout in callouts {
             XCTAssertFalse(callout.codeTag.isEmpty, "\(callout.rawValue) codeTag must not be empty")
@@ -4643,6 +4718,12 @@ final class RadarMapTests: XCTestCase {
             XCTAssertFalse(callout.actionInstruction.isEmpty, "\(callout.rawValue) actionInstruction must not be empty")
             XCTAssertFalse(callout.gestureHint.isEmpty, "\(callout.rawValue) gestureHint must not be empty")
         }
+
+        let distCallout = TacticalHUDCallout.distanceMeasure
+        XCTAssertEqual(distCallout.codeTag, "RNG-CALC")
+        XCTAssertEqual(distCallout.iconName, "ruler")
+        XCTAssertEqual(distCallout.shortTitle, "Distance Line")
+        XCTAssertEqual(distCallout.gestureHint, "TAP TARGET")
     }
 
     func testQRJoinPayloadEncodingAndDecoding() {
@@ -5370,6 +5451,85 @@ final class RadarMapTests: XCTestCase {
         XCTAssertTrue(wcm.localRole == .watch)
     }
 
+    // Multi-member accumulation and departure pruning on Watch -> Phone high-speed channel (Bug 1).
+    func testWatchAccumulatesRemoteTelemetryAndPrunesDepartedMembers() {
+        let wcm = WatchConnectivityManager(role: .watch)
+        let gameState = createMockGameState(watchConnectivityManager: wcm)
+        gameState.myMemberId = "WATCH_HOST"
+        
+        var room = SquadRoom(id: "ALPHA_ROOM", hostId: "WATCH_HOST")
+        room.members["WATCH_HOST"] = SquadMember(id: "WATCH_HOST", callsign: "VIPER", latitude: 37.77, longitude: -122.41)
+        room.members["MEMBER_A"] = SquadMember(id: "MEMBER_A", callsign: "BRAVO", latitude: 37.771, longitude: -122.411)
+        room.members["MEMBER_B"] = SquadMember(id: "MEMBER_B", callsign: "CHARLIE", latitude: 37.772, longitude: -122.412)
+        gameState.firebaseManager.activeRoom = room
+        
+        // 1. Initial state: persistentRemoteTelemetry is empty
+        XCTAssertTrue(gameState.persistentRemoteTelemetry.isEmpty)
+        
+        // 2. Incoming delta packet for MEMBER_A only
+        let packetA = TelemetryPacket(memberId: "MEMBER_A", roomId: "ALPHA_ROOM", latitude: 37.771, longitude: -122.411, heading: 90.0, heartRate: 80.0, timestamp: 1000.0, sequenceNumber: 1)
+        gameState.firebaseManager.onRemoteTelemetryPacketsReceived?([packetA])
+        
+        // Assert: MEMBER_A accumulated, advertised payload contains MEMBER_A
+        XCTAssertEqual(gameState.persistentRemoteTelemetry.count, 1)
+        XCTAssertNotNil(gameState.persistentRemoteTelemetry["MEMBER_A"])
+        guard let advertisedJsonA = wcm.latestAdvertisedWatchHS?.remotePlayerTelemetryJson,
+              let dataA = advertisedJsonA.data(using: .utf8),
+              let dictA = (try? JSONSerialization.jsonObject(with: dataA)) as? [String: Any] else {
+            XCTFail("Failed to deserialize advertised JSON after packetA")
+            return
+        }
+        XCTAssertNotNil(dictA["MEMBER_A"])
+        XCTAssertNil(dictA["MEMBER_B"])
+        
+        // 3. Incoming delta packet for MEMBER_B only (sequential callback)
+        let packetB = TelemetryPacket(memberId: "MEMBER_B", roomId: "ALPHA_ROOM", latitude: 37.772, longitude: -122.412, heading: 180.0, heartRate: 95.0, timestamp: 1001.0, sequenceNumber: 2)
+        gameState.firebaseManager.onRemoteTelemetryPacketsReceived?([packetB])
+        
+        // Assert: Both MEMBER_A and MEMBER_B are present in accumulated snapshot (prevents Phone flickering)
+        XCTAssertEqual(gameState.persistentRemoteTelemetry.count, 2)
+        XCTAssertNotNil(gameState.persistentRemoteTelemetry["MEMBER_A"])
+        XCTAssertNotNil(gameState.persistentRemoteTelemetry["MEMBER_B"])
+        guard let advertisedJsonB = wcm.latestAdvertisedWatchHS?.remotePlayerTelemetryJson,
+              let dataB = advertisedJsonB.data(using: .utf8),
+              let dictB = (try? JSONSerialization.jsonObject(with: dataB)) as? [String: Any] else {
+            XCTFail("Failed to deserialize advertised JSON after packetB")
+            return
+        }
+        XCTAssertNotNil(dictB["MEMBER_A"])
+        XCTAssertNotNil(dictB["MEMBER_B"])
+        
+        // 4. Update MEMBER_A with new coordinates
+        let packetA2 = TelemetryPacket(memberId: "MEMBER_A", roomId: "ALPHA_ROOM", latitude: 37.775, longitude: -122.415, heading: 95.0, heartRate: 82.0, timestamp: 1002.0, sequenceNumber: 3)
+        gameState.firebaseManager.onRemoteTelemetryPacketsReceived?([packetA2])
+        XCTAssertEqual(gameState.persistentRemoteTelemetry.count, 2)
+        let compactA = gameState.persistentRemoteTelemetry["MEMBER_A"]
+        XCTAssertEqual((compactA?[0] as? NSNumber)?.doubleValue, 37.775)
+        
+        // 5. MEMBER_B departs the squad room
+        var updatedRoom = room
+        updatedRoom.members.removeValue(forKey: "MEMBER_B")
+        gameState.firebaseManager.activeRoom = updatedRoom
+        gameState.updateOtherSquadMembers(room: updatedRoom)
+        
+        // Assert: MEMBER_B pruned, MEMBER_A retained, advertised payload updated
+        XCTAssertEqual(gameState.persistentRemoteTelemetry.count, 1)
+        XCTAssertNotNil(gameState.persistentRemoteTelemetry["MEMBER_A"])
+        XCTAssertNil(gameState.persistentRemoteTelemetry["MEMBER_B"])
+        guard let advertisedJsonPruned = wcm.latestAdvertisedWatchHS?.remotePlayerTelemetryJson,
+              let dataPruned = advertisedJsonPruned.data(using: .utf8),
+              let dictPruned = (try? JSONSerialization.jsonObject(with: dataPruned)) as? [String: Any] else {
+            XCTFail("Failed to deserialize advertised JSON after pruning")
+            return
+        }
+        XCTAssertNotNil(dictPruned["MEMBER_A"])
+        XCTAssertNil(dictPruned["MEMBER_B"])
+        
+        // 6. Purge session on logout
+        gameState.purgeLocalSessionAndIcons()
+        XCTAssertTrue(gameState.persistentRemoteTelemetry.isEmpty)
+    }
+
     
     func testDebugStatusString_LengthAndDataSources() {
         let wcm = WatchConnectivityManager()
@@ -5392,53 +5552,82 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.debugStatusString, "N0N00000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
         
-        // 3. Incoming Watch HR telemetry received on phone -> "NWN00000"
-        let freshTime = Date().timeIntervalSince1970 + 60.0
+        // 3. Incoming Watch HR telemetry received on phone, active_until in the future -> "NWN00000"
+        // (isWatchLeaseActive is polled by a 1Hz timer inside WatchConnectivityManager, so the
+        // test waits on the published value itself rather than a fixed short delay.)
+        let leaseFreshTime = Date().timeIntervalSince1970 + 60.0
         let hsEnvelope: [String: Any] = [
             "w2p_hs": [
-                "fresh_until": freshTime,
+                "active_until": leaseFreshTime,
+                "fresh_until": leaseFreshTime,
                 "hr": 85.0
             ]
         ]
         wcm.handleIncomingApplicationContext(hsEnvelope)
-        let exp = expectation(description: "Process Watch HR context")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            exp.fulfill()
-        }
-        wait(for: [exp], timeout: 1.0)
-        
+        let leaseActiveExp = expectation(description: "active_until lease becomes active")
+        var leaseActiveCancellable: AnyCancellable? = wcm.$isWatchLeaseActive
+            .filter { $0 }
+            .first()
+            .sink { _ in leaseActiveExp.fulfill() }
+        wait(for: [leaseActiveExp], timeout: 2.0)
+        leaseActiveCancellable?.cancel()
+
         XCTAssertEqual(gameState.debugStatusString, "NWN00000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
-        
+
         // 4. Low-speed payload becomes idle (no new low-speed packet for > 3s) -> Character 3 cycles back to '0' -> "NW000000"
         gameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970 - 4.0
         XCTAssertEqual(gameState.debugStatusString, "NW000000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
-        
+
         // 5. Leaving room (no other player telemetry, watch HR still active) -> "0W000000"
         gameState.firebaseManager.isConnected = false
         gameState.firebaseManager.activeRoom = nil
         XCTAssertEqual(gameState.debugStatusString, "0W000000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
-        
-        // 6. Watch HR expires / resets -> "00000000"
+
+        // 6. Watch HR expires / resets, active_until in the past -> "00000000"
         let expiredEnvelope: [String: Any] = [
             "w2p_hs": [
+                "active_until": 0.0,
                 "fresh_until": 0.0,
                 "hr": 0.0
             ]
         ]
 
         wcm.handleIncomingApplicationContext(expiredEnvelope)
-        let expExpired = expectation(description: "Process Watch HR expiration")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            expExpired.fulfill()
-        }
-        wait(for: [expExpired], timeout: 1.0)
-        
+        let leaseExpiredExp = expectation(description: "active_until lease becomes inactive")
+        var leaseExpiredCancellable: AnyCancellable? = wcm.$isWatchLeaseActive
+            .filter { !$0 }
+            .first()
+            .sink { _ in leaseExpiredExp.fulfill() }
+        wait(for: [leaseExpiredExp], timeout: 2.0)
+        leaseExpiredCancellable?.cancel()
+
         XCTAssertEqual(gameState.debugStatusString, "00000000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
-        
+
+        // 6b. Regression: fresh_until in the future but active_until already in the past must NOT
+        // mark the companion active — proves the migration off fresh_until took effect (the old
+        // fresh_until-only check would have shown "W" here).
+        let staleActiveUntilEnvelope: [String: Any] = [
+            "w2p_hs": [
+                "active_until": Date().timeIntervalSince1970 - 10.0,
+                "fresh_until": Date().timeIntervalSince1970 + 60.0,
+                "hr": 85.0
+            ]
+        ]
+        wcm.handleIncomingApplicationContext(staleActiveUntilEnvelope)
+        // No transition is expected here, so there's no publisher edge to wait on — just give the
+        // 1Hz lease-monitor timer a full cycle to run and confirm it still reads inactive.
+        let settleExp = expectation(description: "Lease monitor tick settles")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            settleExp.fulfill()
+        }
+        wait(for: [settleExp], timeout: 2.0)
+        XCTAssertFalse(wcm.isWatchLeaseActive, "Expired active_until must not be treated as active even though fresh_until is still in the future")
+        XCTAssertEqual(gameState.debugStatusString, "00000000", "Companion must not be marked active once active_until has passed, regardless of fresh_until")
+
         // 7. Incoming Watch low-speed payload -> Character 3 shows 'W', then cycles back to '0' when idle
         gameState.lastLowSpeedPayloadSource = "W"
         gameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970
@@ -5585,7 +5774,7 @@ final class RadarMapTests: XCTestCase {
         // 3. After activeUntil lease has passed (ts > active_until), Phone assumes cloud ownership
         let exp2 = expectation(description: "Wait for lease expiry")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            gameState.evaluatePhoneCloudClientPolicy()
+            gameState.evaluateListenerGate()
             exp2.fulfill()
         }
         wait(for: [exp2], timeout: 2.0)
@@ -5604,10 +5793,16 @@ final class RadarMapTests: XCTestCase {
         let phoneGameState = createMockGameState(watchConnectivityManager: phoneWCM)
         XCTAssertEqual(phoneGameState.watchConnectivityManager.localLS.loginCycle.loginCycleTs, 0.0)
         
-        // Watch sends an active game with timestamp > 0 (e.g. 500)
+        // Watch sends an active game with timestamp > 0 (e.g. 500). config.configTs specifically
+        // needs to beat real wall-clock time, not just 500: createMockGameState(...) above already
+        // set phoneGameState.myCallsign, which — since ConfigSnapshot carries one timestamp for
+        // the whole struct — bumped phoneWCM.localLS.config.configTs to a real "now" value. Every
+        // *other* field here (loginCycle, playerState) is a separate independently-timestamped
+        // struct that createMockGameState never touched, so 500 alone is already > phone's 0 for
+        // those.
         let watchActiveLS = LowSpeedSnapshot(
             syncTs: 500,
-            config: ConfigSnapshot(callsign: "WATCH_LEADER", roomName: "WATCH_SQUAD", pin: "", theme: "Green", isPro: false, configTs: 500),
+            config: ConfigSnapshot(callsign: "WATCH_LEADER", roomName: "WATCH_SQUAD", pin: "", theme: "Green", isPro: false, configTs: Date().timeIntervalSince1970 + 500),
             loginCycle: LoginCycleSnapshot(loginCycle: .hostActive, loginCycleTs: 500),
             playerState: PlayerStateSnapshot(isDead: false, isDeadTs: 500)
         )
@@ -5620,8 +5815,8 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(merged.loginCycle, watchActiveLS.loginCycle)
         
         // Directly deliver converged snapshot to GameStateManager callback
-        phoneGameState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(watchActiveLS)
-        
+        deliverPeerSnapshot(watchActiveLS, to: phoneGameState.watchConnectivityManager)
+
         let exp = expectation(description: "Phone adopts active session")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             XCTAssertEqual(phoneGameState.savedRoomName, "WATCH_SQUAD")
@@ -5656,19 +5851,17 @@ final class RadarMapTests: XCTestCase {
         let nowBefore = Date().timeIntervalSince1970
         
         gameState.isHosting = true
-        gameState.syncLoginCycleToWatchConnectivity()
-        
+
         let exp1 = expectation(description: "Host login cycle synced")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             XCTAssertGreaterThanOrEqual(gameState.watchConnectivityManager.localLS.loginCycle.loginCycleTs, nowBefore)
             XCTAssertEqual(gameState.watchConnectivityManager.localLS.loginCycle.loginCycle, .hostActive)
-            
+
             let hostTs = gameState.watchConnectivityManager.localLS.loginCycle.loginCycleTs
-            
+
             // Disband room
             gameState.isHosting = false
-            gameState.syncLoginCycleToWatchConnectivity()
-            
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 let leaveTs = gameState.watchConnectivityManager.localLS.loginCycle.loginCycleTs
                 XCTAssertGreaterThanOrEqual(leaveTs, hostTs, "Explicit leave must stamp a fresh timestamp")
@@ -5693,12 +5886,21 @@ final class RadarMapTests: XCTestCase {
         let gameState = createMockGameState()
         gameState.subscriptionManager.hasUnlimitedSquadUnlock = false
         
-        let proSnapshot = LowSpeedSnapshot(config: ConfigSnapshot(isPro: true, configTs: 400))
-        gameState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(proSnapshot)
+        // Adoption itself (subscriptionManager reacting to localLS.config.isPro) is tested here by
+        // seeding localLS directly rather than through a real merge — the merge/LWW-winner logic
+        // that decides *whether* a peer's config.isPro should win is exercised separately above
+        // and in the MergeEngine-focused tests; this only checks that once localLS holds a given
+        // isPro value (for whatever reason), GameStateManager keeps subscriptionManager in step.
+        gameState.watchConnectivityManager.testSeedLocalLS(
+            LowSpeedSnapshot(config: ConfigSnapshot(isPro: true, configTs: 400))
+        )
+        pumpMainRunLoop()
         XCTAssertTrue(gameState.subscriptionManager.hasUnlimitedSquadUnlock)
-        
-        let nonProSnapshot = LowSpeedSnapshot(config: ConfigSnapshot(isPro: false, configTs: 500))
-        gameState.watchConnectivityManager.onLowSpeedConvergenceStateChanged?(nonProSnapshot)
+
+        gameState.watchConnectivityManager.testSeedLocalLS(
+            LowSpeedSnapshot(config: ConfigSnapshot(isPro: false, configTs: 500))
+        )
+        pumpMainRunLoop()
         XCTAssertFalse(gameState.subscriptionManager.hasUnlimitedSquadUnlock)
     }
     
@@ -5811,25 +6013,26 @@ final class RadarMapTests: XCTestCase {
         let watchWCM = WatchConnectivityManager(role: .watch)
         let watchGS = createMockGameState(watchConnectivityManager: watchWCM)
         
-        // Both start dead at t = 100
+        // Both start dead at t = 100. testSeedLocalLS bypasses the fresh-timestamp stamping that
+        // setDead()/mutateLocalPlayerState always apply, so the test can pin an exact historical
+        // isDeadTs the way a real device's persisted-from-a-previous-session state would carry.
         let initialDead = PlayerStateSnapshot(isDead: true, isDeadTs: 100)
-        phoneWCM.updateLocalStructures(playerState: initialDead)
-        watchWCM.updateLocalStructures(playerState: initialDead)
-        phoneGS.setDead(true, syncRemote: false)
-        watchGS.setDead(true, syncRemote: false)
-        
+        phoneWCM.testSeedLocalLS(LowSpeedSnapshot(playerState: initialDead))
+        watchWCM.testSeedLocalLS(LowSpeedSnapshot(playerState: initialDead))
+
         let exp = expectation(description: "Phone revives and overrides older Watch stream")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             // Phone user revives at t = 200
-            phoneGS.setDead(false)
-            phoneGS.syncPlayerStateToWatchConnectivity(timestamp: 200, forceTimestampUpdate: true)
-            
+            var revived = phoneWCM.localLS
+            revived.playerState = PlayerStateSnapshot(isDead: false, isDeadTs: 200)
+            phoneWCM.testSeedLocalLS(revived)
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 XCTAssertFalse(phoneGS.isDead)
                 XCTAssertEqual(phoneWCM.localLS.playerState.isDeadTs, 200)
                 
                 // Watch heart rate stream ticks with older isDeadTs (100)
-                let hrPayload = WatchToPhoneHighSpeed(freshUntil: 300, heartRate: 85.0)
+                let hrPayload = WatchToPhoneHighSpeed(heartRate: 85.0)
                 var watchEnvelope = ApplicationContextEnvelope()
                 watchEnvelope.w2pHS = hrPayload
                 watchEnvelope.w2pLS = watchWCM.localLS // Still has isDead: true, isDeadTs: 100
@@ -6173,6 +6376,147 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(metrics.telemetryWritesFailed, 1, "Failed telemetry write recorded")
         XCTAssertNotNil(syncManager.getPendingTelemetry(), "Pending telemetry must be retained for subsequent reconnect")
         XCTAssertEqual(syncManager.getPendingTelemetry()?.packet.sequenceNumber, 99)
+    }
+
+    /// Truth table for `evaluateListenerGate()` on Phone (non-watchOS): listeners attach ONLY when
+    /// the phone is actively being looked at (`appActive`) AND the Watch's lease is inactive / expired
+    /// (`!peerLeaseActive`, meaning `phone.time > w2p_hs.active_until`).
+    func testListenerGate_PhoneTruthTable() {
+        let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
+        gameState.firebaseManager.isConnected = true
+        gameState.firebaseManager.activeRoom = SquadRoom(id: "GATE_ROOM", hostId: gameState.myMemberId)
+        XCTAssertTrue(gameState.isTacticalSessionActive)
+
+        // appActive=false, peerLeaseActive=false -> detached
+        gameState.firebaseManager.setWristActive(false)
+        gameState.watchConnectivityManager.isWatchLeaseActive = false
+        gameState.evaluateListenerGate()
+        XCTAssertEqual(transport.activeObserverCount, 0, "Neither app-active nor peer lease active: Phone listeners must be detached")
+
+        // appActive=true, peerLeaseActive=false -> attached (Phone looked at and Watch stepped down)
+        gameState.firebaseManager.setWristActive(true)
+        gameState.evaluateListenerGate()
+        XCTAssertGreaterThan(transport.activeObserverCount, 0, "Phone looked at AND Watch stepped down (!peerLeaseActive): listeners must attach")
+
+        // appActive=false, peerLeaseActive=true -> detached (Watch active, Phone not looked at)
+        gameState.firebaseManager.setWristActive(false)
+        gameState.watchConnectivityManager.isWatchLeaseActive = true
+        gameState.evaluateListenerGate()
+        XCTAssertEqual(transport.activeObserverCount, 0, "Watch lease active and Phone not looked at: Phone listeners must be detached")
+
+        // appActive=true, peerLeaseActive=true -> detached (Watch lease still active: Phone must not attach even if looked at)
+        gameState.firebaseManager.setWristActive(true)
+        gameState.evaluateListenerGate()
+        XCTAssertEqual(transport.activeObserverCount, 0, "Watch lease active: Phone must yield listeners even when appActive is true")
+
+        // Watch lease expires while Phone is still looked at -> attaches
+        gameState.watchConnectivityManager.isWatchLeaseActive = false
+        gameState.evaluateListenerGate()
+        XCTAssertGreaterThan(transport.activeObserverCount, 0, "Watch lease expiring while Phone is looked at must attach Phone listeners")
+
+        // Phone backgrounded -> detached again
+        gameState.firebaseManager.setWristActive(false)
+        gameState.evaluateListenerGate()
+        XCTAssertEqual(transport.activeObserverCount, 0, "Phone backgrounded must detach listeners")
+    }
+
+    /// Pure truth-table unit test verifying both Watch and Phone evaluation policies via `GameStateManager.shouldAttachListeners`.
+    func testListenerGate_PlatformDifferentiatedTruthTable() {
+        // Watch: appActive || peerLeaseActive
+        XCTAssertFalse(GameStateManager.shouldAttachListeners(isWatch: true, appActive: false, peerLeaseActive: false))
+        XCTAssertTrue(GameStateManager.shouldAttachListeners(isWatch: true, appActive: true, peerLeaseActive: false))
+        XCTAssertTrue(GameStateManager.shouldAttachListeners(isWatch: true, appActive: false, peerLeaseActive: true))
+        XCTAssertTrue(GameStateManager.shouldAttachListeners(isWatch: true, appActive: true, peerLeaseActive: true))
+
+        // Phone: appActive && !peerLeaseActive
+        XCTAssertFalse(GameStateManager.shouldAttachListeners(isWatch: false, appActive: false, peerLeaseActive: false))
+        XCTAssertTrue(GameStateManager.shouldAttachListeners(isWatch: false, appActive: true, peerLeaseActive: false))
+        XCTAssertFalse(GameStateManager.shouldAttachListeners(isWatch: false, appActive: false, peerLeaseActive: true))
+        XCTAssertFalse(GameStateManager.shouldAttachListeners(isWatch: false, appActive: true, peerLeaseActive: true))
+    }
+
+    func testListenerGate_NoActiveSessionDetachesRegardlessOfActivity() {
+        let gameState = createMockGameState()
+        let transport = mockTransport(for: gameState)
+        // No active session (never connected / no room) -> must not attach even if both signals are active.
+        gameState.firebaseManager.setWristActive(true)
+        gameState.watchConnectivityManager.isWatchLeaseActive = true
+        gameState.evaluateListenerGate()
+        XCTAssertEqual(transport.activeObserverCount, 0, "Listener gate must not attach without an active tactical session")
+    }
+
+    // MARK: - Active-Advertisement Timer Tests
+
+    /// Verifies the timer-driven lease refresh (`GameStateManager.updateActiveAdvertisementTimer`)
+    /// fires repeatedly on `activeAdvertisementCadenceSeconds` while `isTacticalSessionActive &&
+    /// isWristActive`, and stops once either goes false. Observed via `onActiveLeaseAdvertised`
+    /// (a test-only hook) rather than the real WCSession wire effect: this test target runs via
+    /// `swift test` on macOS, where `WCSession.isSupported()` is false, making
+    /// `advertisePhoneHighSpeed()`'s actual publish a no-op with nothing externally observable.
+    func testActiveAdvertisementTimer_FiresWhileActiveAndStopsWhenInactive() {
+        let gameState = createMockGameState()
+        gameState.firebaseManager.isConnected = true
+        gameState.firebaseManager.activeRoom = SquadRoom(id: "ADVERT_ROOM", hostId: gameState.myMemberId)
+        XCTAssertTrue(gameState.isTacticalSessionActive)
+
+        var advertiseCount = 0
+        gameState.onActiveLeaseAdvertised = { advertiseCount += 1 }
+
+        gameState.firebaseManager.setWristActive(true)
+        gameState.startTacticalSession()
+
+        XCTAssertEqual(advertiseCount, 1, "Starting the session while wrist-active must fire one immediate advertisement")
+
+        let secondTickExp = expectation(description: "Timer fires again on the next cadence tick")
+        let cadence = AppConstants.WatchConnectivity.activeAdvertisementCadenceSeconds
+        DispatchQueue.main.asyncAfter(deadline: .now() + cadence + 0.5) {
+            secondTickExp.fulfill()
+        }
+        wait(for: [secondTickExp], timeout: cadence + 2.0)
+
+        XCTAssertGreaterThanOrEqual(advertiseCount, 2, "Timer must keep advertising at least once more while still active")
+
+        let countAfterActive = advertiseCount
+        gameState.firebaseManager.setWristActive(false)
+
+        let quietExp = expectation(description: "No further advertisements after going inactive")
+        DispatchQueue.main.asyncAfter(deadline: .now() + cadence + 0.5) {
+            quietExp.fulfill()
+        }
+        wait(for: [quietExp], timeout: cadence + 2.0)
+
+        XCTAssertEqual(advertiseCount, countAfterActive, "Timer must stop advertising once wrist-active goes false")
+
+        gameState.stopTacticalSession()
+    }
+
+    func testHeartRateDisplayFadeAndTouchBrightness() {
+        // Feature Requirement:
+        // 1. Numerical heart rate display brightness matching top center star (opacity 1.0)
+        // 2. Fades in brightness over 3 seconds to 0 transparency (opacity 0.0)
+        // 3. Touching the heart rate button brings it to full brightness again
+        let fadeDuration = AppConstants.UI.HUD.heartRateFadeDurationSeconds
+        XCTAssertEqual(fadeDuration, 3.0, "Heart rate fade duration must be 3 seconds")
+
+        func calculateOpacity(isHolding: Bool, hrElapsed: Double) -> Double {
+            isHolding ? 1.0 : max(0.0, min(1.0, 1.0 - (max(0.0, hrElapsed) / fadeDuration)))
+        }
+
+        // At moment of touch (or release), full brightness (1.0)
+        XCTAssertEqual(calculateOpacity(isHolding: false, hrElapsed: 0.0), 1.0, accuracy: 0.001)
+
+        // Midway through fade (1.5 seconds)
+        XCTAssertEqual(calculateOpacity(isHolding: false, hrElapsed: 1.5), 0.5, accuracy: 0.001)
+
+        // At exactly 3.0 seconds, fades to 0
+        XCTAssertEqual(calculateOpacity(isHolding: false, hrElapsed: 3.0), 0.0, accuracy: 0.001)
+
+        // Beyond 3.0 seconds, remains clamped at 0.0
+        XCTAssertEqual(calculateOpacity(isHolding: false, hrElapsed: 5.0), 0.0, accuracy: 0.001)
+
+        // Touching the button (isHolding: true) forces full brightness (1.0) regardless of elapsed time
+        XCTAssertEqual(calculateOpacity(isHolding: true, hrElapsed: 10.0), 1.0, accuracy: 0.001)
     }
 }
 

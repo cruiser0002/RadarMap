@@ -6,13 +6,31 @@
       ".indexOn": ["exp", "expireAt"],
       "$roomId": {
         ".read": true,
-        ".write": "data.exists() || newData.child('id').exists()",
+        ".write": "(!data.exists() && newData.child('id').exists()) || (data.exists() && (!newData.exists() || (newData.child('id').val() == data.child('id').val() && (!data.child('pin').exists() || newData.child('pin').val() == data.child('pin').val()))))",
         ".validate": "$roomId.length > 0 && $roomId.length <= 16 && $roomId.matches(/^[A-Z0-9]+$/)",
+        "id": {
+          ".validate": "newData.isString() && newData.val() == $roomId"
+        },
+        "hst": {
+          ".validate": "newData.isString() && newData.val().length == 8"
+        },
+        "cap": {
+          ".validate": "newData.isNumber() && newData.val() >= 1 && newData.val() <= 12 && (!data.exists() || newData.val() == data.val())"
+        },
+        "mti": {
+          ".validate": "newData.isNumber() && newData.val() >= 0 && newData.val() <= 20 && (!data.exists() || newData.val() == data.val())"
+        },
+        "pin": {
+          ".validate": "newData.isString() && (newData.val().length == 64 || newData.val().length == 0)"
+        },
+        "exp": {
+          ".validate": "newData.isNumber()"
+        },
         "m": {
           ".read": "root.child('r').child($roomId).exists()",
           "$memberId": {
             ".write": "root.child('r').child($roomId).exists()",
-            ".validate": "$memberId.length == 8"
+            ".validate": "$memberId.length == 8 && (!newData.exists() || (newData.hasChildren(['mid', 'csn']) && newData.child('mid').val() == $memberId && newData.child('csn').isString() && newData.child('csn').val().length <= 32))"
           }
         }
       }
@@ -21,9 +39,12 @@
       "$roomId": {
         ".read": "root.child('r').child($roomId).exists()",
         ".write": "!newData.exists() || (root.child('r').child($roomId).exists() && newData.hasChild('exp'))",
+        "exp": {
+          ".validate": "newData.isNumber()"
+        },
         "$memberId": {
           ".write": "root.child('r').child($roomId).child('m').child($memberId).exists() || !newData.exists()",
-          ".validate": "$memberId.length == 8"
+          ".validate": "$memberId.length == 8 && (!newData.exists() || (newData.isString() ? newData.val().length <= 256 : !newData.hasChild('10')))"
         }
       }
     },
@@ -31,14 +52,19 @@
       "$roomId": {
         ".read": "root.child('r').child($roomId).exists()",
         ".write": "!newData.exists() || (root.child('r').child($roomId).exists() && newData.hasChild('exp'))",
+        "exp": {
+          ".validate": "newData.isNumber()"
+        },
         "o": {
           "$indicatorId": {
-            ".write": "!newData.exists() || root.child('r').child($roomId).exists()"
+            ".write": "!newData.exists() || root.child('r').child($roomId).exists()",
+            ".validate": "!newData.exists() || (newData.isString() ? newData.val().length <= 256 : !newData.hasChild('10'))"
           }
         },
         "i": {
           "$indicatorId": {
-            ".write": "!newData.exists() || root.child('r').child($roomId).exists()"
+            ".write": "!newData.exists() || root.child('r').child($roomId).exists()",
+            ".validate": "!newData.exists() || (newData.isString() ? newData.val().length <= 256 : !newData.hasChild('10'))"
           }
         }
       }

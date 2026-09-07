@@ -181,6 +181,7 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
 | **Center map** | Center map | Center map without changing zoom level | [`MapStateMachine.swift`](../RadarMap/Models/MapStateMachine.swift)<br>[`GameStateManager.swift`](../RadarMap/Managers/GameStateManager.swift) | • Bottom-left HUD button triggers `gameState.centerMapOnLocalUser()`.<br>• Re-locks `MapTrackingState` to `.locked` at the **current zoom scale** (`scaleMeters` is preserved, never reset). |
 | **Gestures** | Gesture | Standard pan/drag, tap, and native pinch-to-zoom gestures | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • iPhone/iPad (`TacticalMKMapView`): fully native, continuous MapKit pan/pinch-zoom with **no** discrete-scale snapping — behaves exactly like stock Apple Maps.<br>• watchOS (`StandardMapView`'s `NativeSwiftUIMapView`): Native `.interactionModes: .pan`; zoom is Digital-Crown-driven and still snaps to the discrete `[1, 2.5, 5]` ladder (see below).<br>• Drag gesture transitions state from `.locked` to `.unlocked` (panning) on both platforms.<br>• Tap gesture handles indicator placement when menu is pending. |
 | **Crown / Pinch Zoom** | Zoom | Digital Crown: discrete decade levels `[1, 2.5, 5]`. iOS pinch: free continuous native zoom | [`AppConstants.swift`](../RadarMap/AppConstants.swift)<br>[`TacticalRadarMapView.swift`](../RadarMap/Views/Map/TacticalRadarMapView.swift)<br>[`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • Digital Crown rotation (watchOS) steps through discrete minor scales `[1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]`, with altitude calculated via MapKit camera FOV trigonometry (`cameraDistance(forScale:)`).<br>• MapKit pinch-to-zoom on iPhone/iPad's Standard map view (`TacticalMKMapView`) is **not** bound to this ladder — it's free, continuous native zoom with no snapping and no altitude calculation of our own. The Radar (OLED) view's own decade ladder is unaffected on either platform. |
+| **Distance Line** | MapKit polyline / annotation | Tap-to-measure range line from local user to selected teammate or POI | [`GameStateManager.swift`](../RadarMap/Managers/GameStateManager.swift)<br>[`RadarMapView.swift`](../RadarMap/Views/Map/RadarMapView.swift)<br>[`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • Single tap on any teammate or POI annotation draws a straight distance line from "me" to the target.<br>• Computes 2D horizontal ground ($XY$) distance via equirectangular approximation (`hypot(dLat, dLon)`); ignores $Z$ (altitude).<br>• Midpoint displays formatted metric distance label.<br>• Tapping target again or tapping empty map clears selection.<br>• Purely local UI state (`selectedAnnotationForDistance`), never synced over network. |
 | **Other buttons** | *(none)* | Custom definitions not related to MapKit | [`TacticalRadarMapView.swift`](../RadarMap/Views/Map/TacticalRadarMapView.swift) | • Top-left: Settings Gear.<br>• Top-center: Squad Leader / Commander Menu (`star.fill`).<br>• Bottom-center: Scale Ruler / Hold-to-Act Tag Out Button.<br>• Bottom-right: Map Style Toggle (Standard MapKit vs OLED Radar). |
 
 ### D. Core MapKit Implementation Rules
@@ -212,6 +213,18 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
 * It must **never** reset the camera zoom to the default 50m scale.
 * It must **never** start a periodic timer loop to drag the camera.
 
+### Tap-to-Measure Distance Line Semantics (2D Horizontal Ground Range):
+* **Triggering & Toggle**: Tapping any remote squad member (`.squadMember(id:)`) or tactical indicator (`.tacticalIndicator(id:)`) sets `gameState.selectedAnnotationForDistance`. Tapping the same annotation again or tapping anywhere on empty map space deselects it and removes the line (`selectedAnnotationForDistance = nil`).
+* **2D / XY Planar Distance Only**: The distance calculation [`GameStateManager.distance(from:to:)`](../RadarMap/Managers/GameStateManager.swift) computes horizontal surface distance between coordinates using a flat-earth equirectangular approximation:
+  $$\Delta \text{lat} = (b.\text{latitude} - a.\text{latitude}) \times 111{,}139\text{ m}$$
+  $$\Delta \text{lon} = (b.\text{longitude} - a.\text{longitude}) \times 111{,}139\text{ m} \times \cos\left(b.\text{latitude} \times \frac{\pi}{180}\right)$$
+  $$d_{XY} = \sqrt{(\Delta \text{lat})^2 + (\Delta \text{lon})^2}$$
+  **Vertical displacement ($Z$ / altitude) is strictly excluded.** The calculated distance represents 2D horizontal ground range across the surface.
+* **Midpoint Distance Badge**: Renders a formatted distance badge (`AppConstants.UI.ScaleRuler.formatDistance(meters:)`) positioned at the geographic midpoint:
+  $$\text{midpoint} = \left(\frac{a.\text{lat} + b.\text{lat}}{2}, \frac{a.\text{lon} + b.\text{lon}}{2}\right)$$
+* **Eviction Safety**: `gameState.validateAnnotationSelection()` automatically clears `selectedAnnotationForDistance` if the targeted member disconnects or the tactical marker is removed, preventing dangling lines.
+* **Zero Network Overhead**: Stored purely in `@Published public var selectedAnnotationForDistance: MeasuredAnnotationSelection?` on `GameStateManager`. It is strictly local UI state and is never serialized or transmitted over Firebase Realtime Database or WatchConnectivity.
+
 ---
 
 ## 7. Visual Styling, Themes & Layers Hierarchy
@@ -221,7 +234,7 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
 ```mermaid
 graph TD
     L5["<b>Layer 5: UX Buttons</b><br/>(Settings Gear, Star Menu, Center Map, Scale Ruler / HR Button, Map Style)"]
-    L4["<b>Layer 4: Annotations</b><br/>(Remote Squad Members & Tactical Indicators)"]
+    L4["<b>Layer 4: Annotations & Distance Line</b><br/>(Remote Squad Members, Tactical Indicators, Measure Line & Midpoint Label)"]
     L3["<b>Layer 3: Pan and Zoom</b><br/>(Touch/Pinch Gestures & Digital Crown Interaction)"]
     L2["<b>Layer 2: Radar/Ruler</b><br/>(Radar Grid, Range Rings, Metric Distance Scale Visuals)"]
     L1["<b>Layer 1: MapKit & UserAnnotation</b><br/>(Standard MapKit Base, Local Player UserAnnotation Dot, 60Hz Hardware Follow-Me)"]
@@ -235,7 +248,7 @@ graph TD
 | Layer | Component | Description & Responsibilities |
 | :--- | :--- | :--- |
 | **Layer 5 (Top)** | **UX Buttons** | Floating HUD buttons: Settings gear, Star menu, Center Map, Hold-to-Act Tag Out / Scale Ruler, and Map Style toggle. Intercepts taps and holds with top priority. |
-| **Layer 4** | **Annotations** | Dynamic tactical markers (remote squad teammates, orders, hostile alerts) rendered on geographic coordinates above map content. |
+| **Layer 4** | **Annotations & Distance Line** | Dynamic tactical markers (remote squad teammates, orders, hostile alerts) and active tap-to-measure range line with midpoint distance label. |
 | **Layer 3** | **Pan and zoom** | Gesture recognition layer: drag/pan to inspect, pinch-to-zoom (iOS), Digital Crown (watchOS). |
 | **Layer 2** | **Radar/ruler** | Radar range rings, grid divisions, and metric scale ruler visuals representing map zoom scale. |
 | **Layer 1 (Bottom)** | **MapKit & `UserAnnotation`** | Native MapKit engine and local player `UserAnnotation` vector icon with 60Hz hardware compositor tracking. |
@@ -259,3 +272,6 @@ When reviewing or refactoring UI components, ensure:
 - [ ] Radar-view pinch/Digital Crown gesture release snaps cleanly to the nearest discrete decade scale.
 - [ ] iPhone/iPad Standard map view (`TacticalMKMapView`) pinch-to-zoom does **not** snap to the decade ladder and never forces a camera altitude — free native MapKit zoom only (§5.D.3).
 - [ ] Digital Crown rotation triggers haptic feedback only when scale index changes.
+- [ ] Tap-to-measure distance line measures strictly 2D horizontal ground ($XY$) distance ignoring altitude ($Z$).
+- [ ] Tapping the selected annotation again or tapping empty space clears the distance line.
+- [ ] Distance line state is purely local and never transmitted over Firebase or WatchConnectivity.

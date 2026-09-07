@@ -197,6 +197,10 @@ class PlayerSpec:
     start_lat: Optional[float] = None
     start_lon: Optional[float] = None
     encrypted: bool = False  # Per-player AES-256-GCM encryption of telemetry/tactical arrays
+    glance_time_sec: float = 0.0  # Active display glance duration (0 = always active)
+    inactivity_time_sec: float = 0.0  # Wrist-down / inactive duration (0 = never inactive)
+    telemetry_payload_bytes: int = 200  # Default compact telemetry payload size in bytes
+    tactical_payload_bytes: int = 200  # Default tactical marker payload size in bytes
 
 
 DEFAULT_10_PLAYERS: List[Tuple[str, float, int, bool]] = [
@@ -513,6 +517,29 @@ class SimulatedPlayer:
         self.tactical_ops_queued = 0
         self.tactical_ops_flushed = 0
 
+        # Glance / Inactivity duty cycle state (Apple Watch wrist raise/lower behavior)
+        self.glance_time_sec = spec.glance_time_sec
+        self.inactivity_time_sec = spec.inactivity_time_sec
+        self.has_glance_cycle = (self.glance_time_sec > 0 and self.inactivity_time_sec > 0)
+        self.is_glancing = True
+        self._next_glance_transition = 0.0
+        if self.has_glance_cycle:
+            # Stagger initial phase across players so they don't all glance simultaneously
+            initial_phase = random.uniform(0.0, self.glance_time_sec + self.inactivity_time_sec)
+            if initial_phase < self.glance_time_sec:
+                self.is_glancing = True
+                self._next_glance_transition = time.time() + (self.glance_time_sec - initial_phase)
+            else:
+                self.is_glancing = False
+                self._next_glance_transition = time.time() + (self.glance_time_sec + self.inactivity_time_sec - initial_phase)
+
+        # Byte / Egress accounting
+        self.telemetry_payload_bytes = spec.telemetry_payload_bytes
+        self.tactical_payload_bytes = spec.tactical_payload_bytes
+        self.total_ingress_bytes = 0
+        self.total_continuous_egress_bytes = 0
+        self.total_glance_gated_egress_bytes = 0
+
     def should_suppress_update(self, lat: float, lon: float, hr: float, now: float) -> bool:
         """Evaluates iOS Dead Reckoning & Delta Gating (CLOUD_DATA_MANAGEMENT.md §2)."""
         if not self.enable_delta_gating:
@@ -549,17 +576,23 @@ class SimulatedPlayer:
         tactical_ops_to_upload is a FIFO-ordered list of {"op": "place"|"remove", "branch", "id",
         ["payload"]} dicts flushed from this player's outbox this tick (empty while offline).
         """
-        # 1. Update movement
+        # 1. Update glance state (active display vs inactivity)
+        if self.has_glance_cycle and now >= self._next_glance_transition:
+            self.is_glancing = not self.is_glancing
+            dur = self.glance_time_sec if self.is_glancing else self.inactivity_time_sec
+            self._next_glance_transition = now + dur
+
+        # 2. Update movement
         lat, lon, hdg, speed, state, entered_stop = self.walker.tick(dt, now)
 
         # Dynamic heart rate correlated with speed
         base_hr = 75.0 + (speed * 12.0)
         self.heart_rate = max(60.0, min(180.0, base_hr + random.uniform(-2.0, 2.0)))
 
-        # 2. Check network connectivity
+        # 3. Check network connectivity
         is_online = self.net.tick(now)
 
-        # 3. Telemetry packet construction: compact 4-element [lat, lon, hr, ts]
+        # 4. Telemetry packet construction: compact 4-element [lat, lon, hr, ts]
         self.sequence_number += 1
         rounded_lat = round(lat, 6)
         rounded_lon = round(lon, 6)
@@ -584,21 +617,22 @@ class SimulatedPlayer:
                 self.last_sent_lon = lon
                 self.last_sent_hr = self.heart_rate
                 self.last_sent_time = now
+                self.total_ingress_bytes += self.telemetry_payload_bytes
         else:
             # Offline: Latest-Only coalescing into single slot (Policy 2)
             if self.pending_telemetry is not None:
                 self.packets_coalesced_offline += 1
             self.pending_telemetry = telemetry_payload
 
-        # 4. Marker Generation on Stop — enqueued into the Durable Queue-All outbox regardless of
-        # connectivity; only flushed to the wire while online (step 5 below).
+        # 5. Marker Generation on Stop — enqueued into the Durable Queue-All outbox regardless of
+        # connectivity; only flushed to the wire while online (step 6 below).
         marker_to_place: Optional[Dict[str, Any]] = None
         if entered_stop and random.random() < self.marker_drop_probability:
             marker_to_place = self._generate_marker(lat, lon, now)
             self.pending_tactical_ops.extend(marker_to_place["ops"])
             self.tactical_ops_queued += len(marker_to_place["ops"])
 
-        # 5. Flush the tactical outbox only while online, in FIFO order — mirrors the Firebase
+        # 6. Flush the tactical outbox only while online, in FIFO order — mirrors the Firebase
         # SDK's own offline write queue, which replays every queued write in the order it was
         # issued once connectivity returns (see FirebaseSyncManager.swift). This is what lets a
         # same-issuer squad-order replace (remove old + add new) survive a network drop correctly:
@@ -608,8 +642,9 @@ class SimulatedPlayer:
             tactical_ops_to_upload = self.pending_tactical_ops
             self.pending_tactical_ops = []
             self.tactical_ops_flushed += len(tactical_ops_to_upload)
+            self.total_ingress_bytes += len(tactical_ops_to_upload) * self.tactical_payload_bytes
 
-        # 6. Encrypt the outgoing telemetry array (if this player has an encryption key) —
+        # 7. Encrypt the outgoing telemetry array (if this player has an encryption key) —
         # internal state above (last_sent_lat/lon/hr, pending_telemetry) always stays plaintext
         # since delta-gating math needs real numbers; only the wire payload is ciphertext.
         wire_packet: Optional[Any] = packet_to_upload
@@ -757,6 +792,9 @@ class StressTestCoordinator:
         self.total_telemetry_gated = 0
         self.total_markers_placed = 0
         self.total_tactical_ops_uploaded = 0
+        self.total_ingress_bytes = 0
+        self.total_continuous_egress_bytes = 0
+        self.total_glance_gated_egress_bytes = 0
         self.start_time = 0.0
         self._last_ttl_refresh = 0.0
 
@@ -853,17 +891,26 @@ class StressTestCoordinator:
 
     def teardown_room(self):
         """Clean teardown on simulation finish, purging cloud nodes."""
-        if self.dry_run or not self._firebase_app:
+        if self.dry_run:
+            print(f"\n[INFO] Dry-run mode: skipping Firebase purge for room '{self.room_id}'.")
             return
 
-        print(f"\n[CLEANUP] Tearing down room '{self.room_id}' on Firebase...")
+        if not self._firebase_app:
+            if not self.init_firebase_if_needed():
+                return
+
+        print(f"\n[CLEANUP] Disbanding room '{self.room_id}' on Firebase...")
         try:
             firebase_db.reference(f"p/{self.room_id}", app=self._firebase_app).delete()
             firebase_db.reference(f"t/{self.room_id}", app=self._firebase_app).delete()
             firebase_db.reference(f"r/{self.room_id}", app=self._firebase_app).delete()
-            print("[CLEANUP] Successfully purged room and subnodes.")
+            print(f"[SUCCESS] Disbanded room '{self.room_id}' and purged all nodes (r/, p/, t/).")
         except Exception as e:
             print(f"[CLEANUP ERROR] Failed to delete room nodes: {e}")
+
+    def disband_room(self):
+        """Clean disband of room on Firebase, purging telemetry, tactical markers, and room info."""
+        self.teardown_room()
 
     def run(self, duration_sec: Optional[float] = None):
         """Main synchronous multi-player simulation loop."""
@@ -912,6 +959,15 @@ class StressTestCoordinator:
                     if packet_to_send is not None:
                         self.total_telemetry_sent += 1
                         player.packets_succeeded += 1
+                        # Ingress: player -> server
+                        self.total_ingress_bytes += player.telemetry_payload_bytes
+                        # Egress: fan-out to other N-1 connected players
+                        for other in self.players:
+                            if other.member_id != player.member_id and other.net.is_connected:
+                                self.total_continuous_egress_bytes += player.telemetry_payload_bytes
+                                if other.is_glancing:
+                                    self.total_glance_gated_egress_bytes += player.telemetry_payload_bytes
+
                         if not self.dry_run and self._firebase_app:
                             self._async_upload_telemetry(player.member_id, packet_to_send)
 
@@ -921,6 +977,15 @@ class StressTestCoordinator:
 
                     if tactical_ops:
                         self.total_tactical_ops_uploaded += len(tactical_ops)
+                        for op in tactical_ops:
+                            self.total_ingress_bytes += player.tactical_payload_bytes
+                            # Tactical fan-out to other N-1 connected players
+                            for other in self.players:
+                                if other.member_id != player.member_id and other.net.is_connected:
+                                    self.total_continuous_egress_bytes += player.tactical_payload_bytes
+                                    if other.is_glancing:
+                                        self.total_glance_gated_egress_bytes += player.tactical_payload_bytes
+
                         if not self.dry_run and self._firebase_app:
                             for op in tactical_ops:
                                 self._async_apply_tactical_op(op)
@@ -1044,7 +1109,156 @@ class StressTestCoordinator:
             uptime = p.net.current_uptime_ratio * 100.0
             print(f"{p.callsign:<10} | {tgt:6.2f}m/s | {obs:8.2f}m/s | {acc:7.1f}% | {uptime:7.1f}% | {len(p.markers_placed):2d} markers")
 
+        print("-" * 85)
+        print("💰 NETWORK TRAFFIC & CLOUD COST PROJECTION (Firebase RTDB Blaze Plan)")
+        print("-" * 85)
+        mb_ingress = self.total_ingress_bytes / (1024.0 * 1024.0)
+        mb_egress_cont = self.total_continuous_egress_bytes / (1024.0 * 1024.0)
+        mb_egress_gated = self.total_glance_gated_egress_bytes / (1024.0 * 1024.0)
+        print(f"Total Client Ingress:             {mb_ingress:8.3f} MB ({self.total_ingress_bytes:,} bytes)")
+        print(f"Total Fan-out Egress (Continuous):{mb_egress_cont:8.3f} MB ({self.total_continuous_egress_bytes:,} bytes)")
+        print(f"Total Fan-out Egress (Glance-Gated):{mb_egress_gated:8.3f} MB ({self.total_glance_gated_egress_bytes:,} bytes)")
+        if elapsed > 0:
+            hr_scale = 3600.0 / elapsed
+            game_scale = (8.0 * 3600.0) / elapsed
+            mo_scale = (64.0 * 3600.0) / elapsed  # 8 days/mo * 8 hrs/day = 64 hrs
+            print(f"\n--- Extrapolations based on {elapsed:.1f}s test run ---")
+            print(f"Hourly Egress (Continuous):      {(mb_egress_cont * hr_scale):8.2f} MB/hr")
+            print(f"Hourly Egress (Glance-Gated):    {(mb_egress_gated * hr_scale):8.2f} MB/hr")
+            print(f"8-Hour Game Egress (Glance-Gated):{(mb_egress_gated * game_scale):8.2f} MB  [Cost: ${(mb_egress_gated * game_scale / 1024.0) * 1.00:0.4f} @ $1.00/GB]")
+            print(f"Monthly Weekend Play (64 hrs):   {(mb_egress_gated * mo_scale / 1024.0):8.3f} GB/mo [Cost: ${max(0.0, (mb_egress_gated * mo_scale / 1024.0) - 10.0) * 1.00:0.2f} after 10GB free]")
         print("=" * 85 + "\n")
+
+
+# MARK: - Benchmark Profiles & Cost Analyzer
+def get_benchmark_players(benchmark: str) -> List[PlayerSpec]:
+    """Generates player roster according to standard benchmark tiers."""
+    b = benchmark.lower()
+    if b == "free":
+        # Free Tier: 4 players, 5s glance / 30s inactive (14.29% duty cycle), 200B telemetry, 0 markers
+        return [
+            PlayerSpec(callsign=f"FREE-{i+1}", target_avg_speed_mps=3.0, network_quality=4,
+                       glance_time_sec=5.0, inactivity_time_sec=30.0,
+                       telemetry_payload_bytes=200, tactical_payload_bytes=200)
+            for i in range(4)
+        ]
+    elif b == "pro":
+        # Pro Tier: 12 players, 10s glance / 20s inactive (33.33% duty cycle), 200B telemetry, 100 max markers
+        return [
+            PlayerSpec(callsign=f"PRO-{i+1}", target_avg_speed_mps=3.5, network_quality=4 if i < 8 else 3,
+                       glance_time_sec=10.0, inactivity_time_sec=20.0,
+                       telemetry_payload_bytes=200, tactical_payload_bytes=200)
+            for i in range(12)
+        ]
+    else:
+        raise ValueError(f"Unknown benchmark '{benchmark}'. Must be 'free' or 'pro'.")
+
+
+def generate_squad_roster(num_players: int) -> List[PlayerSpec]:
+    """Generates an N-player squad roster (e.g. 60 players) with realistic callsigns, speeds, and network qualities."""
+    roster: List[PlayerSpec] = []
+    squad_names = ["VIPER", "GHOST", "COBRA", "EAGLE", "WOLF", "HAWK", "RAVEN", "TITAN", "STORM", "HUNTER"]
+    for i in range(num_players):
+        sq_idx = i // 6
+        sq_name = squad_names[sq_idx % len(squad_names)]
+        num = (i % 6) + 1
+        if sq_idx >= len(squad_names):
+            sq_name = f"{sq_name}{sq_idx // len(squad_names) + 1}"
+        callsign = f"{sq_name}-{num}"
+        # Distributed tactical speeds: 2.0 m/s (scout/sniper) to 5.0 m/s (point scout/assault)
+        speed = 2.0 + ((i * 1.7) % 3.2)
+        # Distributed network qualities: 1 to 5
+        quality = 5 if (i % 5 == 0) else (4 if (i % 5 in (1, 2)) else (3 if (i % 5 == 3) else 2))
+        roster.append(PlayerSpec(
+            callsign=callsign,
+            target_avg_speed_mps=speed,
+            network_quality=quality,
+            glance_time_sec=10.0,
+            inactivity_time_sec=20.0,
+            telemetry_payload_bytes=200,
+            tactical_payload_bytes=200,
+        ))
+    return roster
+
+
+def print_analytical_cost_report():
+    """Prints mathematical cost and capacity analysis matching Network Benchmark table."""
+    print("\n" + "=" * 95)
+    print("📈 RADARMAP NETWORK BENCHMARK & FIREBASE CLOUD FINANCIAL ANALYSIS")
+    print("=" * 95)
+    print("Firebase RTDB Blaze Allocation: 10 GB/month FREE, $1.00 / GB egress thereafter.")
+    print("Usage Model: Weekend play only = 8 days/month, 8 hours/day = 64 hours/month.")
+    print("-" * 95)
+
+    # Free Tier Math
+    # 4 players, 0.5 Hz upload, 200B telemetry, 0 markers, 5s glance / 30s inactive (duty = 5/35 = 14.286%)
+    n_free = 4
+    rate_free = 0.5
+    size_tel = 200
+    duty_free = 5.0 / 35.0
+    # Telemetry ingress
+    tel_in_free_hr = n_free * rate_free * size_tel * 3600 / (1024 * 1024)  # MB/hr
+    # Fanout egress per player = (N-1) * rate * size * 3600
+    tel_eg_free_cont_hr = n_free * (n_free - 1) * rate_free * size_tel * 3600 / (1024 * 1024)  # MB/hr
+    tel_eg_free_gated_hr = tel_eg_free_cont_hr * duty_free  # MB/hr
+
+    free_game_egress_mb = tel_eg_free_gated_hr * 8.0
+    free_month_egress_gb = (tel_eg_free_gated_hr * 64.0) / 1024.0
+    free_games_in_10gb = 10.0 / (free_month_egress_gb if free_month_egress_gb > 0 else 1.0)
+    free_cost_per_game = (free_game_egress_mb / 1024.0) * 1.00
+
+    print(f"1️⃣  FREE TIER BENCHMARK ({n_free} Players | 0.5 Hz Upload | 5s Glance / 30s Inactive | 0 Markers):")
+    print(f"    • Ingress (Client -> Cloud):    {tel_in_free_hr:6.2f} MB/hr")
+    print(f"    • Continuous Fanout Egress:     {tel_eg_free_cont_hr:6.2f} MB/hr ({tel_eg_free_cont_hr * 8:5.1f} MB / 8-hr game)")
+    print(f"    • Glance-Gated Egress ({duty_free*100:4.1f}%):   {tel_eg_free_gated_hr:6.2f} MB/hr ({free_game_egress_mb:5.1f} MB / 8-hr game)")
+    print(f"    • Monthly Egress (64 hrs/mo):   {free_month_egress_gb:6.3f} GB/squad")
+    print(f"    • Q1: Concurrent Free Games in 10 GB Free Tier: {free_games_in_10gb:5.1f} concurrent squads ({free_games_in_10gb * n_free:4.0f} CCU)")
+    print(f"    • Q1a: Total Install Base (at 2% CCU peak):     ~{int(free_games_in_10gb * n_free / 0.02):,} registered users before any Firebase bill")
+    print(f"    • Q2: Incremental Cost of 8-Hour Game:         ${free_cost_per_game:0.4f} (~half a cent per 8-hour game)")
+
+    print("-" * 95)
+
+    # Pro Tier Math
+    # 12 players, 0.5 Hz upload, 200B telemetry, 1.0 Hz marker placement rate, 200B markers, 10s glance / 20s inactive (duty = 10/30 = 33.333%)
+    n_pro = 12
+    rate_pro_tel = 0.5
+    rate_pro_mkr = 1.0
+    duty_pro = 10.0 / 30.0
+    # Telemetry egress
+    tel_eg_pro_cont_hr = n_pro * (n_pro - 1) * rate_pro_tel * size_tel * 3600 / (1024 * 1024)
+    tel_eg_pro_gated_hr = tel_eg_pro_cont_hr * duty_pro
+    # Marker egress (1 marker/s room-wide fanned out to 11 players)
+    mkr_eg_pro_cont_hr = (n_pro - 1) * rate_pro_mkr * size_tel * 3600 / (1024 * 1024)
+    mkr_eg_pro_gated_hr = mkr_eg_pro_cont_hr * duty_pro
+
+    total_pro_cont_hr = tel_eg_pro_cont_hr + mkr_eg_pro_cont_hr
+    total_pro_gated_hr = tel_eg_pro_gated_hr + mkr_eg_pro_gated_hr
+    pro_game_egress_mb = total_pro_gated_hr * 8.0
+    pro_month_egress_gb = (total_pro_gated_hr * 64.0) / 1024.0
+    pro_games_in_10gb = 10.0 / pro_month_egress_gb
+    pro_cost_per_game = (pro_game_egress_mb / 1024.0) * 1.00
+
+    # Depletion of $19.99 purchase
+    # Apple 15% cut (Small Business Program): Net revenue = $19.99 * 0.85 = $16.99. 50% = $8.50.
+    # At standard 30% cut: Net revenue = $13.99. 50% = $7.00.
+    # Cost per player-month at 64 hrs/mo = (total squad cost) / 12 = ($pro_month_egress_gb * $1.00) / 12
+    cost_per_player_month_64h = pro_month_egress_gb / float(n_pro)
+    months_to_deplete_50_pct_hardcore = (16.99 * 0.50) / cost_per_player_month_64h
+    months_to_deplete_50_pct_casual = (16.99 * 0.50) / (cost_per_player_month_64h * (16.0 / 64.0))
+
+    print(f"2️⃣  PRO TIER BENCHMARK ({n_pro} Players | 0.5 Hz Upload | 10s Glance / 20s Inactive | 1.0 Hz Markers | 100 Cap):")
+    print(f"    • Telemetry Egress (Continuous):{tel_eg_pro_cont_hr:6.2f} MB/hr | Glance-Gated: {tel_eg_pro_gated_hr:6.2f} MB/hr")
+    print(f"    • Tactical Marker Egress:       {mkr_eg_pro_cont_hr:6.2f} MB/hr | Glance-Gated: {mkr_eg_pro_gated_hr:6.2f} MB/hr")
+    print(f"    • Total Hourly Egress:          {total_pro_cont_hr:6.2f} MB/hr (Continuous) | {total_pro_gated_hr:6.2f} MB/hr (Glance-Gated)")
+    print(f"    • Per 8-Hour Game Egress:       {pro_game_egress_mb:6.1f} MB/game (Glance-Gated)")
+    print(f"    • Monthly Egress (64 hrs/mo):   {pro_month_egress_gb:6.3f} GB/squad")
+    print(f"    • Q1: Concurrent Pro Games in 10 GB Free Tier:  {pro_games_in_10gb:5.1f} concurrent squads ({pro_games_in_10gb * n_pro:4.0f} CCU)")
+    print(f"    • Q1a: Total Install Base (at 2% CCU peak):     ~{int(pro_games_in_10gb * n_pro / 0.02):,} registered users before any Firebase bill")
+    print(f"    • Q2: Incremental Cost of 8-Hour Game:         ${pro_cost_per_game:0.4f} (~15 cents per 8-hour game)")
+    print(f"    • Q3: Time to Deplete 50% of $19.99 App Revenue ($8.50 budget @ Apple 15% rate):")
+    print(f"          - Hardcore Play (64 hrs/mo, every weekend): {months_to_deplete_50_pct_hardcore:4.1f} months (~{months_to_deplete_50_pct_hardcore/12.0:0.1f} years)")
+    print(f"          - Casual Play (16 hrs/mo, 2 weekends):      {months_to_deplete_50_pct_casual:4.1f} months (~{months_to_deplete_50_pct_casual/12.0:0.1f} years)")
+    print("=" * 95 + "\n")
 
 
 # MARK: - Entrypoint & Parsing
@@ -1073,6 +1287,10 @@ def parse_players_table(table_json_str: Optional[str]) -> List[PlayerSpec]:
                 start_lat=item.get("lat"),
                 start_lon=item.get("lon"),
                 encrypted=bool(item.get("encrypted", False)),
+                glance_time_sec=float(item.get("glance_time_sec", 0.0)),
+                inactivity_time_sec=float(item.get("inactivity_time_sec", 0.0)),
+                telemetry_payload_bytes=int(item.get("telemetry_payload_bytes", 200)),
+                tactical_payload_bytes=int(item.get("tactical_payload_bytes", 200)),
             ))
     return specs
 
@@ -1082,6 +1300,9 @@ def main():
         description="RadarMap Tactical Squad Stress Test Simulator",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--num-players", "-n", type=int, default=None, help="Simulate N players (e.g. 60) automatically generating rosters")
+    parser.add_argument("--benchmark", choices=["free", "pro"], default=None, help="Preset benchmark tier ('free' = 4 players, 'pro' = 12 players)")
+    parser.add_argument("--cost-analysis", action="store_true", help="Print analytical cloud bandwidth and financial report for Blaze plan")
     parser.add_argument("--lat", type=float, default=37.332331, help="Starting anchor latitude")
     parser.add_argument("--lon", type=float, default=-122.031219, help="Starting anchor longitude")
     parser.add_argument("--room", default="STRESS", help="Squad room name (max 12 alphanumeric chars)")
@@ -1104,7 +1325,18 @@ def main():
 
     args = parser.parse_args()
 
-    players = parse_players_table(args.players)
+    if args.cost_analysis:
+        print_analytical_cost_report()
+        if args.duration == DEFAULT_SIMULATION_DURATION_SEC and args.benchmark is None and args.players is None and args.num_players is None:
+            return
+
+    if args.num_players is not None and args.num_players > 0:
+        players = generate_squad_roster(args.num_players)
+    elif args.benchmark:
+        players = get_benchmark_players(args.benchmark)
+    else:
+        players = parse_players_table(args.players)
+
     duration = args.duration if (args.duration is not None and args.duration > 0) else None
 
     coordinator = StressTestCoordinator(
@@ -1129,3 +1361,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

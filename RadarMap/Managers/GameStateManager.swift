@@ -5,65 +5,88 @@ import SwiftUI
 import CryptoKit
 
 public final class GameStateManager: ObservableObject {
-    @Published public var myCallsign: String {
-        didSet {
-            UserDefaults.standard.set(myCallsign, forKey: AppConstants.Storage.userCallsignKey)
-            let derivedId = GameStateManager.deriveMemberId(fromCallsign: myCallsign)
-            if derivedId != myMemberId {
-                myMemberId = derivedId
+    // MARK: - WCSession-synced fields
+    //
+    // Every field below is a pure read/write view onto `watchConnectivityManager.localLS` — the
+    // single source of truth shared with the companion device. There is no separate storage here:
+    // a local edit writes straight into `localLS` (via the matching `mutateLocal*` call), and a
+    // remote convergence merge updating `localLS` *is* these properties changing — there's no
+    // separate "adopt the remote value" step. Side effects that used to live in each property's
+    // `didSet` (persistence, `myMemberId` re-derivation, `updateLocalMember()`, etc.) now live in
+    // the single `$localLS` diff-sink in `bindManagers()`, since that's the one place both local
+    // edits and remote merges actually land.
+    public var myCallsign: String {
+        get { watchConnectivityManager.localLS.config.callsign }
+        set { watchConnectivityManager.mutateLocalConfig { $0.callsign = newValue } }
+    }
+    public var radarColorTheme: RadarColorTheme {
+        get { RadarColorTheme(rawValue: watchConnectivityManager.localLS.config.theme) ?? .green }
+        set { watchConnectivityManager.mutateLocalConfig { $0.theme = newValue.rawValue } }
+    }
+    public var savedRoomName: String {
+        get { watchConnectivityManager.localLS.config.roomName }
+        set { watchConnectivityManager.mutateLocalConfig { $0.roomName = newValue } }
+    }
+    public var savedPin: String {
+        get { watchConnectivityManager.localLS.config.pin }
+        set { watchConnectivityManager.mutateLocalConfig { $0.pin = newValue } }
+    }
+    /// Host-provided Firebase Realtime Database URL for squads that run against their own
+    /// Firebase project instead of the shared default (see BRING_YOUR_OWN_FIREBASE.md). Empty means
+    /// "use the shared default project."
+    public var customDatabaseURL: String {
+        get { watchConnectivityManager.localLS.config.databaseURL }
+        set { watchConnectivityManager.mutateLocalConfig { $0.databaseURL = newValue } }
+    }
+    public var isUploadHeartRateEnabled: Bool {
+        get { watchConnectivityManager.localLS.config.isUploadHeartRateEnabled }
+        set { watchConnectivityManager.mutateLocalConfig { $0.isUploadHeartRateEnabled = newValue } }
+    }
+    public var isUploadLocationEnabled: Bool {
+        get { watchConnectivityManager.localLS.config.isUploadLocationEnabled }
+        set {
+            watchConnectivityManager.mutateLocalConfig {
+                $0.isUploadLocationEnabled = newValue
+                if !newValue {
+                    $0.isUploadHeartRateEnabled = false
+                }
             }
-            updateLocalMember()
-            updateLocalPlayerMember()
-            updateAllTacticalIndicators()
-            syncConfigToWatchConnectivity()
         }
     }
+    /// Coarse room-lifecycle state, mirrored from `localLS.loginCycle`. `sessionStateMachine`,
+    /// `isInitiatingHost`, and `isJoining` (below) track richer local in-flight state that
+    /// `LoginCycleState`'s 3 coarse cases (inactive/hostActive/joinActive) don't capture, and stay
+    /// local-only.
+    public var isHosting: Bool {
+        get { watchConnectivityManager.localLS.loginCycle.loginCycle == .hostActive }
+        set { watchConnectivityManager.mutateLocalLoginCycle { $0.loginCycle = newValue ? .hostActive : .inactive } }
+    }
+    public var isDead: Bool {
+        get { watchConnectivityManager.localLS.playerState.isDead }
+        set { watchConnectivityManager.mutateLocalPlayerState { $0.isDead = newValue } }
+    }
+
+    // MARK: - Local-only fields
+
     @Published public var myMemberId: String {
         didSet {
             firebaseManager.localMemberId = myMemberId
+            persistentRemoteTelemetry.removeValue(forKey: myMemberId)
             updateLocalPlayerMember()
             updateOtherSquadMembers()
             updateAllTacticalIndicators()
-            syncConfigToWatchConnectivity()
         }
     }
     // Single Sources of Truth: Deterministic State Machines
     @Published public private(set) var mapStateMachine = MapStateMachine()
     @Published public private(set) var sessionStateMachine = SessionStateMachine()
-    @Published public private(set) var playerVitalStateMachine = PlayerVitalStateMachine()
-    
+
     // Synchronized Published State Accessors
     @Published public var selectedPresentation: TacticalPresentation = .radar {
         didSet {
             if mapStateMachine.presentation != selectedPresentation {
                 mapStateMachine.handle(.togglePresentation)
             }
-        }
-    }
-    @Published public var radarColorTheme: RadarColorTheme = .green {
-        didSet {
-            UserDefaults.standard.set(radarColorTheme.rawValue, forKey: AppConstants.Storage.radarColorThemeKey)
-            syncConfigToWatchConnectivity()
-        }
-    }
-    @Published public var savedRoomName: String {
-        didSet {
-            UserDefaults.standard.set(savedRoomName, forKey: AppConstants.Storage.savedRoomNameKey)
-            syncConfigToWatchConnectivity()
-        }
-    }
-    @Published public var savedPin: String {
-        didSet {
-            UserDefaults.standard.set(savedPin, forKey: AppConstants.Storage.savedPinKey)
-            syncConfigToWatchConnectivity()
-        }
-    }
-    /// Host-provided Firebase Realtime Database URL for squads that run against their own
-    /// Firebase project instead of the shared default (see BRING_YOUR_OWN_FIREBASE.md). Empty means
-    /// "use the shared default project."
-    @Published public var customDatabaseURL: String {
-        didSet {
-            UserDefaults.standard.set(customDatabaseURL, forKey: AppConstants.Storage.customDatabaseURLKey)
         }
     }
     /// Master switch for the custom database URL feature. Off: the URL field and camera button
@@ -92,36 +115,9 @@ public final class GameStateManager: ObservableObject {
         updated.insert(trimmed, at: 0)
         recentDatabaseURLs = Array(updated.prefix(AppConstants.UI.maxRecentDatabaseURLs))
     }
-    @Published public var isUploadHeartRateEnabled: Bool {
-        didSet {
-            UserDefaults.standard.set(isUploadHeartRateEnabled, forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
-            syncConfigToWatchConnectivity()
-        }
-    }
-    @Published public var isUploadLocationEnabled: Bool {
-        didSet {
-            UserDefaults.standard.set(isUploadLocationEnabled, forKey: AppConstants.Storage.isUploadLocationEnabledKey)
-            if !isUploadLocationEnabled && isUploadHeartRateEnabled {
-                isUploadHeartRateEnabled = false
-            }
-            syncConfigToWatchConnectivity()
-        }
-    }
-    @Published public var isHosting: Bool = false {
-        didSet {
-            updateLocalPlayerMember()
-            syncLoginCycleToWatchConnectivity()
-        }
-    }
     @Published public var isInitiatingHost: Bool = false
     @Published public var isJoining: Bool = false
     @Published public var showPaywallSheet: Bool = false
-    @Published public var isDead: Bool = AppConstants.Health.defaultIsDead {
-        didSet {
-            updateLocalPlayerMember()
-            syncPlayerStateToWatchConnectivity()
-        }
-    }
     @Published public var errorMessage: String? = nil
     
     // Canonical Scale & Map State
@@ -269,15 +265,8 @@ public final class GameStateManager: ObservableObject {
         if let err = sessionStateMachine.state.errorMessage {
             errorMessage = err
         }
-        syncLoginCycleToWatchConnectivity()
     }
-    
-    public func sendPlayerVitalAction(_ action: PlayerVitalAction) {
-        playerVitalStateMachine.handle(action)
-        isDead = playerVitalStateMachine.state.isDead
-        syncPlayerStateToWatchConnectivity(forceTimestampUpdate: true)
-    }
-    
+
     public func updateMapCenter(to coordinate: CLLocationCoordinate2D) {
         sendMapAction(.pan(to: coordinate, userCoord: localPlayerMember.coordinate))
     }
@@ -418,13 +407,12 @@ public final class GameStateManager: ObservableObject {
     }
     
     /// Sweep of expired non-order indicators plus `mti` cap enforcement, run by every member.
-    /// The Cloud Function `pruneExcessTacticalIndicators` (see CLOUD_DATA_MANAGEMENT.md) is the
-    /// authoritative pruner when it's deployed, but self-hosted rooms may not run Cloud Functions
-    /// at all — this mirrors its oldest-first eviction so the cap still holds without one. Every
-    /// member computes the same oldest-first overflow from the same merged `allTacticalIndicators`
-    /// view, so their deletes target the same IDs; a delete on an already-deleted path is a no-op,
-    /// so redundant deletes from multiple members are harmless rather than a race.
-    public func enforceTacticalIndicatorMaintenance() {
+    /// Operates via deterministic oldest-first eviction so the cap holds across all squad peers
+    /// without requiring a per-write Cloud Function trigger. Every member computes the same
+    /// oldest-first overflow from the same merged `allTacticalIndicators` view, so their deletes
+    /// target the same IDs; a delete on an already-deleted path is an idempotent no-op, so redundant
+    /// deletes from multiple members are harmless rather than a race.
+    public func enforceTacticalIndicatorMaintenance(room: SquadRoom? = nil) {
         let expiredIds = localIndicators.values.filter { $0.category != .squadOrder && $0.isExpired }.map { $0.id }
         let now = Date().timeIntervalSince1970
         for id in expiredIds {
@@ -432,7 +420,8 @@ public final class GameStateManager: ObservableObject {
             deletedIndicatorTombstones[id] = now
         }
 
-        let cap = firebaseManager.activeRoom?.maxTacticalIndicators ?? AppConstants.Subscription.freeTierMaxTacticalIndicators
+        let currentRoom = room ?? firebaseManager.activeRoom
+        let cap = currentRoom?.maxTacticalIndicators ?? (subscriptionManager.hasUnlimitedSquadUnlock ? AppConstants.Subscription.proTierMaxTacticalIndicators : AppConstants.Subscription.freeTierMaxTacticalIndicators)
         let cappedIndicators = allTacticalIndicators.filter { $0.category != .squadOrder }.sorted { $0.timestamp < $1.timestamp }
         guard cappedIndicators.count > cap else { return }
         for indicator in cappedIndicators.prefix(cappedIndicators.count - cap) {
@@ -447,6 +436,11 @@ public final class GameStateManager: ObservableObject {
         let currentRoom = room ?? firebaseManager.activeRoom
         guard let currentRoom = currentRoom else {
             if !otherSquadMembers.isEmpty { otherSquadMembers = [] }
+            let hadTelemetry = !persistentRemoteTelemetry.isEmpty
+            persistentRemoteTelemetry.removeAll()
+            if hadTelemetry {
+                advertiseWatchHighSpeedState()
+            }
             syncMembershipToWatchConnectivity()
             pruneSelectionIfStale()
             return
@@ -454,6 +448,12 @@ public final class GameStateManager: ObservableObject {
         let filtered = currentRoom.members.values.filter { $0.id != myMemberId }.sorted { $0.id < $1.id }
         if otherSquadMembers != filtered {
             otherSquadMembers = filtered
+        }
+        let previousCount = persistentRemoteTelemetry.count
+        let activeMemberIds = Set(currentRoom.members.keys)
+        persistentRemoteTelemetry = persistentRemoteTelemetry.filter { activeMemberIds.contains($0.key) }
+        if persistentRemoteTelemetry.count != previousCount {
+            advertiseWatchHighSpeedState()
         }
         syncMembershipToWatchConnectivity()
         pruneSelectionIfStale()
@@ -549,122 +549,65 @@ public final class GameStateManager: ObservableObject {
     public var lastLowSpeedPayloadSource: Character = "0"
     
     private var isApplyingRemoteSync: Bool = false
+    /// Last `localLS` this device has already reacted to — used by the `$localLS` sink in
+    /// `bindManagers()` to diff old vs. new and run field-change side effects exactly once,
+    /// regardless of whether the change was a local edit or a remote merge.
+    private var lastAppliedLS: LowSpeedSnapshot = LowSpeedSnapshot()
+    /// `config.roomName` as of the last remote-merge room-lifecycle adoption pass — tracked
+    /// separately from `lastAppliedLS` because `onLowSpeedConvergenceStateChanged` (remote-merge
+    /// only) needs "the value before this specific merge", and by the time it fires, the general
+    /// `$localLS` sink above has already advanced `lastAppliedLS` to the new value.
+    private var lastAdoptedRoomName: String = ""
     private var cancellables = Set<AnyCancellable>()
     private var localSequenceCounter: Int64 = 0
     private var timer: AnyCancellable?
     private var freshnessExpiryTimer: AnyCancellable?
+    private var activeAdvertisementTimer: AnyCancellable?
     private var deletedIndicatorTombstones: [String: TimeInterval] = [:]
+    internal private(set) var persistentRemoteTelemetry: [String: [Any]] = [:]
     
     public init(watchConnectivityManager: WatchConnectivityManager = WatchConnectivityManager.shared) {
         self.watchConnectivityManager = watchConnectivityManager
-        self.isApplyingRemoteSync = true
-        
-        let savedCallsign = UserDefaults.standard.string(forKey: AppConstants.Storage.userCallsignKey) ?? ""
-        self.myCallsign = savedCallsign
-        
-        self.myMemberId = GameStateManager.deriveMemberId(fromCallsign: savedCallsign)
-        self.savedRoomName = UserDefaults.standard.string(forKey: AppConstants.Storage.savedRoomNameKey) ?? ""
-        self.savedPin = UserDefaults.standard.string(forKey: AppConstants.Storage.savedPinKey) ?? ""
-        self.customDatabaseURL = UserDefaults.standard.string(forKey: AppConstants.Storage.customDatabaseURLKey) ?? ""
+
+        // Every synced field (callsign, roomName, pin, databaseURL, theme, upload toggles,
+        // isDead, isHosting) reads directly from `watchConnectivityManager.localLS`, which the
+        // manager already loaded/migrated from persistence in its own init — nothing to seed here.
         self.isCustomDatabaseURLEnabled = UserDefaults.standard.object(forKey: AppConstants.Storage.isCustomDatabaseURLEnabledKey) as? Bool ?? true
         self.recentDatabaseURLs = UserDefaults.standard.stringArray(forKey: AppConstants.Storage.recentDatabaseURLsKey) ?? []
-        
-        let savedUploadHR = UserDefaults.standard.object(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey) as? Bool ?? true
-        self.isUploadHeartRateEnabled = savedUploadHR
-        
-        let savedUploadLoc = UserDefaults.standard.object(forKey: AppConstants.Storage.isUploadLocationEnabledKey) as? Bool ?? true
-        self.isUploadLocationEnabled = savedUploadLoc
-        
+
+        self.myMemberId = GameStateManager.deriveMemberId(fromCallsign: watchConnectivityManager.localLS.config.callsign)
+
         firebaseManager.localMemberId = myMemberId
-        
+
         #if !os(watchOS)
         // Default resting heart rate on iOS standalone
         self.healthKitManager.currentHeartRate = AppConstants.Health.defaultRestingHeartRate
         #endif
-        
-        if let savedTheme = UserDefaults.standard.string(forKey: AppConstants.Storage.radarColorThemeKey),
-           let theme = RadarColorTheme(rawValue: savedTheme) {
-            self.radarColorTheme = theme
-        }
-        
-        self.isDead = watchConnectivityManager.localLS.playerState.isDead
-        self.playerVitalStateMachine = PlayerVitalStateMachine(initialState: self.isDead ? .downed : .active(heartRate: AppConstants.Health.defaultRestingHeartRate))
-        
+
+        self.lastAppliedLS = watchConnectivityManager.localLS
+        self.lastAdoptedRoomName = watchConnectivityManager.localLS.config.roomName
+
         updateLocalPlayerMember()
         updateOtherSquadMembers()
         updateAllTacticalIndicators()
-        
+
         setupWatchConnectivity()
         bindManagers()
         locationHeadingManager.requestPermissions()
         locationHeadingManager.startUpdates()
-        
+
         // Request HealthKit workout session authorization at app launch
         healthKitManager.requestAuthorization()
-        
-        self.isApplyingRemoteSync = false
     }
-    
+
     // MARK: - Outbound WCSession Structure Synchronization
-    
-    public func syncConfigToWatchConnectivity(timestamp: TimeInterval? = nil) {
-        guard !isApplyingRemoteSync else { return }
-        let current = watchConnectivityManager.localLS.config
-        let isPro = subscriptionManager.hasUnlimitedSquadUnlock
-        if current.callsign == myCallsign &&
-           current.roomName == savedRoomName &&
-           current.pin == savedPin &&
-           current.databaseURL == customDatabaseURL &&
-           current.theme == radarColorTheme.rawValue &&
-           current.isPro == isPro &&
-           current.isUploadHeartRateEnabled == isUploadHeartRateEnabled &&
-           current.isUploadLocationEnabled == isUploadLocationEnabled {
-            return
-        }
-        let now = timestamp ?? Date().timeIntervalSince1970
-        let config = ConfigSnapshot(
-            callsign: myCallsign,
-            roomName: savedRoomName,
-            pin: savedPin,
-            databaseURL: customDatabaseURL,
-            theme: radarColorTheme.rawValue,
-            isPro: isPro,
-            isUploadHeartRateEnabled: isUploadHeartRateEnabled,
-            isUploadLocationEnabled: isUploadLocationEnabled,
-            configTs: now
-        )
-        watchConnectivityManager.updateLocalStructures(config: config)
-    }
-    
-    public func syncLoginCycleToWatchConnectivity(timestamp: TimeInterval? = nil) {
-        guard !isApplyingRemoteSync else { return }
-        let state: LoginCycleState
-        if isHosting {
-            state = .hostActive
-        } else if sessionStateMachine.state.isActiveSession {
-            state = .joinActive
-        } else {
-            state = .inactive
-        }
-        if watchConnectivityManager.localLS.loginCycle.loginCycle == state {
-            return
-        }
-        let now = timestamp ?? Date().timeIntervalSince1970
-        let cycle = LoginCycleSnapshot(loginCycle: state, loginCycleTs: now)
-        watchConnectivityManager.updateLocalStructures(loginCycle: cycle)
-    }
-    
-    public func syncPlayerStateToWatchConnectivity(timestamp: TimeInterval? = nil, forceTimestampUpdate: Bool = false) {
-        guard !isApplyingRemoteSync else { return }
-        let currentSnapshot = watchConnectivityManager.localLS.playerState
-        if !forceTimestampUpdate && currentSnapshot.isDead == isDead && timestamp == nil {
-            return
-        }
-        let now = timestamp ?? Date().timeIntervalSince1970
-        let ps = PlayerStateSnapshot(isDead: isDead, isDeadTs: now)
-        watchConnectivityManager.updateLocalStructures(playerState: ps)
-    }
-    
+    //
+    // Config/playerState/loginCycle no longer need explicit sync functions — writes go straight
+    // through the computed properties above (`myCallsign = ...`, `isDead = ...`, etc.), which call
+    // `watchConnectivityManager.mutateLocal*` directly. Membership/tactical remain here since
+    // they're serialized *views* of other owned state (Firebase room membership, local tactical
+    // indicators), not simple leaf fields with a 1:1 property to assign through.
+
     public func syncMembershipToWatchConnectivity(timestamp: TimeInterval? = nil) {
         guard !isApplyingRemoteSync else { return }
         guard let room = firebaseManager.activeRoom else {
@@ -699,30 +642,58 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
-    // MARK: - Inbound WCSession Callbacks & Watch-Centric Cloud Policy
-    
-    private func setupWatchConnectivity() {
-        // High-speed remote telemetry hook (Watch -> Phone)
-        #if os(watchOS)
-        firebaseManager.onRemoteTelemetryPacketsReceived = { [weak self] packets in
-            guard let self = self else { return }
-            var telemetryMap: [String: Any] = [:]
-            for packet in packets {
-                if packet.memberId != self.myMemberId {
-                    telemetryMap[packet.memberId] = packet.toCompactArray()
-                }
-            }
-            if !telemetryMap.isEmpty,
-               let data = try? JSONSerialization.data(withJSONObject: telemetryMap),
-               let json = String(data: data, encoding: .utf8) {
-                let hr = self.isDead ? AppConstants.Health.flatlineHeartRate : (self.healthKitManager.currentHeartRate > 0 ? self.healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
-                self.watchConnectivityManager.advertiseWatchHighSpeed(heartRate: hr, remotePlayerTelemetryJson: json)
+    /// Updates persistent remote telemetry map with incoming packets, prunes departed members,
+    /// and advertises the complete accumulated snapshot over WatchConnectivity (Watch -> Phone).
+    public func updateRemoteTelemetry(packets: [TelemetryPacket] = []) {
+        for packet in packets {
+            if packet.memberId != myMemberId {
+                persistentRemoteTelemetry[packet.memberId] = packet.toCompactArray()
             }
         }
-        #endif
         
+        // Prune departed members who are no longer in the active squad room
+        if let room = firebaseManager.activeRoom {
+            let activeIds = Set(room.members.keys)
+            persistentRemoteTelemetry = persistentRemoteTelemetry.filter { activeIds.contains($0.key) }
+        }
+        
+        advertiseWatchHighSpeedState()
+    }
+    
+    /// Serializes and advertises the complete accumulated remote telemetry snapshot (Watch -> Phone).
+    public func advertiseWatchHighSpeedState(heartRate: Double? = nil) {
+        guard watchConnectivityManager.localRole == .watch else { return }
+        let effectiveHr: Double
+        if let hr = heartRate {
+            effectiveHr = isDead ? AppConstants.Health.flatlineHeartRate : hr
+        } else {
+            effectiveHr = isDead ? AppConstants.Health.flatlineHeartRate : (healthKitManager.currentHeartRate > 0 ? healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
+        }
+        let json: String
+        if !persistentRemoteTelemetry.isEmpty,
+           let data = try? JSONSerialization.data(withJSONObject: persistentRemoteTelemetry),
+           let str = String(data: data, encoding: .utf8) {
+            json = str
+        } else {
+            json = "{}"
+        }
+        watchConnectivityManager.advertiseWatchHighSpeed(heartRate: effectiveHr, remotePlayerTelemetryJson: json)
+    }
+    
+    // MARK: - Inbound WCSession Callbacks & Watch-Centric Cloud Policy
+
+    private func setupWatchConnectivity() {
+        // High-speed remote telemetry hook (Watch -> Phone)
+        #if os(watchOS) || DEBUG
+        firebaseManager.onRemoteTelemetryPacketsReceived = { [weak self] packets in
+            guard let self = self else { return }
+            guard self.watchConnectivityManager.localRole == .watch else { return }
+            self.updateRemoteTelemetry(packets: packets)
+        }
+        #endif
+
         // 1. High-speed remote telemetry
-        watchConnectivityManager.onHighSpeedTelemetryReceived = { [weak self] (telemetryJson: String, freshUntil: TimeInterval) in
+        watchConnectivityManager.onHighSpeedTelemetryReceived = { [weak self] (telemetryJson: String) in
             guard let self = self else { return }
             guard let data = telemetryJson.data(using: .utf8),
                   let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
@@ -738,13 +709,11 @@ public final class GameStateManager: ObservableObject {
             if !packets.isEmpty {
                 self.firebaseManager.validateAndProcessPackets(packets)
             }
-            #if !os(watchOS)
-            self.evaluatePhoneCloudClientPolicy()
-            #endif
+            self.evaluateListenerGate()
         }
         
         // 2. High-speed optical heart rate (Watch -> Phone)
-        watchConnectivityManager.onHighSpeedHeartRateReceived = { [weak self] (hr: Double, freshUntil: TimeInterval) in
+        watchConnectivityManager.onHighSpeedHeartRateReceived = { [weak self] (hr: Double) in
             guard let self = self else { return }
             if self.isDead {
                 self.healthKitManager.currentHeartRate = AppConstants.Health.flatlineHeartRate
@@ -753,12 +722,10 @@ public final class GameStateManager: ObservableObject {
             }
         }
         
-        // 3. Lease status changed (Watch active_until lease monitored on Phone)
+        // 3. Lease status changed (peer active_until lease monitored locally)
         watchConnectivityManager.onWatchLeaseStatusChanged = { [weak self] isWatchActive in
             guard let self = self else { return }
-            #if !os(watchOS)
-            self.evaluatePhoneCloudClientPolicy()
-            #endif
+            self.evaluateListenerGate()
         }
         
         // 4. Low-speed converged snapshot received
@@ -770,52 +737,21 @@ public final class GameStateManager: ObservableObject {
             #else
             self.lastLowSpeedPayloadSource = "W"
             #endif
+            // Config/playerState field adoption itself needs nothing here — `mergedSnapshot` has
+            // already been assigned into `watchConnectivityManager.localLS` (and the `$localLS`
+            // sink in `bindManagers()` has already reacted to it) by the time this callback fires.
+            // What's left is room-lifecycle side effects, which are remote-merge-specific (a local
+            // host/join action drives Firebase directly via `hostRoom`/`joinRoom`, not through
+            // here) and so can't live in that general sink.
             self.isApplyingRemoteSync = true
-            
-            // Config adoption
+
             let config = mergedSnapshot.config
-            // Captured before the write below so the room-lifecycle switch can tell whether the
-            // room name textbox actually changed, rather than comparing against
-            // firebaseManager.activeRoom?.id — which is the derived (salted+padded) Firebase room
-            // id, never equal to the plain name carried in config.roomName.
-            let previousRoomName = self.savedRoomName
-            if !config.callsign.isEmpty && self.myCallsign != config.callsign {
-                self.myCallsign = config.callsign
-            }
-            if !config.roomName.isEmpty && self.savedRoomName != config.roomName {
-                self.savedRoomName = config.roomName
-            }
-            if !config.pin.isEmpty && self.savedPin != config.pin {
-                self.savedPin = config.pin
-            }
-            // Unlike roomName/pin above, empty is a meaningful value here ("use the shared
-            // default project"), so it's adopted unconditionally rather than skipped.
-            if self.customDatabaseURL != config.databaseURL {
-                self.customDatabaseURL = config.databaseURL
-            }
-            if let theme = RadarColorTheme(rawValue: config.theme), self.radarColorTheme != theme {
-                self.radarColorTheme = theme
-            }
-            if self.subscriptionManager.hasUnlimitedSquadUnlock != config.isPro {
-                self.subscriptionManager.hasUnlimitedSquadUnlock = config.isPro
-                UserDefaults.standard.set(config.isPro, forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
-            }
-            if self.isUploadHeartRateEnabled != config.isUploadHeartRateEnabled {
-                self.isUploadHeartRateEnabled = config.isUploadHeartRateEnabled
-                UserDefaults.standard.set(config.isUploadHeartRateEnabled, forKey: AppConstants.Storage.isUploadHeartRateEnabledKey)
-            }
-            if self.isUploadLocationEnabled != config.isUploadLocationEnabled {
-                self.isUploadLocationEnabled = config.isUploadLocationEnabled
-                UserDefaults.standard.set(config.isUploadLocationEnabled, forKey: AppConstants.Storage.isUploadLocationEnabledKey)
-            }
-            
-            // Player state adoption
-            let ps = mergedSnapshot.playerState
-            if self.isDead != ps.isDead {
-                self.setDead(ps.isDead, syncRemote: false)
-            }
-            
-            // Room lifecycle adoption
+            // Captured by the previous pass through this callback (not `self.savedRoomName`,
+            // which by now already reflects `mergedSnapshot` itself) so this switch can tell
+            // whether the room name actually changed since the last remote merge.
+            let previousRoomName = self.lastAdoptedRoomName
+            self.lastAdoptedRoomName = config.roomName
+
             let cycle = mergedSnapshot.loginCycle
             switch cycle.loginCycle {
             case .hostActive:
@@ -836,7 +772,7 @@ public final class GameStateManager: ObservableObject {
                     self.firebaseManager.resetLocalSessionAndIcons()
                 }
             }
-            
+
             // Tactical indicators adoption — watch only (phone is the canonical owner of localIndicators)
             #if os(watchOS)
             if let tacData = mergedSnapshot.tactical.tacticalJson.data(using: .utf8),
@@ -883,34 +819,48 @@ public final class GameStateManager: ObservableObject {
         // 5. Reachability changes
         watchConnectivityManager.onReachabilityChanged = { [weak self] _ in
             guard let self = self else { return }
-            #if !os(watchOS)
-            self.evaluatePhoneCloudClientPolicy()
-            #endif
+            self.evaluateListenerGate()
         }
     }
     
-    /// Watch-Centric Cloud Policy:
-    /// Watch is ALWAYS the primary cloud client during an active session.
-    /// Phone is on stand-by and only connects to cloud if Watch lease expires (Phone.Time > w2p_hs.active_until).
-    public func evaluatePhoneCloudClientPolicy() {
-        #if !os(watchOS)
-        let isWatchActive = watchConnectivityManager.isWatchLeaseActive
-        let hasActiveSession = isTacticalSessionActive
-        
-        if hasActiveSession {
-            if isWatchActive {
-                // Watch is active cloud client; Phone stands down to conserve battery
-                if firebaseManager.isConnected {
-                    firebaseManager.stopTelemetryPolling()
-                }
-            } else {
-                // Watch is absent or lease expired; Phone assumes cloud client duties
-                if let roomId = firebaseManager.activeRoom?.id ?? (!savedRoomName.isEmpty ? savedRoomName : nil) {
-                    firebaseManager.startTelemetryPolling(roomId: roomId)
-                }
-            }
+    /// Determines whether realtime downstream listeners should be attached, based on platform-specific rules:
+    /// - Watch: appActive || peerLeaseActive
+    ///   (app_active OR watch.Time < p2w_hs.active_until)
+    /// - Phone: appActive && !peerLeaseActive
+    ///   (app_active AND phone.time > w2p_hs.active_until)
+    public static func shouldAttachListeners(isWatch: Bool, appActive: Bool, peerLeaseActive: Bool) -> Bool {
+        if isWatch {
+            return appActive || peerLeaseActive
+        } else {
+            return appActive && !peerLeaseActive
         }
+    }
+
+    /// Listener attach/detach gate: decides whether this device should have the three realtime
+    /// Firebase listeners attached right now. Independent of the Uplink/ownership gate
+    /// (`hasNetworkOwnership`) — a device can be gated off writes while still needing listeners
+    /// attached (or vice versa).
+    ///
+    /// Differentiated per platform per architecture specification:
+    /// - Watch: appActive || peerLeaseActive
+    ///   i.e. app_active OR (watch.Time < p2w_hs.active_until)
+    /// - Phone: appActive && !peerLeaseActive
+    ///   i.e. app_active AND (phone.time > w2p_hs.active_until)
+    public func evaluateListenerGate() {
+        guard isTacticalSessionActive,
+              let roomId = firebaseManager.activeRoom?.id ?? (!savedRoomName.isEmpty ? savedRoomName : nil) else {
+            firebaseManager.stopTelemetryPolling()
+            return
+        }
+        let appActive = firebaseManager.isWristActive
+        let peerLeaseActive = watchConnectivityManager.isWatchLeaseActive
+        #if os(watchOS)
+        let isWatch = true
+        #else
+        let isWatch = false
         #endif
+        let shouldAttach = Self.shouldAttachListeners(isWatch: isWatch, appActive: appActive, peerLeaseActive: peerLeaseActive)
+        shouldAttach ? firebaseManager.startTelemetryPolling(roomId: roomId) : firebaseManager.stopTelemetryPolling()
     }
     
     private func bindManagers() {
@@ -921,7 +871,7 @@ public final class GameStateManager: ObservableObject {
             .sink { [weak self] room in
                 guard let self = self else { return }
                 #if os(watchOS)
-                let isCompanionActive = self.isPhoneActive || ((self.watchConnectivityManager.latestRemoteHSFreshUntil > Date().timeIntervalSince1970) && self.watchConnectivityManager.isReachable)
+                let isCompanionActive = self.isPhoneActive || (self.watchConnectivityManager.isWatchLeaseActive && self.watchConnectivityManager.isReachable)
                 #else
                 let isCompanionActive = false
                 #endif
@@ -938,9 +888,23 @@ public final class GameStateManager: ObservableObject {
                 self?.errorMessage = error
             }
             .store(in: &cancellables)
+
+        // Re-evaluates the Listener gate and the active-advertisement timer on a bare scenePhase
+        // flip, even with no companion event (telemetry/lease/reachability) in flight to trigger
+        // them otherwise. `@Published` publishes from `willSet`, before the backing field is
+        // actually updated, so re-reading `firebaseManager.isWristActive` from a synchronous sink
+        // would see the stale value — `.receive(on:)` defers to the next run loop turn, by which
+        // point the write has landed.
+        firebaseManager.$isWristActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.evaluateListenerGate()
+                self?.updateActiveAdvertisementTimer()
+            }
+            .store(in: &cancellables)
         
         Publishers.CombineLatest3(
-            $isHosting,
+            watchConnectivityManager.$localLS.map { $0.loginCycle.loginCycle == .hostActive },
             firebaseManager.$activeRoom,
             $myMemberId
         )
@@ -966,7 +930,7 @@ public final class GameStateManager: ObservableObject {
                 self.updateOtherSquadMembers(room: newRoom)
                 self.updateAllTacticalIndicators(room: newRoom)
                 self.updateLocalPlayerMember()
-                self.enforceTacticalIndicatorMaintenance()
+                self.enforceTacticalIndicatorMaintenance(room: newRoom)
             }
             .store(in: &cancellables)
             
@@ -980,11 +944,66 @@ public final class GameStateManager: ObservableObject {
         subscriptionManager.$hasUnlimitedSquadUnlock
             .dropFirst()
             .sink { [weak self] isUnlocked in
-                guard let self = self, !self.isApplyingRemoteSync else { return }
-                self.syncConfigToWatchConnectivity()
+                guard let self = self else { return }
+                self.watchConnectivityManager.mutateLocalConfig { $0.isPro = isUnlocked }
             }
             .store(in: &cancellables)
-            
+
+        // myMemberId re-derivation specifically needs to happen synchronously/immediately (not
+        // deferred to the next run loop turn like the general sink below) — it used to run inside
+        // `myCallsign`'s own `didSet`, atomically with the callsign change, and other code (tests
+        // included) can legitimately overwrite `myMemberId` directly afterward; a deferred
+        // re-derivation firing later would stomp that override out from under it. This sink only
+        // reads the value Combine hands it (`newCallsign`) and `self.myMemberId` (a plain,
+        // non-`localLS`-derived property) — neither is subject to the `@Published`
+        // willSet-vs-actual-value lag described below, so no `.receive(on:)` is needed here.
+        watchConnectivityManager.$localLS
+            .map { $0.config.callsign }
+            .removeDuplicates()
+            .dropFirst()
+            .sink { [weak self] newCallsign in
+                guard let self = self else { return }
+                let derivedId = GameStateManager.deriveMemberId(fromCallsign: newCallsign)
+                if derivedId != self.myMemberId {
+                    self.myMemberId = derivedId
+                }
+            }
+            .store(in: &cancellables)
+
+        // Single funnel for the rest of `localLS`'s field-change side effects — fires identically
+        // whether the change was a local edit (a computed-property setter above) or a remote
+        // convergence merge, since both ultimately just assign into
+        // `watchConnectivityManager.localLS`. `@Published` publishes from `willSet`, before the
+        // backing field is actually updated, so reading `watchConnectivityManager.localLS` (e.g.
+        // via the `isDead`/`myCallsign`/etc. computed properties, which the side effects below
+        // call into) from a synchronous sink would see the stale pre-change value —
+        // `.receive(on:)` defers to the next run loop turn, by which point the write has landed
+        // (same fix as the `$isWristActive` sink above).
+        watchConnectivityManager.$localLS
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] newLS in
+                guard let self = self else { return }
+                let old = self.lastAppliedLS
+                self.lastAppliedLS = newLS
+
+                if old.config.callsign != newLS.config.callsign {
+                    self.updateLocalMember()
+                    self.updateAllTacticalIndicators()
+                }
+                if old.playerState.isDead != newLS.playerState.isDead
+                    || old.loginCycle.loginCycle != newLS.loginCycle.loginCycle
+                    || old.config.callsign != newLS.config.callsign {
+                    self.updateLocalPlayerMember()
+                }
+                if self.subscriptionManager.hasUnlimitedSquadUnlock != newLS.config.isPro {
+                    self.subscriptionManager.hasUnlimitedSquadUnlock = newLS.config.isPro
+                    UserDefaults.standard.set(newLS.config.isPro, forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
+                }
+            }
+            .store(in: &cancellables)
+
+
         // Stream location updates to network telemetry.
         locationHeadingManager.$userLocation
             .compactMap { $0 }
@@ -1001,7 +1020,7 @@ public final class GameStateManager: ObservableObject {
                 #if os(watchOS)
                 let effectiveHr = self.isDead ? AppConstants.Health.flatlineHeartRate : hr
                 if effectiveHr > 0 || self.isDead {
-                    self.watchConnectivityManager.advertiseWatchHighSpeed(heartRate: effectiveHr)
+                    self.advertiseWatchHighSpeedState(heartRate: effectiveHr)
                 }
                 #endif
                 self.broadcastLocalTelemetry(heartRate: hr, force: false)
@@ -1081,6 +1100,8 @@ public final class GameStateManager: ObservableObject {
         restartHeartbeatTimer()
         startDeadReckoningTimer()
         startTTLRefreshTimer()
+        evaluateListenerGate()
+        updateActiveAdvertisementTimer()
     }
 
     public func stopTacticalSession() {
@@ -1096,6 +1117,8 @@ public final class GameStateManager: ObservableObject {
         deadReckoningTimer = nil
         freshnessExpiryTimer?.cancel()
         freshnessExpiryTimer = nil
+        activeAdvertisementTimer?.cancel()
+        activeAdvertisementTimer = nil
         remoteDisplayPositions = [:]
         lastSentLocation = nil
         lastSentHeading = nil
@@ -1119,6 +1142,50 @@ public final class GameStateManager: ObservableObject {
                 guard let self = self, self.isCurrentMemberHost, let roomId = self.firebaseManager.activeRoom?.id else { return }
                 self.firebaseManager.refreshRoomExpiry(roomId: roomId)
             }
+    }
+
+    /// Guarantees this device's own `active_until` lease (`p2w_hs` on Phone, `w2p_hs` on Watch)
+    /// refreshes at least once per `activeAdvertisementCadenceSeconds` while genuinely active, so
+    /// a gap in incidental traffic (no HR sample, no telemetry to relay) can't let the 5s lease
+    /// lapse and trigger a spurious ownership/listener flip. Gated on `isTacticalSessionActive &&
+    /// isWristActive`, not `isWristActive` alone — advertising a lease only means something when
+    /// there's an actual session for the peer to help with.
+    ///
+    /// Deliberately NOT gated on `isReachable`: that property reflects live two-way messaging
+    /// availability (foreground/high-priority-background), which is known to unreliably read
+    /// `false` even while a companion is genuinely alive and running (e.g. a watch mid-workout
+    /// with the screen off) — exactly this app's primary posture. `updateApplicationContext`
+    /// (what this ultimately calls) is explicitly designed to keep working via the system
+    /// WatchConnectivity daemon regardless of reachability, so gating on it would risk suppressing
+    /// real lease refreshes to a backgrounded-but-active companion for a negligible power saving.
+    private func updateActiveAdvertisementTimer() {
+        guard isTacticalSessionActive, firebaseManager.isWristActive else {
+            activeAdvertisementTimer?.cancel()
+            activeAdvertisementTimer = nil
+            return
+        }
+        guard activeAdvertisementTimer == nil else { return }
+        advertiseActiveLease()
+        activeAdvertisementTimer = Timer.publish(every: AppConstants.WatchConnectivity.activeAdvertisementCadenceSeconds, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                self?.advertiseActiveLease()
+            }
+    }
+
+    /// Test-only observation hook: fires whenever `advertiseActiveLease()` runs, since the actual
+    /// WCSession send it triggers has no externally observable effect in a host-only (e.g.
+    /// `swift test` on macOS) environment where `WCSession.isSupported()` is false. Not called in
+    /// production logic — only ever set by tests.
+    var onActiveLeaseAdvertised: (() -> Void)?
+
+    private func advertiseActiveLease() {
+        #if os(watchOS)
+        advertiseWatchHighSpeedState()
+        #else
+        watchConnectivityManager.advertisePhoneHighSpeed()
+        #endif
+        onActiveLeaseAdvertised?()
     }
 
     /// Recomputes `remoteDisplayPositions` at a fixed cadence
@@ -1148,15 +1215,14 @@ public final class GameStateManager: ObservableObject {
     }
     
     public func purgeLocalSessionAndIcons() {
+        persistentRemoteTelemetry.removeAll()
         deletedIndicatorTombstones.removeAll()
         localIndicators.removeAll()
         allTacticalIndicators.removeAll()
         otherSquadMembers.removeAll()
         firebaseManager.resetLocalSessionAndIcons()
         isDead = AppConstants.Health.defaultIsDead
-        sendPlayerVitalAction(.setKIA(AppConstants.Health.defaultIsDead))
         updateLocalPlayerMember()
-        syncPlayerStateToWatchConnectivity(forceTimestampUpdate: true)
         syncMembershipToWatchConnectivity()
         syncTacticalToWatchConnectivity()
     }
@@ -1181,12 +1247,10 @@ public final class GameStateManager: ObservableObject {
             healthKitManager.resumeLiveHeartRateSession()
         }
         firebaseManager.setWristActive(true)
-        #if !os(watchOS)
-        evaluatePhoneCloudClientPolicy()
-        #endif
+        evaluateListenerGate()
     }
 
-    
+
     public func handleAppSuspend() {
         locationHeadingManager.enterLowPowerMode()
         if isTacticalSessionActive {
@@ -1195,6 +1259,7 @@ public final class GameStateManager: ObservableObject {
             healthKitManager.stopLiveHeartRateSession()
         }
         firebaseManager.setWristActive(false)
+        evaluateListenerGate()
     }
     
     public func triggerWakeBurst() {
@@ -1566,14 +1631,8 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
-    public func setDead(_ dead: Bool, syncRemote: Bool = true) {
-        if !syncRemote {
-            isApplyingRemoteSync = true
-        }
-        sendPlayerVitalAction(.setKIA(dead))
-        if !syncRemote {
-            isApplyingRemoteSync = false
-        }
+    public func setDead(_ dead: Bool) {
+        isDead = dead
         let now = Date().timeIntervalSince1970
         if var room = firebaseManager.activeRoom, var member = room.members[myMemberId] {
             member.status = dead ? .downed : .active
@@ -1873,7 +1932,7 @@ extension GameStateManager {
         
         #if os(watchOS)
         // Character 1: Other player telemetry stream
-        let isReceivingFromPhone = (isPhoneActive || watchConnectivityManager.isReachable) && (watchConnectivityManager.latestRemoteHSFreshUntil > now)
+        let isReceivingFromPhone = (isPhoneActive || watchConnectivityManager.isReachable) && watchConnectivityManager.isWatchLeaseActive
         if isReceivingFromPhone {
             otherPlayerChar = "P"
         } else if firebaseManager.isConnected && firebaseManager.activeRoom != nil {
@@ -1897,7 +1956,7 @@ extension GameStateManager {
         }
         
         // Character 2: Watch -> Phone HR telemetry stream
-        if watchConnectivityManager.latestRemoteHSFreshUntil > now {
+        if watchConnectivityManager.isWatchLeaseActive {
             watchHRChar = "W"
         } else {
             watchHRChar = "0"

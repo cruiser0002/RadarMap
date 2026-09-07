@@ -138,24 +138,20 @@ public struct PlayerStateSnapshot: Codable, Equatable {
 
 public struct PhoneToWatchHighSpeed: Codable, Equatable {
     public var activeUntil: TimeInterval
-    public var freshUntil: TimeInterval
     public var remotePlayerTelemetryJson: String
     
     public init(
         activeUntil: TimeInterval = 0,
-        freshUntil: TimeInterval = 0,
         remotePlayerTelemetryJson: String = "{}"
     ) {
         self.activeUntil = activeUntil
-        self.freshUntil = freshUntil
         self.remotePlayerTelemetryJson = remotePlayerTelemetryJson
     }
     
     enum CodingKeys: String, CodingKey {
         case activeUntil = "active_until"
-        case freshUntil = "fresh_until"
         case remotePlayerTelemetryJson = "remote_telemetry"
-        case legacyFreshUntil = "freshUntil"
+        case slideRemoteTelemetrySnapshot = "remote_player_telemetry_snapshot"
         case legacyRemoteTelemetryJson = "remotePlayerTelemetryJson"
         case legacyActiveUntil = "activeUntil"
     }
@@ -164,44 +160,38 @@ public struct PhoneToWatchHighSpeed: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.activeUntil = (try? container.decode(TimeInterval.self, forKey: .activeUntil)) ??
                            (try? container.decode(TimeInterval.self, forKey: .legacyActiveUntil)) ?? 0.0
-        self.freshUntil = (try? container.decode(TimeInterval.self, forKey: .freshUntil)) ??
-                          (try? container.decode(TimeInterval.self, forKey: .legacyFreshUntil)) ?? 0.0
         self.remotePlayerTelemetryJson = (try? container.decode(String.self, forKey: .remotePlayerTelemetryJson)) ??
+                                        (try? container.decode(String.self, forKey: .slideRemoteTelemetrySnapshot)) ??
                                         (try? container.decode(String.self, forKey: .legacyRemoteTelemetryJson)) ?? "{}"
     }
     
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(activeUntil, forKey: .activeUntil)
-        try container.encode(freshUntil, forKey: .freshUntil)
         try container.encode(remotePlayerTelemetryJson, forKey: .remotePlayerTelemetryJson)
     }
 }
 
 public struct WatchToPhoneHighSpeed: Codable, Equatable {
     public var activeUntil: TimeInterval
-    public var freshUntil: TimeInterval
     public var heartRate: Double
     public var remotePlayerTelemetryJson: String
     
     public init(
         activeUntil: TimeInterval = 0,
-        freshUntil: TimeInterval = 0,
         heartRate: Double = 75.0,
         remotePlayerTelemetryJson: String = "{}"
     ) {
         self.activeUntil = activeUntil
-        self.freshUntil = freshUntil
         self.heartRate = heartRate
         self.remotePlayerTelemetryJson = remotePlayerTelemetryJson
     }
     
     enum CodingKeys: String, CodingKey {
         case activeUntil = "active_until"
-        case freshUntil = "fresh_until"
         case heartRate = "hr"
         case remotePlayerTelemetryJson = "remote_telemetry"
-        case legacyFreshUntil = "freshUntil"
+        case slideRemoteTelemetrySnapshot = "remote_player_telemetry_snapshot"
         case legacyHeartRate = "heartRate"
         case legacyRemoteTelemetryJson = "remotePlayerTelemetryJson"
         case legacyActiveUntil = "activeUntil"
@@ -211,18 +201,16 @@ public struct WatchToPhoneHighSpeed: Codable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.activeUntil = (try? container.decode(TimeInterval.self, forKey: .activeUntil)) ??
                            (try? container.decode(TimeInterval.self, forKey: .legacyActiveUntil)) ?? 0.0
-        self.freshUntil = (try? container.decode(TimeInterval.self, forKey: .freshUntil)) ??
-                          (try? container.decode(TimeInterval.self, forKey: .legacyFreshUntil)) ?? 0.0
         self.heartRate = (try? container.decode(Double.self, forKey: .heartRate)) ??
                          (try? container.decode(Double.self, forKey: .legacyHeartRate)) ?? 75.0
         self.remotePlayerTelemetryJson = (try? container.decode(String.self, forKey: .remotePlayerTelemetryJson)) ??
+                                        (try? container.decode(String.self, forKey: .slideRemoteTelemetrySnapshot)) ??
                                         (try? container.decode(String.self, forKey: .legacyRemoteTelemetryJson)) ?? "{}"
     }
     
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(activeUntil, forKey: .activeUntil)
-        try container.encode(freshUntil, forKey: .freshUntil)
         try container.encode(heartRate, forKey: .heartRate)
         try container.encode(remotePlayerTelemetryJson, forKey: .remotePlayerTelemetryJson)
     }

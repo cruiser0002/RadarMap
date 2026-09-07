@@ -216,6 +216,16 @@ public struct HUDGuideView: View {
                         }
                         
                         HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "ruler.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(tacticalGreen)
+                                .frame(width: 18)
+                            Text("**Tap-to-Measure Range:** Tap any teammate or POI to draw a live distance line with 2D ground (XY) distance at the midpoint. Tap again to clear.")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        HStack(alignment: .top, spacing: 8) {
                             Image(systemName: "antenna.radiowaves.left.and.right")
                                 .font(.system(size: 12))
                                 .foregroundStyle(tacticalGreen)

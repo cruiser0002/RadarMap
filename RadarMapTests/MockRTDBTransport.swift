@@ -32,6 +32,10 @@ final class MockRTDBTransport: RTDBTransport {
     private(set) var recordedObservedPaths: [(path: String, eventType: RTDBEventType)] = []
     private var nextHandle: RTDBObserverHandle = 1
 
+    /// Count of currently-attached observers (attach/detach aware, unlike the append-only
+    /// `recordedObservedPaths` log) — used by tests asserting Listener-gate attach/detach state.
+    var activeObserverCount: Int { observers.count }
+
     func reset() {
         root.removeAll()
         failingPaths.removeAll()

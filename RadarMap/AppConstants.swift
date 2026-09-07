@@ -632,6 +632,9 @@ public enum AppConstants {
             public static let circleHitboxSize: CGSize = CGSize(width: 68.0, height: 68.0)
             public static let rectHitboxSize: CGSize = CGSize(width: 112.0, height: 64.0)
             #endif
+
+            /// Duration in seconds for the numerical heart rate display to fade from full brightness to 0.
+            public static let heartRateFadeDurationSeconds: Double = 3.0
         }
         
         /// Tactical Map Markers sizing and label styling
@@ -716,7 +719,6 @@ public enum AppConstants {
         public static let w2pLSKey = "w2p_ls"
         
         public static let defaultHighSpeedCadenceSeconds: TimeInterval = 1.0
-        public static let defaultFreshnessTTLSeconds: TimeInterval = 3.0
         public static let activeUntilLeaseDurationSeconds: TimeInterval = 5.0
         public static let activeAdvertisementCadenceSeconds: TimeInterval = 1.0
     }

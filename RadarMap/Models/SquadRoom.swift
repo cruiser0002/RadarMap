@@ -16,7 +16,7 @@ public struct SquadRoom: Identifiable, Codable, Equatable {
         id: String,
         hostId: String,
         maxCapacity: Int = AppConstants.Subscription.freeTierMaxCapacity,
-        maxTacticalIndicators: Int = AppConstants.Subscription.freeTierMaxTacticalIndicators,
+        maxTacticalIndicators: Int = AppConstants.Subscription.proTierMaxTacticalIndicators,
         pinHash: String = "",
         expireAt: TimeInterval? = nil,
         members: [String: SquadMember] = [:],

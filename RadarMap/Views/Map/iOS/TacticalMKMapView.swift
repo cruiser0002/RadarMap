@@ -193,6 +193,14 @@ public struct TacticalMKMapView: UIViewRepresentable {
         var lastObservedCenterTrigger: Int
         var lastObservedLockState: Bool
 
+        // Guards against re-issuing setUserTrackingMode(.follow) while a previous recenter
+        // animation is still in flight. Without this, rapid button taps restart the camera
+        // animation mid-flight, and MapKit's transient .none tracking-mode drop during that
+        // restart gets misread by the pan-detection delegates as a manual pan to whatever
+        // interpolated (mid-animation) coordinate the camera happened to be sweeping through,
+        // relocking the map onto an essentially random location.
+        private var isRecentering = false
+
         // Hosting controllers for member marker content, keyed by the MKAnnotationView they're
         // attached to. Reused across syncAnnotations passes instead of being torn down and
         // recreated every call — recreating a UIHostingController on every single sync (which
@@ -424,7 +432,14 @@ public struct TacticalMKMapView: UIViewRepresentable {
         /// is what avoids fighting its camera, which is what caused the altitude to jump
         /// to a MapKit-computed default after a previous, more hands-on version of this.
         func recenterOnUser(in mapView: MKMapView) {
+            guard !isRecentering else { return }
+            isRecentering = true
             mapView.setUserTrackingMode(.follow, animated: true)
+            // Self-healing fallback in case .follow never gets confirmed (e.g. no user
+            // location yet) — don't let a missed confirmation permanently wedge the guard.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                self?.isRecentering = false
+            }
         }
 
         @objc func handlePinchGesture(_ recognizer: UIPinchGestureRecognizer) {
@@ -601,9 +616,15 @@ public struct TacticalMKMapView: UIViewRepresentable {
         // panning has taken the map off centering (spec: "standard mapkit pan, map no
         // longer centers on local user").
         public func mapView(_ mapView: MKMapView, didChange mode: MKUserTrackingMode, animated: Bool) {
+            if mode == .follow {
+                isRecentering = false
+            }
             // See TacticalPhoneCameraState.isPinching: a zoom-only pinch also drops tracking
-            // to .none and must not be misread as the user having panned away.
-            guard !cameraState.isPinching else { return }
+            // to .none and must not be misread as the user having panned away. Likewise while
+            // a programmatic recenter animation is still in flight, MapKit can transiently
+            // report .none mid-transition — don't mistake that for a manual pan and relock
+            // onto whatever (interpolated, effectively arbitrary) coordinate it reports.
+            guard !cameraState.isPinching, !isRecentering else { return }
             guard mode == .none, let userCoord = mapView.userLocation.location?.coordinate else { return }
             parent.gameState.sendMapAction(.pan(to: mapView.centerCoordinate, userCoord: userCoord))
         }
@@ -612,7 +633,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
         // map re-locks automatically once panned back near the user (spec: "if panned back
         // near user, reapply center map mode").
         public func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
-            guard !cameraState.isPinching else { return }
+            guard !cameraState.isPinching, !isRecentering else { return }
             guard mapView.userTrackingMode == .none,
                   let userCoord = mapView.userLocation.location?.coordinate else { return }
             parent.gameState.sendMapAction(.pan(to: mapView.centerCoordinate, userCoord: userCoord))

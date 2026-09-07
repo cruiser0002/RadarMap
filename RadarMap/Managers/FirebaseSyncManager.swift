@@ -194,18 +194,26 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
     // Gated realtime listener handles for the three downstream channels. Attached by
     // startTelemetryPolling(roomId:) / detached by stopTelemetryPolling() — the same gated
-    // entry points GameStateManager already calls based on screen_active / active_until lease
-    // state (see evaluatePhoneCloudClientPolicy), so no caller changes were needed.
+    // entry points GameStateManager already calls based on app_active / active_until lease
+    // state (see evaluateListenerGate), so no caller changes were needed.
     private var telemetryChildAddedHandle: RTDBObserverHandle?
     private var telemetryChildChangedHandle: RTDBObserverHandle?
     private var telemetryChildRemovedHandle: RTDBObserverHandle?
     private var tacticalValueHandle: RTDBObserverHandle?
     private var roomValueHandle: RTDBObserverHandle?
+    private var attachedTelemetryRoomId: String?
+    /// Survives member prune/re-add cycles (reconcile, reconnect) so a member rebuilt from a
+    /// fresh telemetry packet doesn't momentarily lose its known callsign — see updateMember(with:).
+    private var knownCallsigns: [String: String] = [:]
 
     /// Member IDs currently present under /p/{roomId}, maintained incrementally from
     /// childAdded/childRemoved events so reconcileRemoteMembers keeps its original
     /// whole-snapshot-based pruning behavior without re-fetching the full node on every event.
     private var observedTelemetryMemberIds: Set<String> = []
+    /// Guards reconcileRemoteMembers against pruning real members during the childAdded replay
+    /// burst that fires on every listener (re)attach: RTDB replays childAdded once per existing
+    /// child sequentially, so observedTelemetryMemberIds is incomplete until this flips true.
+    private var initialTelemetryLoadComplete = false
 
     private static let telemetryMetadataKeys: Set<String> = ["exp"]
 
@@ -422,7 +430,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         let isExistingMember = members[packet.memberId] != nil
         var member = members[packet.memberId] ?? SquadMember(
             id: packet.memberId,
-            callsign: "",
+            callsign: knownCallsigns[packet.memberId] ?? "",
             latitude: packet.latitude,
             longitude: packet.longitude,
             altitude: packet.altitude,
@@ -433,7 +441,13 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             status: packet.heartRate == AppConstants.Health.flatlineHeartRate ? .downed : .active
         )
 
-        // Compute Course Over Ground (COG) if player moved > threshold
+#if false
+        // Dead-reckoning-derived Course Over Ground (COG) estimation, disabled: locally
+        // inferring heading from displacement between two received fixes clobbered the
+        // sender's real, transmitted COD whenever packet.heading arrived as exactly 0.0
+        // (a legitimate true-north heading, indistinguishable here from "no heading"),
+        // causing the remote annotation to snap to the locally-estimated bearing instead
+        // of preserving the true COD the peer actually reported. See DEAD_RECKONING.md.
         if isExistingMember {
             let prevCoord = CLLocationCoordinate2D(latitude: member.latitude, longitude: member.longitude)
             let newCoord = CLLocationCoordinate2D(latitude: packet.latitude, longitude: packet.longitude)
@@ -452,6 +466,11 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         } else if packet.heading > 0.0 {
             member.heading = packet.heading
         }
+#else
+        // Always trust the sender's own transmitted heading (true COD) as-is; never
+        // locally re-derive it from displacement between fixes.
+        member.heading = packet.heading
+#endif
 
         if isExistingMember && member.lastUpdatedTimestamp > 0 {
             member.lastAnimationDuration = 0.0
@@ -858,30 +877,34 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     public func deleteRoom(roomId: String, completion: ((Bool) -> Void)? = nil) {
         stopTelemetryPolling()
 
-        let purgeGroup = DispatchGroup()
-
-        // 1. Delete telemetry node
-        purgeGroup.enter()
-        transport.removeValue(at: telemetryPath(roomId: roomId)) { _ in
-            purgeGroup.leave()
-        }
-
-        // 2. Delete tactical indicators node
-        purgeGroup.enter()
-        transport.removeValue(at: tacticalPath(roomId: roomId)) { _ in
-            purgeGroup.leave()
-        }
-
-        // 3. Delete room node after telemetry & tactical nodes have been purged
-        purgeGroup.notify(queue: .global()) { [weak self] in
+        // 1. Delete room node FIRST. This immediately revokes peer write permissions for any in-flight
+        // telemetry or tactical packets (rules require `root.child('r').child($roomId).exists()`).
+        // Any packet arriving after this write is rejected with PERMISSION_DENIED, preventing
+        // in-flight packets from resurrecting /p or /t JSON trees.
+        self.transport.removeValue(at: self.roomPath(roomId: roomId)) { [weak self] _ in
             guard let self = self else {
                 DispatchQueue.main.async { completion?(true) }
                 return
             }
 
-            self.transport.removeValue(at: self.roomPath(roomId: roomId)) { _ in
+            let purgeGroup = DispatchGroup()
+
+            // 2. Delete telemetry node (allowed by !newData.exists() rule)
+            purgeGroup.enter()
+            self.transport.removeValue(at: self.telemetryPath(roomId: roomId)) { _ in
+                purgeGroup.leave()
+            }
+
+            // 3. Delete tactical indicators node (allowed by !newData.exists() rule)
+            purgeGroup.enter()
+            self.transport.removeValue(at: self.tacticalPath(roomId: roomId)) { _ in
+                purgeGroup.leave()
+            }
+
+            // 4. Reset local session once subtrees are wiped
+            purgeGroup.notify(queue: .global()) { [weak self] in
                 DispatchQueue.main.async {
-                    self.resetLocalSessionAndIcons()
+                    self?.resetLocalSessionAndIcons()
                     completion?(true)
                 }
             }
@@ -1166,6 +1189,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             } else {
                 updatedMembers[id] = remoteMember
             }
+            if !remoteMember.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                knownCallsigns[id] = remoteMember.callsign
+            }
         }
         if let localId = self.localMemberId, let localMember = current.members[localId] {
             updatedMembers[localId] = localMember
@@ -1295,6 +1321,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                let data = try? JSONSerialization.data(withJSONObject: value),
                let remoteMember = try? JSONDecoder().decode(SquadMember.self, from: data) {
                 DispatchQueue.main.async {
+                    if !remoteMember.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.knownCallsigns[cleanMemberId] = remoteMember.callsign
+                    }
                     if var currentRoom = self.activeRoom, currentRoom.id == cleanRoomId {
                         if var existing = currentRoom.members[cleanMemberId] {
                             existing.callsign = remoteMember.callsign
@@ -1309,6 +1338,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             } else if let json = value as? [String: Any], let callsign = json["csn"] as? String {
                 let role = MemberRole(rawValue: json["rol"] as? String ?? "") ?? .player
                 DispatchQueue.main.async {
+                    if !callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        self.knownCallsigns[cleanMemberId] = callsign
+                    }
                     if var currentRoom = self.activeRoom, currentRoom.id == cleanRoomId {
                         if var existing = currentRoom.members[cleanMemberId] {
                             existing.callsign = callsign
@@ -1383,8 +1415,8 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     }
 
     /// Gated attach entry point (see CLOUD_DATA_MANAGEMENT.md §2/§5.B): callers — e.g.
-    /// GameStateManager.evaluatePhoneCloudClientPolicy() — invoke this only when the
-    /// screen_active / active_until lease conditions allow this device to be the active cloud
+    /// GameStateManager.evaluateListenerGate() — invoke this only when the
+    /// app_active / active_until lease conditions allow this device to be the active cloud
     /// client. Attaches the three persistent realtime listeners, which fire immediately on
     /// attachment with the current state, then again on every subsequent change — no separate
     /// instant-fetch call needed (see §9).
@@ -1392,16 +1424,42 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         let cleanId = roomId.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         guard !cleanId.isEmpty else { return }
 
+        // evaluateListenerGate() re-invokes this on every heartbeat tick while the gate stays
+        // open, not just on a real transition. Without this guard, an already-attached room
+        // would get torn down and rebuilt from scratch every tick, replaying the childAdded
+        // burst and causing member names/annotations to blink on that cadence even though
+        // nothing about the attachment actually changed.
+        guard attachedTelemetryRoomId != cleanId else { return }
+
         detachRealtimeListeners()
         attachRealtimeListeners(roomId: cleanId)
+        attachedTelemetryRoomId = cleanId
     }
 
     public func stopTelemetryPolling() {
         detachRealtimeListeners()
+        attachedTelemetryRoomId = nil
     }
 
     private func attachRealtimeListeners(roomId: String) {
         observedTelemetryMemberIds.removeAll()
+        initialTelemetryLoadComplete = false
+
+        // One-shot read of the full telemetry set so we know every member that's actually
+        // present before reconcileRemoteMembers is allowed to prune anyone. Without this, the
+        // childAdded replay below (which RTDB fires once per existing child, sequentially)
+        // would otherwise cause reconcile to see a partially-populated set and prune real,
+        // still-present teammates on every listener (re)attach — the "blinking" bug.
+        transport.getValue(at: telemetryPath(roomId: roomId)) { [weak self] value in
+            guard let self = self else { return }
+            if let dict = value as? [String: Any] {
+                for key in dict.keys where !key.hasPrefix("_") && !FirebaseSyncManager.telemetryMetadataKeys.contains(key) {
+                    self.observedTelemetryMemberIds.insert(key)
+                }
+            }
+            self.initialTelemetryLoadComplete = true
+            self.reconcileRemoteMembers(activeServerMemberIds: self.observedTelemetryMemberIds)
+        }
 
         telemetryChildAddedHandle = transport.observe(at: telemetryPath(roomId: roomId), eventType: .childAdded) { [weak self] snapshot in
             self?.handleTelemetryChildUpsert(snapshot, roomId: roomId)
@@ -1444,7 +1502,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         observedTelemetryMemberIds.insert(memberId)
 
         if let localId = localMemberId, memberId == localId {
-            reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
+            if initialTelemetryLoadComplete {
+                reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
+            }
             return
         }
 
@@ -1462,7 +1522,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             self.fetchMemberDetails(roomId: roomId, memberId: memberId)
         }
 
-        reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
+        if initialTelemetryLoadComplete {
+            reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
+        }
     }
 
     private func handleTelemetryChildRemoved(_ snapshot: RTDBSnapshot) {

@@ -29,6 +29,11 @@
   * Squad Leaders can deploy tactical objective points, orders (`watchHere`, `goHere`, `attackHere`, `defendHere`, `flag`), hostile unit classifications, and environmental hazards.
   * Hostile markers feature automated 5-minute linear decay to grayscale.
   * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md)
+* 📏 **Tap-to-Measure Distance Line**:
+  * Single tap on any squad member or tactical POI marker draws an interactive real-time range line from the local player to the target.
+  * Displays 2D horizontal ground ($XY$) distance at its midpoint using an equirectangular planar projection (strictly altitude / $Z$-independent).
+  * Purely local UI state that dismisses on re-tap or empty-space tap, with zero network or cloud synchronization overhead.
+  * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md)
 * 🔍 **Discrete Decade Zoom Ladder**:
   * Digital Crown (watchOS) and pinch-to-zoom (iOS) navigation stepping through discrete $[1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]\text{m}$ decade scales.
   * Non-destructive centering preserving active zoom distance.
@@ -111,6 +116,7 @@ All technical architecture specifications, netcode models, and setup guides are 
   * [**`NETWORK_BENCHMARK_FIREBASE_COST_ESTIMATION.md`**](docs/NETWORK_BENCHMARK_FIREBASE_COST_ESTIMATION.md): Network benchmarking framework and Firebase RTDB cost estimation model.
   * [**`notebooks/README.md`**](notebooks/README.md): Headless multi-player Python simulator and Jupyter testing suite.
   * [**`output/README.md`**](output/README.md): Designated output destination specification for benchmark artifacts and simulation traces.
+  * [**`.agents/skills/`**](.agents/skills/): Workspace Agent Skills providing modular runbooks and best practices for Firebase and Xcode workflows.
 
 ---
 
@@ -182,6 +188,7 @@ RadarMap/
 Additional top-level project contents (outside `RadarMap/`):
 
 ```
+.agents/                                    # Workspace Agent Skills (Firebase, Xcode setup, etc.)
 docs/                                       # Technical reference documentation & architecture specifications
 ├── BRING_YOUR_OWN_FIREBASE.md              # Self-hosted Google Spark RTDB setup & Live Text OCR
 ├── CLOUD_DATA_MANAGEMENT.md                # RTDB sync matrix, upload policies & schema reference
@@ -199,7 +206,7 @@ RadarMapCompanion/                          # iOS (iPhone) companion target
 └── RadarMapCompanionApp.swift
 benchmarks/                                 # Baseline & candidate network benchmark configurations
 credentials/                                # Local service-account JSON keys (gitignored)
-functions/                                  # Firebase Cloud Functions (room TTL sweeps, indicator pruning)
+functions/                                  # Firebase Cloud Functions (room TTL sweeps, host departure cleanup)
 notebooks/                                  # Jupyter notebook & CLI player simulator (see notebooks/README.md)
 output/                                     # Benchmark and simulation output destination (see output/README.md)
 scripts/                                    # Standalone tooling (e.g. network_benchmark.py)

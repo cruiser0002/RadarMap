@@ -269,7 +269,9 @@ public struct SettingsView: View {
             isEnabled: $gameState.isCustomDatabaseURLEnabled,
             isDisabled: isBusy,
             recentURLs: gameState.recentDatabaseURLs,
-            onEditingFinished: { gameState.syncConfigToWatchConnectivity() }
+            // customDatabaseURL now writes straight into watchConnectivityManager.localLS on
+            // every change (see .onChange below), so there's nothing left to flush here.
+            onEditingFinished: {}
         )
         .id(FocusField.databaseURL)
         .onChange(of: customDatabaseURL) { _, newValue in
@@ -319,11 +321,8 @@ public struct SettingsView: View {
                 customDatabaseURL = ""
                 gameState.customDatabaseURL = ""
             }
-            // A scan is a batch fill of all 4 synced fields at once, equivalent from the user's
-            // perspective to typing each textbox and hitting enter — push it out over WCSession
-            // explicitly rather than relying on individual field triggers (customDatabaseURL in
-            // particular only syncs on the field losing focus, which never happens here).
-            gameState.syncConfigToWatchConnectivity()
+            // Each gameState.* assignment above already wrote straight into
+            // watchConnectivityManager.localLS and published it — nothing left to flush here.
         }
     }
 
