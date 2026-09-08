@@ -96,12 +96,12 @@ public struct TacticalMKMapView: UIViewRepresentable {
         let mapView = MKMapView(frame: .zero)
         mapView.delegate = context.coordinator
         mapView.showsUserLocation = true
-        // Standard map view is stock Apple Maps behavior end to end: native continuous
-        // pinch-zoom/pan and native .follow tracking, with no altitude overrides of our own
-        // and no discrete step snapping — that ladder is exclusively a Radar view concern
-        // (see TacticalRadarMapView.snapScaleToRadarLadder). Letting MapKit fully own the
-        // camera (rather than fighting it with our own setCamera calls) is what avoids the
-        // camera fighting itself on tracking-mode transitions.
+        // Standard map view maintains continuous zoom feel during gestures, but enforces
+        // the canonical decade ladder on gesture release via a persistent CameraZoomRange
+        // clamp. Clamping minCenterCoordinateDistance == maxCenterCoordinateDistance continuously
+        // forces MapKit's camera to stay at our discrete tactical altitude without fighting
+        // tracking mode transitions or drifting speed-dependent altitude in .follow mode.
+        // The clamp is temporarily relaxed to [minScale, maxScale] only while an active pinch is in flight.
         //
         // A fresh MKMapView otherwise starts at MapKit's own default world region, and only
         // eases into place once userTrackingMode animates the camera over — an animation that
@@ -117,6 +117,9 @@ public struct TacticalMKMapView: UIViewRepresentable {
             span: MKCoordinateSpan(latitudeDelta: initialSpanDelta, longitudeDelta: initialSpanDelta)
         )
         mapView.setRegion(initialRegion, animated: false)
+
+        let initialDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: gameState.selectedScaleMeters)
+        mapView.setCameraZoomRange(.init(minCenterCoordinateDistance: initialDistance, maxCenterCoordinateDistance: initialDistance), animated: false)
 
         if gameState.mapStateMachine.trackingState.isLocked {
             mapView.userTrackingMode = .follow
@@ -253,6 +256,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
         // interpolated (mid-animation) coordinate the camera happened to be sweeping through,
         // relocking the map onto an essentially random location.
         private var isRecentering = false
+        private var wasLockedBeforePinch = false
 
         // Hosting controllers for member marker content, keyed by the MKAnnotationView they're
         // attached to. Reused across syncAnnotations passes instead of being torn down and
@@ -535,10 +539,10 @@ public struct TacticalMKMapView: UIViewRepresentable {
 
         /// Re-centers on the user for both the center-map button and the auto-relock-on-
         /// pan-back path, by simply re-engaging native `.follow` — same as Apple Maps'
-        /// own locate-me button. No manual camera correction: letting MapKit own the
-        /// transition (including its own handling of any residual pan/deceleration motion)
-        /// is what avoids fighting its camera, which is what caused the altitude to jump
-        /// to a MapKit-computed default after a previous, more hands-on version of this.
+        /// own locate-me button. Altitude stability comes from the standing CameraZoomRange
+        /// clamp (seeded in makeUIView and re-asserted on pinch release) rather than a per-transition
+        /// manual camera override, so MapKit enforces the altitude constraint continuously
+        /// against its own tracking-mode transitions without popping or drifting.
         func recenterOnUser(in mapView: MKMapView) {
             guard !isRecentering else { return }
             isRecentering = true
@@ -551,11 +555,42 @@ public struct TacticalMKMapView: UIViewRepresentable {
         }
 
         @objc func handlePinchGesture(_ recognizer: UIPinchGestureRecognizer) {
+            guard let mapView = recognizer.view as? MKMapView else { return }
             switch recognizer.state {
-            case .began, .changed:
+            case .began:
                 cameraState.isPinching = true
+                wasLockedBeforePinch = parent.gameState.mapStateMachine.trackingState.isLocked
+                let minDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.minScaleMeters)
+                let maxDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: AppConstants.UI.RadarScale.maxiOSScaleMeters)
+                mapView.setCameraZoomRange(.init(minCenterCoordinateDistance: minDistance, maxCenterCoordinateDistance: maxDistance), animated: false)
+
+            case .changed:
+                cameraState.isPinching = true
+
+            case .ended, .cancelled:
+                let liveScale = currentRulerScale(in: mapView)
+                let snapped = AppConstants.UI.RadarScale.snapToDiscreteScale(liveScale)
+                let targetDistance = AppConstants.UI.RadarScale.cameraDistance(forScale: snapped)
+                
+                parent.gameState.sendMapAction(.setScale(meters: snapped))
+                parent.gameState.liveMapScaleMeters = snapped
+
+                if let userCoord = mapView.userLocation.location?.coordinate {
+                    parent.gameState.sendMapAction(.pan(to: mapView.centerCoordinate, userCoord: userCoord))
+                }
+
+                mapView.setCameraZoomRange(.init(minCenterCoordinateDistance: targetDistance, maxCenterCoordinateDistance: targetDistance), animated: true)
+
+                if wasLockedBeforePinch && parent.gameState.mapStateMachine.trackingState.isLocked {
+                    recenterOnUser(in: mapView)
+                }
+
+                wasLockedBeforePinch = false
+                cameraState.isPinching = false
+
             default:
                 cameraState.isPinching = false
+                wasLockedBeforePinch = false
             }
         }
 
