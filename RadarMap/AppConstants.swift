@@ -468,11 +468,13 @@ public enum AppConstants {
             }
             
             /// Returns the next discrete scale zooming IN (smaller meter distance).
+            @available(*, deprecated, message: "+/- zoom buttons are deprecated; use crown or pinch gestures.")
             public static func stepZoomIn(from scaleMeters: Double) -> Double {
                 return policy.previousScale(before: scaleMeters)
             }
             
             /// Returns the next discrete scale zooming OUT (larger meter distance).
+            @available(*, deprecated, message: "+/- zoom buttons are deprecated; use crown or pinch gestures.")
             public static func stepZoomOut(from scaleMeters: Double) -> Double {
                 return policy.nextScale(after: scaleMeters)
             }

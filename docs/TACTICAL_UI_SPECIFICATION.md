@@ -112,6 +112,7 @@ public static let standardAllowedScales: [CLLocationDistance] = [
 * **Logarithmic Snapping:** Snapping to the ladder uses logarithmic distance minimization:
   $$\text{target} = \arg\min_s \left| \ln\left(\frac{s}{\text{observedScale}}\right) \right|$$
 * **Bounded Stepping:** `nextScale()` and `previousScale()` clamp at the boundary limits; they never wrap around.
+* **Zoom Controls & Deprecations:** Zoom navigation is handled exclusively via physical Digital Crown on watchOS and multi-touch pinch-to-zoom gestures on iOS. Legacy on-screen `+/-` zoom overlay buttons and `stepZoomIn`/`stepZoomOut` helpers are deprecated and removed from the active tactical HUD.
 
 ---
 

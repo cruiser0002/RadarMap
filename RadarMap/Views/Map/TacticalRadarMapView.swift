@@ -129,51 +129,8 @@ public struct TacticalRadarMapView: View {
 
                         Spacer()
 
-                        // Upper right: (+ / -) stacked vertically on phone (if enabled), or Version & Debug Info on Phone / Watch
+                        // Upper right: Version & Debug Info on Phone / Watch
                         #if !os(watchOS)
-                        #if SHOW_PLUS_MINUS_ZOOM_BUTTONS
-                        VStack(spacing: 0) {
-                            Button(action: {
-                                zoomIn()
-                            }) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.black.opacity(0.85))
-                                        .shadow(color: .black.opacity(0.75), radius: 2.5)
-                                    Image(systemName: "plus")
-                                        .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .bold))
-                                        .foregroundColor(uiThemeColor)
-                                    Circle()
-                                        .stroke(uiThemeColor.opacity(0.6), lineWidth: 1.2)
-                                }
-                                .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
-                                .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .focusable(false)
-                            
-                            Button(action: {
-                                zoomOut()
-                            }) {
-                                ZStack {
-                                    Circle()
-                                        .fill(Color.black.opacity(0.85))
-                                        .shadow(color: .black.opacity(0.75), radius: 2.5)
-                                    Image(systemName: "minus")
-                                        .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .bold))
-                                        .foregroundColor(uiThemeColor)
-                                    Circle()
-                                        .stroke(uiThemeColor.opacity(0.6), lineWidth: 1.2)
-                                }
-                                .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
-                                .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .focusable(false)
-                        }
-                        #else
                         VStack(alignment: .trailing, spacing: 2) {
                             #if DEBUG
                             if isDebugFieldEnabled {
@@ -189,7 +146,6 @@ public struct TacticalRadarMapView: View {
                             #endif
                         }
                         .frame(minWidth: AppConstants.UI.HUD.circleHitboxSize.width, minHeight: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .trailing)
-                        #endif
                         #else
                         VStack(alignment: .trailing, spacing: 1) {
                             #if DEBUG
@@ -593,27 +549,5 @@ public struct TacticalRadarMapView: View {
         #if os(watchOS)
         crownFocusTrigger += 1
         #endif
-    }
-    
-    private func zoomIn() {
-        let currentScale = gameState.selectedScaleMeters
-        let targetScale = AppConstants.UI.RadarScale.stepZoomIn(from: currentScale)
-        #if os(iOS)
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        #endif
-        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-            gameState.sendMapAction(.setScale(meters: targetScale))
-        }
-    }
-    
-    private func zoomOut() {
-        let currentScale = gameState.selectedScaleMeters
-        let targetScale = AppConstants.UI.RadarScale.stepZoomOut(from: currentScale)
-        #if os(iOS)
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        #endif
-        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-            gameState.sendMapAction(.setScale(meters: targetScale))
-        }
     }
 }
