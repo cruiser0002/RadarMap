@@ -77,22 +77,35 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
     public var onRemoteTelemetryPacketsReceived: (([TelemetryPacket]) -> Void)?
 
-    /// Symmetric key for the active room's telemetry/tactical encryption, or nil when
-    /// encryption is disabled (`AppConstants.Debug.isEncryptionEnabled == false`) or no room
-    /// context has been established yet. Set via `setEncryptionContext(pin:roomId:)`.
+    /// Symmetric key used to encrypt THIS device's own outbound telemetry/tactical writes, or nil
+    /// when encryption is disabled (`GameStateManager.isEncryptionEnabled == false`, synced
+    /// phone<->watch via `ConfigSnapshot.isEncryptionEnabled`) or no room context has been
+    /// established yet. The toggle only ever governs this — what a device chooses to send — never
+    /// what it can read. Set via `setEncryptionContext(pin:roomId:isEncryptionEnabled:)`.
     private(set) var activeTelemetryKey: SymmetricKey?
 
-    /// Establishes (or clears) the active room's telemetry/tactical encryption key. Call as soon
-    /// as both the room's pin and id are known — on host create, join, and reconnect. Gated on
-    /// `AppConstants.Debug.isEncryptionEnabled` so the debug-panel toggle takes effect on the
-    /// next room join/host rather than needing an app relaunch. See
-    /// docs/CLOUD_DATA_MANAGEMENT.md §5.E.
-    public func setEncryptionContext(pin: String, roomId: String) {
-        guard AppConstants.Debug.isEncryptionEnabled, !pin.isEmpty, !roomId.isEmpty else {
+    /// Symmetric key used to decrypt INCOMING telemetry/tactical payloads, derived from the room's
+    /// pin/id alone. Deliberately not gated on the encryption toggle: a payload's own format
+    /// (plaintext array/dict vs. ciphertext string) already says whether it needs decrypting, so
+    /// this key must always be available whenever the room context is known — otherwise a device
+    /// with the toggle off could never read a payload some other device (with the toggle on)
+    /// encrypted, silently dropping it. Set via `setEncryptionContext(pin:roomId:isEncryptionEnabled:)`.
+    private(set) var incomingDecryptionKey: SymmetricKey?
+
+    /// Establishes (or clears) the active room's telemetry/tactical encryption context. Call as
+    /// soon as both the room's pin and id are known — on host create, join, and reconnect.
+    /// `isEncryptionEnabled` is the caller's current, phone/watch-synced setting
+    /// (`GameStateManager.isEncryptionEnabled`) — this manager has no access to that synced state
+    /// itself and takes it as a parameter instead. See docs/CLOUD_DATA_MANAGEMENT.md §5.E.
+    public func setEncryptionContext(pin: String, roomId: String, isEncryptionEnabled: Bool) {
+        guard !pin.isEmpty, !roomId.isEmpty else {
             activeTelemetryKey = nil
+            incomingDecryptionKey = nil
             return
         }
-        activeTelemetryKey = FirebaseSyncManager.deriveTelemetryKey(pin: pin, roomId: roomId)
+        let key = FirebaseSyncManager.deriveTelemetryKey(pin: pin, roomId: roomId)
+        incomingDecryptionKey = key
+        activeTelemetryKey = isEncryptionEnabled ? key : nil
     }
 
     public let networkQualityMonitor = NetworkQualityMonitor()
@@ -171,7 +184,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
     // Database endpoint configuration
     public var databaseURL: String = AppConstants.Network.defaultDatabaseURL
-    public var authToken: String? = nil
 
     // Local member ID for bandwidth saving / avoiding overwriting live telemetry with server data
     public var localMemberId: String? = nil
@@ -201,7 +213,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     private var telemetryChildRemovedHandle: RTDBObserverHandle?
     private var tacticalValueHandle: RTDBObserverHandle?
     private var roomValueHandle: RTDBObserverHandle?
-    private var attachedTelemetryRoomId: String?
+    public private(set) var attachedTelemetryRoomId: String?
     /// Survives member prune/re-add cycles (reconcile, reconnect) so a member rebuilt from a
     /// fresh telemetry packet doesn't momentarily lose its known callsign — see updateMember(with:).
     private var knownCallsigns: [String: String] = [:]
@@ -441,13 +453,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             status: packet.heartRate == AppConstants.Health.flatlineHeartRate ? .downed : .active
         )
 
-#if false
-        // Dead-reckoning-derived Course Over Ground (COG) estimation, disabled: locally
-        // inferring heading from displacement between two received fixes clobbered the
-        // sender's real, transmitted COD whenever packet.heading arrived as exactly 0.0
-        // (a legitimate true-north heading, indistinguishable here from "no heading"),
-        // causing the remote annotation to snap to the locally-estimated bearing instead
-        // of preserving the true COD the peer actually reported. See DEAD_RECKONING.md.
         if isExistingMember {
             let prevCoord = CLLocationCoordinate2D(latitude: member.latitude, longitude: member.longitude)
             let newCoord = CLLocationCoordinate2D(latitude: packet.latitude, longitude: packet.longitude)
@@ -466,11 +471,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         } else if packet.heading > 0.0 {
             member.heading = packet.heading
         }
-#else
-        // Always trust the sender's own transmitted heading (true COD) as-is; never
-        // locally re-derive it from displacement between fixes.
-        member.heading = packet.heading
-#endif
 
         if isExistingMember && member.lastUpdatedTimestamp > 0 {
             member.lastAnimationDuration = 0.0
@@ -868,6 +868,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         self.unacknowledgedIndicators.removeAll()
         self.pendingMemberFetches.removeAll()
         self.activeTelemetryKey = nil
+        self.incomingDecryptionKey = nil
     }
 
     public func disbandRoom(roomId: String, completion: ((Bool) -> Void)? = nil) {
@@ -950,10 +951,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             self?.resetLocalSessionAndIcons()
             completion?(true)
         }
-    }
-
-    public func removePlayerEntry(roomId: String, memberId: String, completion: ((Bool) -> Void)? = nil) {
-        logoutPlayer(roomId: roomId, memberId: memberId, completion: completion)
     }
 
     /// Refreshes this room's TTL expiry across all three top-level trees. Not server-enforced —
@@ -1117,7 +1114,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         let orders = (json["o"] as? [String: Any]) ?? [:]
         let capped = (json["i"] as? [String: Any]) ?? [:]
         for (key, val) in orders.merging(capped, uniquingKeysWith: { a, _ in a }) {
-            if let ind = TacticalIndicator.parse(id: key, rawValue: val, key: activeTelemetryKey), !ind.isExpired {
+            if let ind = TacticalIndicator.parse(id: key, rawValue: val, key: incomingDecryptionKey), !ind.isExpired {
                 decodedIndicators[ind.id] = ind
             }
         }
@@ -1508,7 +1505,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             return
         }
 
-        if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: snapshot.value as Any, key: activeTelemetryKey) {
+        if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: snapshot.value as Any, key: incomingDecryptionKey) {
             validateAndProcessPacket(packet)
             DispatchQueue.main.async { [weak self] in
                 self?.onRemoteTelemetryPacketsReceived?([packet])
@@ -1624,7 +1621,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                     if let localId = self.localMemberId, memberId == localId {
                         continue
                     }
-                    if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: rawValue, key: self.activeTelemetryKey) {
+                    if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: rawValue, key: self.incomingDecryptionKey) {
                         batchPackets.append(packet)
                     }
                     let needsFetch = self.activeRoom?.members[memberId] == nil ||

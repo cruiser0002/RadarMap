@@ -331,9 +331,6 @@ public final class TacticalSpriteCache {
         }
     }
     
-    private var playerCache = [SpriteKey: Image]()
-    private var leaderCache = [SpriteKey: Image]()
-    private var deadXCache = [SpriteKey: Image]()
     private var indicatorCache = [SpriteKey: Image]()
     
     /// Device native pixel scale — read once at init so sprites are sharp on 3× iPhone displays.
@@ -345,114 +342,6 @@ public final class TacticalSpriteCache {
     #endif
     
     private init() {}
-    
-    /// Pre-rendered sprite for regular squad player icon
-    public func playerSprite(color: Color, size: CGFloat = 18) -> Image {
-        let key = SpriteKey(color: color, size: size)
-        if let cached = playerCache[key] {
-            return cached
-        }
-        
-        let view = SquadPlayerShape()
-            .fill(color)
-            .overlay(
-                SquadPlayerShape()
-                    .stroke(Color.black.opacity(0.8), lineWidth: 1.2)
-            )
-            .shadow(color: .black.opacity(0.7), radius: 2)
-            .frame(width: size, height: size)
-            .padding(4)
-        
-        #if canImport(UIKit)
-        let renderer = ImageRenderer(content: view)
-        #if os(iOS)
-        renderer.scale = nativeScale
-        #else
-        renderer.scale = 2.0
-        #endif
-        if let uiImage = renderer.uiImage {
-            let img = Image(uiImage: uiImage)
-            playerCache[key] = img
-            return img
-        }
-        #endif
-        
-        let fallback = Image(systemName: "location.north.fill")
-        playerCache[key] = fallback
-        return fallback
-    }
-    
-    /// Pre-rendered sprite for squad leader command icon
-    public func leaderSprite(color: Color, size: CGFloat = 22) -> Image {
-        let key = SpriteKey(color: color, size: size)
-        if let cached = leaderCache[key] {
-            return cached
-        }
-        
-        let view = SquadLeaderShape()
-            .fill(color)
-            .overlay(
-                SquadLeaderShape()
-                    .stroke(Color.black.opacity(0.8), lineWidth: 1.2)
-            )
-            .shadow(color: .black.opacity(0.7), radius: 2)
-            .frame(width: size, height: size)
-            .padding(4)
-        
-        #if canImport(UIKit)
-        let renderer = ImageRenderer(content: view)
-        #if os(iOS)
-        renderer.scale = nativeScale
-        #else
-        renderer.scale = 2.0
-        #endif
-        if let uiImage = renderer.uiImage {
-            let img = Image(uiImage: uiImage)
-            leaderCache[key] = img
-            return img
-        }
-        #endif
-        
-        let fallback = Image(systemName: "chevron.up.circle.fill")
-        leaderCache[key] = fallback
-        return fallback
-    }
-    
-    /// Pre-rendered sprite for KIA / Downed "X" icon
-    public func deadXSprite(color: Color, size: CGFloat = 18) -> Image {
-        let key = SpriteKey(color: color, size: size)
-        if let cached = deadXCache[key] {
-            return cached
-        }
-        
-        let view = SquadDeadXShape()
-            .fill(color)
-            .overlay(
-                SquadDeadXShape()
-                    .stroke(Color.black.opacity(0.8), lineWidth: 1.0)
-            )
-            .shadow(color: .black.opacity(0.8), radius: 2)
-            .frame(width: size, height: size)
-            .padding(4)
-        
-        #if canImport(UIKit)
-        let renderer = ImageRenderer(content: view)
-        #if os(iOS)
-        renderer.scale = nativeScale
-        #else
-        renderer.scale = 2.0
-        #endif
-        if let uiImage = renderer.uiImage {
-            let img = Image(uiImage: uiImage)
-            deadXCache[key] = img
-            return img
-        }
-        #endif
-        
-        let fallback = Image(systemName: "xmark")
-        deadXCache[key] = fallback
-        return fallback
-    }
     
     /// Pre-rendered sprite for static tactical indicators (Enemy & Orders)
     public func indicatorSprite(type: TacticalIndicatorType, color: Color, size: CGFloat = 16) -> Image {

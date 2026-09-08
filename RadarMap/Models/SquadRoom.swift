@@ -79,10 +79,6 @@ public struct SquadRoom: Identifiable, Codable, Equatable {
         members.count
     }
 
-    public var isFull: Bool {
-        members.count >= maxCapacity
-    }
-
     public var isEmpty: Bool {
         members.isEmpty
     }

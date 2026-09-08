@@ -3,12 +3,23 @@ import SwiftUI
 public struct MemberAnnotationView: View {
     public let member: SquadMember
     public let isMe: Bool
+    public let isSameClan: Bool
+    public let isSelected: Bool
     public let radarColor: Color
     public let onTap: (() -> Void)?
 
-    public init(member: SquadMember, isMe: Bool = false, radarColor: Color = .green, onTap: (() -> Void)? = nil) {
+    public init(
+        member: SquadMember,
+        isMe: Bool = false,
+        isSameClan: Bool = false,
+        isSelected: Bool = false,
+        radarColor: Color = .green,
+        onTap: (() -> Void)? = nil
+    ) {
         self.member = member
         self.isMe = isMe
+        self.isSameClan = isSameClan
+        self.isSelected = isSelected
         self.radarColor = radarColor
         self.onTap = onTap
     }
@@ -18,16 +29,25 @@ public struct MemberAnnotationView: View {
         member.status == .downed
     }
     
-    /// Indicator theme color based on state, self-status, or radar color theme
+    /// Indicator theme color based on state, self-status, clan affiliation, or staleness:
+    /// - Local player ("Me") is green.
+    /// - Players in the same clan as me are green (or gray when stale).
+    /// - Other teammates are blue (or gray when stale).
     public var indicatorColor: Color {
-        if !isMe && member.isStale {
+        if isMe {
+            return .green
+        }
+        if member.isStale {
             return .gray
         }
-        return radarColor
+        return isSameClan ? .green : .blue
     }
     
     public var body: some View {
         let markers = AppConstants.UI.MapMarkers.self
+        let scale: CGFloat = isMe ? 1.0 : markers.otherPlayerScaleFactor
+        let scaledFrameSize = markers.markerFrameSize * scale
+
         // Tactical Vector Marker (center is the exact coordinate and breathing circle center)
         ZStack {
             if isKIA {
@@ -84,22 +104,26 @@ public struct MemberAnnotationView: View {
         }
         .frame(width: markers.markerFrameSize, height: markers.markerFrameSize)
         .overlay(alignment: .top) {
-            let cleanCallsign = member.callsign.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !cleanCallsign.isEmpty {
-                // Callsign directly under the icon without altering the view center anchor, following radar color scheme
-                Text(cleanCallsign)
-                    .font(.system(size: markers.callsignFontSize, weight: .bold, design: .monospaced))
-                    .foregroundColor((!isMe && member.isStale) ? .gray : radarColor)
-                    .lineLimit(1)
-                    .padding(.horizontal, 3.0)
-                    .padding(.vertical, 1.0)
-                    .background(Color.black.opacity(0.8))
-                    .cornerRadius(3)
-                    .fixedSize()
-                    .offset(y: markers.callsignYOffset)
+            if isSelected {
+                let cleanCallsign = member.callsign.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleanCallsign.isEmpty {
+                    // Callsign directly under the icon without altering the view center anchor, activated when selected as distance ruler target
+                    Text(cleanCallsign)
+                        .font(.system(size: markers.callsignFontSize, weight: .bold, design: .monospaced))
+                        .foregroundColor(indicatorColor)
+                        .lineLimit(1)
+                        .padding(.horizontal, 3.0)
+                        .padding(.vertical, 1.0)
+                        .background(Color.black.opacity(0.85))
+                        .cornerRadius(3)
+                        .fixedSize()
+                        .offset(y: markers.callsignYOffset)
+                }
             }
         }
-        .contentShape(Rectangle())
+        .scaleEffect(scale)
+        .frame(width: scaledFrameSize, height: scaledFrameSize)
+        .contentShape(Rectangle().inset(by: (isMe || isSameClan) ? -markers.greenTouchTargetPadding : 0))
         .onTapGesture { onTap?() }
     }
 }

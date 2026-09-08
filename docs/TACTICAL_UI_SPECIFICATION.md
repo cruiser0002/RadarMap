@@ -175,13 +175,13 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
 
 | Feature | MapKit Native Component | RadarMap Implementation | Code Reference | Key Behavior & Rules |
 | :--- | :--- | :--- | :--- | :--- |
-| **Me** | Local user dot | Custom local user dot with heading and breathing; switches between player, commander, or Tag Out X | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`MemberAnnotationView.swift`](../RadarMap/Views/Map/MemberAnnotationView.swift)<br>[`SquadTacticalIcons.swift`](../RadarMap/Views/Map/SquadTacticalIcons.swift) | • Uses SwiftUI `UserAnnotation` to suppress MapKit's default blue dot and replace it with custom tactical vector shapes.<br>• Icon dynamically switches based on role (`SquadLeaderShape` vs `SquadPlayerShape`) or status (`SquadDeadXShape`).<br>• Central core dot pulses (`SquadPulseCore`) at frequency proportional to real-time BPM. |
-| **Other players** | Annotations | Custom annotation with heading and breathing; player, commander, or Tag Out X; fades to gray when stale | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`MemberAnnotationView.swift`](../RadarMap/Views/Map/MemberAnnotationView.swift) | • Rendered via `Annotation(coordinate:anchor: .center)`.<br>• When telemetry is stale (`member.isStale == true`), color turns to `.gray`.<br>• Directional rotation follows heading; center pulse follows teammate BPM. |
-| **Tac** | Annotations | Custom tactical annotation (Orders & Enemy markers) | [`TacticalIndicatorOverlayView.swift`](../RadarMap/Views/Map/TacticalIndicatorOverlayView.swift) | • Rendered via `Annotation`.<br>• Hardware GPU texture cache (`TacticalSpriteCache`).<br>• 5-minute linear fade to grayscale for enemy markers.<br>• Hold-to-delete interaction. |
+| **Me** | Local user dot | Custom local user dot with heading and breathing; switches between player, commander, or Tag Out X | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`MemberAnnotationView.swift`](../RadarMap/Views/Map/MemberAnnotationView.swift)<br>[`SquadTacticalIcons.swift`](../RadarMap/Views/Map/SquadTacticalIcons.swift) | • Always rendered in tactical **Green** (`#00FF66`).<br>• Uses SwiftUI `UserAnnotation` to suppress MapKit's default blue dot and replace it with custom tactical vector shapes.<br>• Icon dynamically switches based on role (`SquadLeaderShape` vs `SquadPlayerShape`) or status (`SquadDeadXShape`).<br>• Central core dot pulses (`SquadPulseCore`) at frequency proportional to real-time BPM.<br>• Highest UX touch priority (`.zIndex(101.0)`). |
+| **Other players** | Annotations | Custom annotation with heading and breathing; player, commander, or Tag Out X; fades to gray when stale | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`MemberAnnotationView.swift`](../RadarMap/Views/Map/MemberAnnotationView.swift) | • Rendered via `Annotation(coordinate:anchor: .center)`.<br>• **Clan Affiliation**: Teammates sharing the local user's clan tag (`[...]`, case-insensitive) render **Green**; teammates with a different or no clan tag render **Blue**.<br>• When telemetry is stale (`member.isStale == true`), color turns to `.gray`.<br>• Directional rotation follows heading; center pulse follows teammate BPM.<br>• **Active Distance Target Nametag**: When selected as the active target for the tap-to-measure distance ruler, the player's callsign nametag badge is automatically activated; it deactivates upon ruler detachment.<br>• Green (same-clan) teammate icons receive highest UX touch priority (`.zIndex(100.0)`). |
+| **Tac** | Annotations | Custom tactical annotation (Orders, Enemy, & Environmental markers) | [`TacticalIndicatorOverlayView.swift`](../RadarMap/Views/Map/TacticalIndicatorOverlayView.swift) | • Rendered via `Annotation`.<br>• **Clan-Private Team Orders**: Orders placed by "Me" or teammates sharing $\ge 1$ clan tag (`[...]`, comma-separated) render **Green**; orders from non-shared clans or unaffiliated players are **hidden** from the map/radar.<br>• **Enemy & Environmental Markers**: Tactical enemy indicators and environmental markers are squad-wide and render **Red**.<br>• **Grayscale Decay**: 5-minute linear fade to grayscale for enemy markers.<br>• Hardware GPU texture cache (`TacticalSpriteCache`).<br>• Hold-to-delete interaction.<br>• Same-clan green orders receive highest UX touch priority (`.zIndex(100.0)`). |
 | **Center map** | Center map | Center map without changing zoom level | [`MapStateMachine.swift`](../RadarMap/Models/MapStateMachine.swift)<br>[`GameStateManager.swift`](../RadarMap/Managers/GameStateManager.swift) | • Bottom-left HUD button triggers `gameState.centerMapOnLocalUser()`.<br>• Re-locks `MapTrackingState` to `.locked` at the **current zoom scale** (`scaleMeters` is preserved, never reset). |
 | **Gestures** | Gesture | Standard pan/drag, tap, and native pinch-to-zoom gestures | [`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • iPhone/iPad (`TacticalMKMapView`): fully native, continuous MapKit pan/pinch-zoom with **no** discrete-scale snapping — behaves exactly like stock Apple Maps.<br>• watchOS (`StandardMapView`'s `NativeSwiftUIMapView`): Native `.interactionModes: .pan`; zoom is Digital-Crown-driven and still snaps to the discrete `[1, 2.5, 5]` ladder (see below).<br>• Drag gesture transitions state from `.locked` to `.unlocked` (panning) on both platforms.<br>• Tap gesture handles indicator placement when menu is pending. |
 | **Crown / Pinch Zoom** | Zoom | Digital Crown: discrete decade levels `[1, 2.5, 5]`. iOS pinch: free continuous native zoom | [`AppConstants.swift`](../RadarMap/AppConstants.swift)<br>[`TacticalRadarMapView.swift`](../RadarMap/Views/Map/TacticalRadarMapView.swift)<br>[`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • Digital Crown rotation (watchOS) steps through discrete minor scales `[1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]`, with altitude calculated via MapKit camera FOV trigonometry (`cameraDistance(forScale:)`).<br>• MapKit pinch-to-zoom on iPhone/iPad's Standard map view (`TacticalMKMapView`) is **not** bound to this ladder — it's free, continuous native zoom with no snapping and no altitude calculation of our own. The Radar (OLED) view's own decade ladder is unaffected on either platform. |
-| **Distance Line** | MapKit polyline / annotation | Tap-to-measure range line from local user to selected teammate or POI | [`GameStateManager.swift`](../RadarMap/Managers/GameStateManager.swift)<br>[`RadarMapView.swift`](../RadarMap/Views/Map/RadarMapView.swift)<br>[`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • Single tap on any teammate or POI annotation draws a straight distance line from "me" to the target.<br>• Computes 2D horizontal ground ($XY$) distance via equirectangular approximation (`hypot(dLat, dLon)`); ignores $Z$ (altitude).<br>• Midpoint displays formatted metric distance label.<br>• Tapping target again or tapping empty map clears selection.<br>• Purely local UI state (`selectedAnnotationForDistance`), never synced over network. |
+| **Distance Line** | MapKit polyline / annotation | Tap-to-measure range line from local user to selected teammate or POI | [`GameStateManager.swift`](../RadarMap/Managers/GameStateManager.swift)<br>[`RadarMapView.swift`](../RadarMap/Views/Map/RadarMapView.swift)<br>[`StandardMapView.swift`](../RadarMap/Views/Map/StandardMapView.swift)<br>[`TacticalMKMapView.swift`](../RadarMap/Views/Map/iOS/TacticalMKMapView.swift) | • Single tap on any teammate or POI annotation draws a straight distance line from "me" to the target.<br>• Computes 2D horizontal ground ($XY$) distance via equirectangular approximation (`hypot(dLat, dLon)`); ignores $Z$ (altitude).<br>• Midpoint displays formatted metric distance label.<br>• **Active Target Nametag**: Activates the targeted player's callsign nametag badge while ruler is attached, and deactivates it when detached.<br>• **Touch Pass-Through**: Line and label use `allowsHitTesting(false)` and low z-index (`1.0`) so they never block annotation taps.<br>• Tapping target again or tapping empty map clears selection.<br>• Purely local UI state (`selectedAnnotationForDistance`), never synced over network. |
 | **Other buttons** | *(none)* | Custom definitions not related to MapKit | [`TacticalRadarMapView.swift`](../RadarMap/Views/Map/TacticalRadarMapView.swift) | • Top-left: Settings Gear.<br>• Top-center: Squad Leader / Commander Menu (`star.fill`).<br>• Bottom-center: Scale Ruler / Hold-to-Act Tag Out Button.<br>• Bottom-right: Map Style Toggle (Standard MapKit vs OLED Radar). |
 
 ### D. Core MapKit Implementation Rules
@@ -222,6 +222,8 @@ Due to structural differences between iOS 17+ SwiftUI MapKit and watchOS, the ap
   **Vertical displacement ($Z$ / altitude) is strictly excluded.** The calculated distance represents 2D horizontal ground range across the surface.
 * **Midpoint Distance Badge**: Renders a formatted distance badge (`AppConstants.UI.ScaleRuler.formatDistance(meters:)`) positioned at the geographic midpoint:
   $$\text{midpoint} = \left(\frac{a.\text{lat} + b.\text{lat}}{2}, \frac{a.\text{lon} + b.\text{lon}}{2}\right)$$
+* **Active Target Callsign Nametag**: Whichever player is the active target for the distance ruler has their callsign nametag badge dynamically activated (`isTargetOfDistanceRuler = true`). Upon ruler detachment or target deselect, the nametag is immediately deactivated.
+* **Hit-Testing Pass-Through**: The distance ruler polyline and midpoint distance label are explicitly rendered with `.allowsHitTesting(false)` and assigned `.zIndex(1.0)` so they never intercept or block touch sensing intended for tactical markers or teammate annotations beneath them.
 * **Eviction Safety**: `gameState.validateAnnotationSelection()` automatically clears `selectedAnnotationForDistance` if the targeted member disconnects or the tactical marker is removed, preventing dangling lines.
 * **Zero Network Overhead**: Stored purely in `@Published public var selectedAnnotationForDistance: MeasuredAnnotationSelection?` on `GameStateManager`. It is strictly local UI state and is never serialized or transmitted over Firebase Realtime Database or WatchConnectivity.
 
@@ -248,10 +250,60 @@ graph TD
 | Layer | Component | Description & Responsibilities |
 | :--- | :--- | :--- |
 | **Layer 5 (Top)** | **UX Buttons** | Floating HUD buttons: Settings gear, Star menu, Center Map, Hold-to-Act Tag Out / Scale Ruler, and Map Style toggle. Intercepts taps and holds with top priority. |
-| **Layer 4** | **Annotations & Distance Line** | Dynamic tactical markers (remote squad teammates, orders, hostile alerts) and active tap-to-measure range line with midpoint distance label. |
+| **Layer 4** | **Annotations & Distance Line** | Dynamic tactical markers (remote squad teammates, orders, hostile alerts) and active tap-to-measure range line with midpoint distance label. Green icons hold highest touch priority. |
 | **Layer 3** | **Pan and zoom** | Gesture recognition layer: drag/pan to inspect, pinch-to-zoom (iOS), Digital Crown (watchOS). |
 | **Layer 2** | **Radar/ruler** | Radar range rings, grid divisions, and metric scale ruler visuals representing map zoom scale. |
 | **Layer 1 (Bottom)** | **MapKit & `UserAnnotation`** | Native MapKit engine and local player `UserAnnotation` vector icon with 60Hz hardware compositor tracking. |
+
+
+### Marker Color Coding & Clan Affiliation Convention:
+
+RadarMap implements clear color-coding semantics across all entities:
+
+1. **Local Player ("Me")**:
+   - Always rendered in tactical **Green** (`#00FF66`).
+   - Center pulse core reflects real-time local heart rate.
+2. **Clan Affiliation Convention (`[...]` & Multi-Clans)**:
+   - Per internet gaming conventions, clan or team affiliation tags are enclosed in square brackets prefixing the player's callsign (e.g., `"[hawk]blasdf1"`).
+   - **Multi-Clan Support**: Players can belong to multiple clans separated by commas within brackets, e.g. `"[clanA,clanB]Alpha"`, or across separate brackets `"[clanA][clanB]"`.
+   - **Intersection Matching**: Two callsigns share clan affiliation if their clan sets share at least one common tag:
+     $$\text{clans}(P_1) \cap \text{clans}(P_2) \neq \emptyset$$
+   - Extraction uses bracket parsing (`String.clanTags`), and comparisons are case-insensitive (`String.sharesClan(with:)`). Unaffiliated callsigns have an empty clan set (`[]`).
+3. **Teammate Annotations**:
+   - **Shared Clan ($\ge 1$ matching clan as "Me")**: Rendered in tactical **Green** (`#00FF66`).
+   - **Different Clan or Unaffiliated**: Rendered in tactical **Blue** (`#00BFFF`).
+   - **Stale Telemetry (Fade to Gray)**: Teammates with stale telemetry (`member.isStale == true`) gracefully fade to `.gray` regardless of clan.
+4. **Tactical Orders & Markers**:
+   - **Team Orders (`watchHere`, `goHere`, `attackHere`, `defendHere`, `flag`)**:
+     - **Clan-Private Visibility**: A player only sees team orders placed by themselves ("Me") or teammates with whom they share at least one clan. Team orders from peers with no common clan are **hidden**.
+     - **Asymmetric Visibility Rule**: If Player A = `[clanA,clanB]`, Player B = `[clanA]`, and Player C = `[clanB]`:
+       - Player B can only see Player A and Player B's team orders (shares `clanA`). Player C's team orders are hidden.
+       - Player A sees Player A, Player B, and Player C's team orders (shares `clanA` with B, and `clanB` with C).
+       - Player C can only see Player A and Player C's team orders (shares `clanB`). Player B's team orders are hidden.
+     - **Color & Touch Priority**: Because all visible team orders belong to "Me" or shared-clan peers, **all visible team orders render Green** (`#00FF66`) and receive highest UX touch priority.
+   - **Enemy Indicators (`enemySniper`, `infantry`, `vehicle`, `armor`, `drone`, `danger`)**: Shared across all squad players regardless of clan; rendered in **Red** (`#FF3B30`). Undergo a 5-minute linear grayscale fade to communicate tactical decay.
+   - **Environmental Hazards (`water`, `hazard`, `medical`, `ammo`, `rallyPoint`)**: Shared across all squad players regardless of clan; rendered in **Red** (`#FF3B30`).
+
+
+### Layer 4 UX Touch Priority Architecture:
+
+On the UX interaction layer, **green icons (local player, same-clan teammates, and visible same-clan team orders) have highest priority for touch sensing**:
+
+1. **Z-Index Layering**:
+   - Local Player ("Me"): `.zIndex(101.0)`
+   - Green Same-Clan Annotations: `.zIndex(100.0)` (`AppConstants.UI.greenTouchPriorityZIndex`)
+   - Default Non-Green Annotations: `.zIndex(10.0)` (`AppConstants.UI.defaultTouchPriorityZIndex`)
+   - Distance Ruler Polyline & Midpoint Label: `.zIndex(1.0)` with `.allowsHitTesting(false)` so the ruler never blocks annotation touches.
+2. **SwiftUI Pre-Sorted Traversal**:
+   - `RadarMapView` and `StandardMapView` pre-sort squad members and tactical indicators so non-green views are placed earlier and green views are placed later in the view tree, guaranteeing green annotations sit on top and receive touch events first.
+3. **Expanded Touch Hitboxes**:
+   - Green icons apply expanded invisible touch target padding (`greenTouchTargetPadding`: 10.0pt on iOS, 6.0pt on watchOS) via `contentShape(Rectangle())`, ensuring reliable single-tap selection even when targets partially overlap.
+4. **MapKit UIKit Adapter (`TacticalMKMapView`)**:
+   - Custom `TacticalMKAnnotationView` explicitly configures:
+     - `zPriority = isGreen ? .max : .defaultLow`
+     - `layer.zPosition = isGreen ? 100.0 : 10.0`
+     - `displayPriority = isGreen ? .required : .defaultHigh`
+   - Overrides `point(inside:with:)` with an expanded touch bounds inset based on `greenTouchTargetPadding` (10pt).
 
 
 ### Visual Styling Rules:
@@ -272,6 +324,14 @@ When reviewing or refactoring UI components, ensure:
 - [ ] Radar-view pinch/Digital Crown gesture release snaps cleanly to the nearest discrete decade scale.
 - [ ] iPhone/iPad Standard map view (`TacticalMKMapView`) pinch-to-zoom does **not** snap to the decade ladder and never forces a camera altitude — free native MapKit zoom only (§5.D.3).
 - [ ] Digital Crown rotation triggers haptic feedback only when scale index changes.
+- [ ] Clan tag bracket extraction (`[...]`) supports comma separation `[clanA,clanB]` and multiple brackets `[clanA][clanB]`, matching case-insensitively.
+- [ ] Team order markers are clan-private: visible only to placer and shared-clan peers (all visible orders render Green).
+- [ ] Team orders from non-shared clans are hidden from map/radar; hostile and environmental markers remain squad-wide in Red (with 5-minute decay for enemy sightings).
+- [ ] Teammates sharing $\ge 1$ clan render Green; teammates without shared clans render Blue (stale telemetry fades to gray).
+- [ ] Distance ruler activates the target teammate's callsign nametag, deactivating it upon detachment.
+- [ ] Distance ruler polyline has `.allowsHitTesting(false)` and `.zIndex(1.0)` so it never blocks annotation taps.
+- [ ] Green icons have highest touch priority on UX layer (`zIndex = 100.0`, `zPriority = .max`, `layer.zPosition = 100.0`, expanded touch hitboxes).
 - [ ] Tap-to-measure distance line measures strictly 2D horizontal ground ($XY$) distance ignoring altitude ($Z$).
 - [ ] Tapping the selected annotation again or tapping empty space clears the distance line.
 - [ ] Distance line state is purely local and never transmitted over Firebase or WatchConnectivity.
+

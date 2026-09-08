@@ -12,7 +12,6 @@ public final class SubscriptionManager: ObservableObject {
     // StoreKit Entitlement & Product IDs
     public static let entitlementID = AppConstants.Subscription.entitlementID
     public static let productID = AppConstants.Subscription.productID
-    public static let defaultLifetimePriceString = AppConstants.Subscription.lifetimePriceString
     public static let freeTierMaxCapacity = AppConstants.Subscription.freeTierMaxCapacity
     
     // Published State
@@ -32,6 +31,7 @@ public final class SubscriptionManager: ObservableObject {
     public var storeKitProduct: Product? = nil
     private var transactionListenerTask: Task<Void, Never>? = nil
     
+    #if DEBUG
     /// Force-grants the unlimited squad unlock from the hidden debug panel. Only ever moves
     /// the flag from locked to unlocked — never revokes an unlock, whether it was granted here
     /// or by a real purchase/restore, since a debug toggle should never look like a lost purchase.
@@ -40,6 +40,7 @@ public final class SubscriptionManager: ObservableObject {
         hasUnlimitedSquadUnlock = true
         UserDefaults.standard.set(true, forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
     }
+    #endif
 
     public init(engineMode: PurchaseEngineMode = .storeKit2) {
         self.activeEngineMode = engineMode

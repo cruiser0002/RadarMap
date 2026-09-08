@@ -59,9 +59,14 @@ public struct SettingsView: View {
         let len = squadPin.trimmingCharacters(in: .whitespacesAndNewlines).count
         return len >= AppConstants.UI.minPinLength && len <= AppConstants.UI.maxPinLength
     }
+    private var callsignLengthValid: Bool {
+        let len = callsignInput.trimmingCharacters(in: .whitespacesAndNewlines).count
+        return len >= AppConstants.UI.minCallsignLength && len <= AppConstants.UI.maxCallsignLength
+    }
     private var nameFieldInvalid: Bool { !squadName.isEmpty && !nameLengthValid }
     private var pinFieldInvalid: Bool { !squadPin.isEmpty && !pinLengthValid }
-    private var canHostOrJoin: Bool { nameLengthValid && pinLengthValid }
+    private var callsignFieldInvalid: Bool { !callsignInput.isEmpty && !callsignLengthValid }
+    private var canHostOrJoin: Bool { nameLengthValid && pinLengthValid && callsignLengthValid }
     
     public var body: some View {
         ScrollViewReader { proxy in
@@ -71,12 +76,13 @@ public struct SettingsView: View {
                     joinButton
                     hostButton
                     callsignField
+                    roleSliderRow
                     squadNameField
                     pinField
                     databaseURLField
                     locationUploadToggle
                     healthDataUploadToggle
-                    radarColorRow
+                    // radarColorRow (disabled for now; default theme is green)
                     paywallRow
                     hudGuideRow
                     policyRow
@@ -187,9 +193,9 @@ public struct SettingsView: View {
     
     @ViewBuilder
     private var callsignField: some View {
-        TextField("Callsign", text: $callsignInput)
+        TextField("Callsign (1-20)", text: $callsignInput)
             .font(.system(size: 11, weight: .bold, design: .monospaced))
-            .foregroundColor(gameState.callsignError ? .red : (isBusy ? .gray : .primary))
+            .foregroundColor((gameState.callsignError || callsignFieldInvalid) ? .red : (isBusy ? .gray : .primary))
             .opacity(isBusy ? 0.6 : 1.0)
             .lineLimit(1)
             .submitLabel(.done)
@@ -200,12 +206,28 @@ public struct SettingsView: View {
             .focused($focusedField, equals: .callsign)
             .id(FocusField.callsign)
             .disabled(isBusy)
-            .listRowBackground(gameState.callsignError ? Color.red.opacity(0.18) : nil)
+            .listRowBackground((gameState.callsignError || callsignFieldInvalid) ? Color.red.opacity(0.18) : nil)
             .onChange(of: callsignInput) { _, newValue in
                 gameState.callsignError = false
-                let filtered = newValue.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-                gameState.myCallsign = filtered
+                let sanitized = GameStateManager.sanitizeCallsignInput(newValue)
+                if callsignInput != sanitized {
+                    callsignInput = sanitized
+                }
+                gameState.myCallsign = sanitized
             }
+    }
+
+    @ViewBuilder
+    private var roleSliderRow: some View {
+        RoleSliderView(
+            selectedRole: Binding(
+                get: { gameState.myRole },
+                set: { gameState.myRole = $0 }
+            ),
+            isProUnlocked: gameState.subscriptionManager.hasUnlimitedSquadUnlock,
+            isDisabled: isBusy,
+            themeColor: gameState.radarColorTheme.color
+        )
     }
     
     @ViewBuilder
@@ -275,8 +297,14 @@ public struct SettingsView: View {
         )
         .id(FocusField.databaseURL)
         .onChange(of: customDatabaseURL) { _, newValue in
-            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            gameState.customDatabaseURL = trimmed
+            // URL-specific sanitizer, not `sanitizeRoomNameInput`/`sanitizeCallsignInput`'s
+            // alphanumeric allowlist — a URL legitimately needs `: / . - ? # @` etc. See
+            // `AppConstants.Network.sanitizeInput`'s doc comment for the exact RFC 3986 set.
+            let sanitized = AppConstants.Network.sanitizeInput(newValue)
+            if customDatabaseURL != sanitized {
+                customDatabaseURL = sanitized
+            }
+            gameState.customDatabaseURL = sanitized
         }
     }
 
@@ -612,8 +640,17 @@ public struct SettingsView: View {
                                 .font(.system(size: 11, weight: .bold, design: .monospaced))
                                 .foregroundColor(member.id == gameState.myMemberId ? .cyan : .white)
                             
-                            if member.role == .leader {
+                            if member.id == room.hostId {
                                 Text("HOST")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .padding(.horizontal, 3)
+                                    .padding(.vertical, 1)
+                                    .background(Color.yellow.opacity(0.3))
+                                    .foregroundColor(.yellow)
+                                    .cornerRadius(3)
+                            }
+                            if member.role == .leader && member.id != room.hostId {
+                                Text("LEADER")
                                     .font(.system(size: 7, weight: .bold))
                                     .padding(.horizontal, 3)
                                     .padding(.vertical, 1)

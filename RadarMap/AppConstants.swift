@@ -19,6 +19,7 @@ public enum AppConstants {
         }
     }
     
+    #if DEBUG
     // MARK: - Debug Configuration
     public enum Debug {
         /// Whether the version/netcode debug field is shown in the HUD. Off by default; toggled at
@@ -27,19 +28,8 @@ public enum AppConstants {
             get { UserDefaults.standard.bool(forKey: AppConstants.Storage.isDebugDisplayEnabledKey) }
             set { UserDefaults.standard.set(newValue, forKey: AppConstants.Storage.isDebugDisplayEnabledKey) }
         }
-
-        /// Whether data encryption is enabled. On by default; toggled at runtime from the hidden
-        /// debug panel (hold the Policy screen for 5 seconds).
-        public static var isEncryptionEnabled: Bool {
-            get {
-                if UserDefaults.standard.object(forKey: AppConstants.Storage.isEncryptionEnabledKey) == nil {
-                    return true
-                }
-                return UserDefaults.standard.bool(forKey: AppConstants.Storage.isEncryptionEnabledKey)
-            }
-            set { UserDefaults.standard.set(newValue, forKey: AppConstants.Storage.isEncryptionEnabledKey) }
-        }
     }
+    #endif
     
     // MARK: - Local Storage & UserDefaults Keys
     public enum Storage {
@@ -53,7 +43,13 @@ public enum AppConstants {
         public static let customDatabaseURLKey = "custom_database_url"
         public static let isCustomDatabaseURLEnabledKey = "is_custom_database_url_enabled"
         public static let recentDatabaseURLsKey = "recent_database_urls"
+        #if DEBUG
         public static let isDebugDisplayEnabledKey = "is_debug_display_enabled"
+        #endif
+        public static let userRoleKey = "user_role"
+        /// Legacy per-device flag, only read once to seed `ConfigSnapshot.isEncryptionEnabled` on
+        /// first launch after that field was introduced — see `WatchConnectivityManager.init`.
+        /// The live, phone/watch-synced value is `GameStateManager.isEncryptionEnabled`.
         public static let isEncryptionEnabledKey = "is_encryption_enabled"
     }
     
@@ -201,11 +197,11 @@ public enum AppConstants {
         /// Set to 2.0m to filter out GPS drift / noise jitter that causes player headings to bob up and down
         public static let minDisplacementForCourseOverGroundMeters: Double = 2.0
         
-        /// Default map delta zoom span
-        public static let defaultMapSpanDelta: Double = 0.005
-        
         /// Unified threshold in meters to determine whether map center tracks local player or custom panned location
         public static let centerThresholdMeters: Double = 10.0
+
+        /// Window size for the simple moving average of movement speed used to simulate HR from motion.
+        public static let speedSMASampleCount: Int = 20
     }
     
     // MARK: - HealthKit & Biometrics
@@ -214,20 +210,21 @@ public enum AppConstants {
         public static let defaultIsDead: Bool = false
         public static let defaultRestingHeartRate: Double = 75.0 // BPM
         public static let flatlineHeartRate: Double = 0.0        // BPM for KIA / Downed
+
+        /// BPM added per m/s of smoothed movement speed when simulating HR from motion
+        /// (Phone has no optical sensor of its own — see `LocationHeadingManager.smoothedSpeedMps`).
+        public static let simulatedHeartRateSlopeBpmPerMps: Double = 18.0
+        /// Upper clamp for the speed-simulated HR, matching a sprint-level exertion reading.
+        public static let maxSimulatedHeartRate: Double = 190.0
         public static let referenceBpm: Double = 100.0           // Reference BPM for scanning sweep (BPM / 100 equation)
         public static let secondsPerMinute: Double = 60.0
         
         /// Mock fallback values for simulator/host execution
-        public static let mockRestingHeartRate: Double = 78.0
         public static let mockWorkoutHeartRate: Double = 82.0
         
         /// Heart rate pulse clamping bounds for visual pulse animation
         public static let minPulseBpm: Double = 30.0
         public static let maxPulseBpm: Double = 220.0
-        
-        /// Low power PPG pulse sampling constants
-        public static let lowPowerPPGActiveDurationSeconds: TimeInterval = 4.0 // Active optical LED sampling duration
-        public static let lowPowerPPGSleepDurationSeconds: TimeInterval = 16.0  // Optical LED sleep duration (80% power saving)
         
         /// Heart rate stress level thresholds (BPM)
         public enum Zones {
@@ -260,7 +257,6 @@ public enum AppConstants {
         
         /// Refresh rates for display animations and unified dead-reckoning smoothing (local & remote)
         public enum DisplayRefresh {
-            public static let radarUIHz: Double = 20.0
             public static let radarUIIntervalSeconds: TimeInterval = 1.0 / 20.0
 
             /// Rate at which extrapolated (dead-reckoned) positions for remote squad members are
@@ -340,13 +336,6 @@ public enum AppConstants {
             /// to keep an actively-hosted room alive past idleCutoffHours.
             public static let ttlRefreshIntervalSeconds: TimeInterval = secondsPerHour
         }
-        
-        /// Hold-to-Die gesture timing parameters
-        public enum DeathHold {
-            public static let delayBeforeChargeSeconds: TimeInterval = 1.0
-            public static let chargeDurationSeconds: TimeInterval = 3.0
-            public static let timerTickIntervalSeconds: TimeInterval = 0.03
-        }
     }
     
     // MARK: - Centralized 3-Letter Encodings & Field Mappings
@@ -398,7 +387,6 @@ public enum AppConstants {
     public enum UI {
         public static let defaultCallsign = ""
         public static let defaultRoomName = ""
-        public static let defaultSquadPrefix = "SQUAD-"
         public static let defaultTacticalColorHex = "#00FF66"
         public static let defaultBatteryLevel: Double = 0.95
         
@@ -429,6 +417,15 @@ public enum AppConstants {
 
         /// Minimum characters required in the (mandatory) PIN field (see CLOUD_DATA_MANAGEMENT.md).
         public static let minPinLength: Int = 4
+
+        /// Max characters a user may type into the Callsign field. Generous relative to
+        /// room name/PIN since it's free-form display text, not a derived id, but still bounded
+        /// so an unrestricted paste can't blow up member-list rendering or Firebase payload size.
+        public static let maxCallsignLength: Int = 20
+
+        /// Minimum characters required in the Callsign field — just enough to rule out a
+        /// whitespace-only or single stray-character entry.
+        public static let minCallsignLength: Int = 1
 
         /// Number of most-recently-used custom database URLs remembered for quick reselection.
         public static let maxRecentDatabaseURLs: Int = 3
@@ -639,6 +636,13 @@ public enum AppConstants {
         
         /// Tactical Map Markers sizing and label styling
         public enum MapMarkers {
+            /// Scale factor applied to other players' annotations (30% smaller)
+            public static let otherPlayerScaleFactor: CGFloat = 0.70
+
+            /// Touch priority z-indices for UI layer stacking and hit testing
+            public static let greenTouchPriorityZIndex: Double = 100.0
+            public static let defaultTouchPriorityZIndex: Double = 10.0
+
             #if os(watchOS)
             public static let playerIconSize: CGFloat = 18.0
             public static let leaderIconSize: CGFloat = 22.0
@@ -646,12 +650,14 @@ public enum AppConstants {
             public static let markerFrameSize: CGFloat = 26.0
             public static let pulseCoreSize: CGFloat = 6.0
             
-            public static let tacticalIndicatorIconSize: CGFloat = 16.0
-            public static let tacticalIndicatorRingSize: CGFloat = 24.0
+            public static let tacticalIndicatorIconSize: CGFloat = 11.2
+            public static let environmentalIndicatorIconSize: CGFloat = 11.2
+            public static let tacticalIndicatorRingSize: CGFloat = 16.8
             
             public static let callsignFontSize: CGFloat = 7.0
             public static let callsignYOffset: CGFloat = 20.0
-            public static let orderCallsignYOffset: CGFloat = 20.0
+            public static let orderCallsignYOffset: CGFloat = 14.0
+            public static let greenTouchTargetPadding: CGFloat = 6.0
             #else
             // iPhone UI: Scaled tactical icons, frames, and legible callsign tags (38pt player icon)
             public static let playerIconSize: CGFloat = 30.0
@@ -660,13 +666,25 @@ public enum AppConstants {
             public static let markerFrameSize: CGFloat = 32.0
             public static let pulseCoreSize: CGFloat = 10.0
             
-            public static let tacticalIndicatorIconSize: CGFloat = 30.0
-            public static let tacticalIndicatorRingSize: CGFloat = 32.0
+            public static let tacticalIndicatorIconSize: CGFloat = 21.0
+            public static let environmentalIndicatorIconSize: CGFloat = 14.0
+            public static let tacticalIndicatorRingSize: CGFloat = 22.4
             
             public static let callsignFontSize: CGFloat = 10.0
             public static let callsignYOffset: CGFloat = 30.0
-            public static let orderCallsignYOffset: CGFloat = 30.0
+            public static let orderCallsignYOffset: CGFloat = 21.0
+            public static let greenTouchTargetPadding: CGFloat = 10.0
             #endif
+
+            /// Resolves dynamic icon display size for indicators based on category (e.g. smaller environmental markers on phone to match tactical marker silhouettes).
+            public static func iconSize(for category: TacticalIndicatorCategory) -> CGFloat {
+                switch category {
+                case .environment:
+                    return environmentalIndicatorIconSize
+                case .enemyIndicator, .squadOrder:
+                    return tacticalIndicatorIconSize
+                }
+            }
         }
         
         /// Tactical Vector Shapes Geometry Calculation Constants
@@ -713,11 +731,6 @@ public enum AppConstants {
     
     // MARK: - Watch Connectivity Sync
     public enum WatchConnectivity {
-        public static let p2wHSKey = "p2w_hs"
-        public static let w2pHSKey = "w2p_hs"
-        public static let p2wLSKey = "p2w_ls"
-        public static let w2pLSKey = "w2p_ls"
-        
         public static let defaultHighSpeedCadenceSeconds: TimeInterval = 1.0
         public static let activeUntilLeaseDurationSeconds: TimeInterval = 5.0
         public static let activeAdvertisementCadenceSeconds: TimeInterval = 1.0

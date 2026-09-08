@@ -27,12 +27,15 @@
   * *Details:* [**`COMPANION_DATA_SYNC_MODEL.md`**](docs/COMPANION_DATA_SYNC_MODEL.md)
 * 📍 **Tactical Markers & Orders**:
   * Squad Leaders can deploy tactical objective points, orders (`watchHere`, `goHere`, `attackHere`, `defendHere`, `flag`), hostile unit classifications, and environmental hazards.
-  * Hostile markers feature automated 5-minute linear decay to grayscale.
+  * **Color Coding & Multi-Clan Affiliation**: Call signs support multi-clan tags with comma separation (`[clanA,clanB]Callsign`). Teammates sharing $\ge 1$ clan with the local user render in tactical **Green**; other teammates render in **Blue** (fading to gray if stale).
+  * **Clan-Private Team Orders**: Team orders are strictly clan-private (visible only to the placer and teammates sharing at least one clan; orders from other clans are hidden). All visible team orders render in **Green**. Hostile and environmental markers remain shared squad-wide in **Red** (hostile markers feature automated 5-minute linear decay to grayscale).
+  * **UX Touch Priority**: Green icons (local user, same-clan teammates, and visible same-clan orders) receive highest priority for touch sensing via elevated z-indices (`100.0`) and expanded hitboxes.
   * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md)
 * 📏 **Tap-to-Measure Distance Line**:
   * Single tap on any squad member or tactical POI marker draws an interactive real-time range line from the local player to the target.
   * Displays 2D horizontal ground ($XY$) distance at its midpoint using an equirectangular planar projection (strictly altitude / $Z$-independent).
-  * Purely local UI state that dismisses on re-tap or empty-space tap, with zero network or cloud synchronization overhead.
+  * Automatically activates the targeted player's callsign nametag badge while attached, deactivating upon detachment.
+  * Purely local UI state with touch pass-through (`allowsHitTesting(false)`), with zero network or cloud synchronization overhead.
   * *Details:* [**`TACTICAL_UI_SPECIFICATION.md`**](docs/TACTICAL_UI_SPECIFICATION.md)
 * 🔍 **Discrete Decade Zoom Ladder**:
   * Digital Crown (watchOS) and pinch-to-zoom (iOS) navigation stepping through discrete $[1, 2.5, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]\text{m}$ decade scales.
@@ -77,6 +80,8 @@ The application is parameterized by centralized constants in [`RadarMap/AppConst
 | **Monetization** | Lifetime Price / Product ID | `$29.99` / `com.radarmap.watch.pro` | One-time non-consumable Squad Leader lifetime unlock |
 | **Tactical Markers**| `freeTierMaxTacticalIndicators` / `pro` | `0` / `20` markers | Concurrent active enemy & environmental markers cap |
 | **Tactical Markers**| `enemyIndicatorFadeDurationSeconds` | `300.0s` (5 min) | Automatic fade-to-grayscale duration for enemy sightings |
+| **UX Touch Priority**| `greenTouchPriorityZIndex` / `default` | `100.0` / `10.0` | Z-index priority ensuring green (same-clan) icons intercept touches first |
+| **UX Touch Priority**| `greenTouchTargetPadding` | `10.0pt` (iOS) / `6.0pt` (watchOS) | Expanded invisible touch target padding for green tactical icons |
 | **Room Identifiers**| Room ID / Entry Length | `16` total / `4–12` name | 4–12 char squad name + dynamic Crockford Base32 padding ($16 - \text{name.length}$) = fixed 16-char path key |
 | **PIN Validation** | `minPinLength` / `maxPinLength`| `4` min / `16` max | Mandatory join PIN validation limits |
 | **Biometrics** | Optical PPG Duty Cycle | `4.0s` active / `16.0s` sleep | 80% battery conservation duty cycling (`HealthKitManager`) |

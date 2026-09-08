@@ -17,8 +17,22 @@ public struct RadarMapView: View {
     
     public init() {}
     
-    private var otherSquadMembers: [SquadMember] {
-        gameState.otherSquadMembers
+    private var sortedOtherSquadMembers: [SquadMember] {
+        gameState.otherSquadMembers.sorted { m1, m2 in
+            let g1 = gameState.isGreen(member: m1)
+            let g2 = gameState.isGreen(member: m2)
+            if g1 == g2 { return m1.id < m2.id }
+            return !g1 && g2
+        }
+    }
+    
+    private var sortedTacticalIndicators: [TacticalIndicator] {
+        gameState.allTacticalIndicators.sorted { i1, i2 in
+            let g1 = gameState.isGreen(indicator: i1)
+            let g2 = gameState.isGreen(indicator: i2)
+            if g1 == g2 { return i1.timestamp < i2.timestamp }
+            return !g1 && g2
+        }
     }
     
     public var body: some View {
@@ -35,7 +49,8 @@ public struct RadarMapView: View {
             
             let metersPerDegreeLat = AppConstants.Location.metersPerDegreeLatitude
             let metersPerDegreeLon = metersPerDegreeLat * cos(centerCoord.latitude * AppConstants.Location.degreesToRadiansFactor)
-            let outerRadarDistanceMeters = gameState.radarScaleMeters * 4.0
+            let currentScaleMeters = gameState.liveMapScaleMeters > 0 ? gameState.liveMapScaleMeters : gameState.radarScaleMeters
+            let outerRadarDistanceMeters = currentScaleMeters * 4.0
             let pointsPerMeter = outerRadarDistanceMeters > 0 ? Double(maxRadius) / outerRadarDistanceMeters : 1.0
             
             ZStack {
@@ -93,15 +108,18 @@ public struct RadarMapView: View {
                 }
                 
                 // Active Remote Squad Members within outer radar distance (d <= 4S)
-                ForEach(otherSquadMembers, id: \.id) { member in
+                ForEach(sortedOtherSquadMembers, id: \.id) { member in
                     let displayCoordinate = gameState.remoteDisplayPositions[member.id] ?? member.coordinate
                     let d = gameState.distanceToLocalPlayer(from: displayCoordinate)
                     if d <= outerRadarDistanceMeters {
                         let offset = pointOffset(for: displayCoordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
+                        let isSameClan = gameState.isSameClan(callsign: member.callsign)
 
                         MemberAnnotationView(
                             member: member,
                             isMe: false,
+                            isSameClan: isSameClan,
+                            isSelected: gameState.selectedAnnotationForDistance == .squadMember(id: member.id),
                             radarColor: themeColor,
                             onTap: {
                                 guard gameState.pendingIndicatorPlacementType == nil else { return }
@@ -109,18 +127,24 @@ public struct RadarMapView: View {
                             }
                         )
                         .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
+                        .zIndex(isSameClan ? AppConstants.UI.MapMarkers.greenTouchPriorityZIndex : AppConstants.UI.MapMarkers.defaultTouchPriorityZIndex)
                         .animation(.linear(duration: 0), value: displayCoordinate)
                     }
                 }
 
                 // Active Tactical Indicators within outer radar distance (d <= 4S)
-                ForEach(gameState.allTacticalIndicators) { indicator in
+                ForEach(sortedTacticalIndicators) { indicator in
                     let d = gameState.distanceToLocalPlayer(from: indicator.coordinate)
                     if d <= outerRadarDistanceMeters {
                         let offset = pointOffset(for: indicator.coordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
+                        let isPlacedByMe = indicator.placedByMemberId == gameState.myMemberId
+                        let isSameClan = gameState.isIndicatorFromSameClan(indicator)
+                        let isGreen = (indicator.category == .squadOrder) && (isPlacedByMe || isSameClan)
 
                         TacticalIndicatorOverlayView(
                             indicator: indicator,
+                            isPlacedByMe: isPlacedByMe,
+                            isSameClan: isSameClan,
                             radarColor: themeColor,
                             onDelete: {
                                 gameState.removeTacticalIndicator(id: indicator.id)
@@ -131,6 +155,7 @@ public struct RadarMapView: View {
                             }
                         )
                         .position(x: centerPoint.x + offset.x, y: centerPoint.y + offset.y)
+                        .zIndex(isGreen ? AppConstants.UI.MapMarkers.greenTouchPriorityZIndex : AppConstants.UI.MapMarkers.defaultTouchPriorityZIndex)
                     }
                 }
 
@@ -145,34 +170,39 @@ public struct RadarMapView: View {
                     }
                 )
                 .position(x: centerPoint.x + meOffset.x, y: centerPoint.y + meOffset.y)
+                .zIndex(AppConstants.UI.MapMarkers.greenTouchPriorityZIndex + 1.0)
 
                 // Tap-to-Measure Distance Line: single thin line from "me" to the selected
                 // annotation, with the distance labeled at its midpoint. Purely local UI state.
-                if let selection = gameState.selectedAnnotationForDistance,
-                   let selectedCoordinate = gameState.coordinate(for: selection) {
-                    let mePoint = CGPoint(x: centerPoint.x + meOffset.x, y: centerPoint.y + meOffset.y)
-                    let selectedOffset = pointOffset(for: selectedCoordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
-                    let selectedPoint = CGPoint(x: centerPoint.x + selectedOffset.x, y: centerPoint.y + selectedOffset.y)
-                    let midpoint = CGPoint(x: (mePoint.x + selectedPoint.x) / 2, y: (mePoint.y + selectedPoint.y) / 2)
-                    let distanceMeters = GameStateManager.distance(from: meMember.coordinate, to: selectedCoordinate)
+                Group {
+                    if let selection = gameState.selectedAnnotationForDistance,
+                       let selectedCoordinate = gameState.coordinate(for: selection) {
+                        let mePoint = CGPoint(x: centerPoint.x + meOffset.x, y: centerPoint.y + meOffset.y)
+                        let selectedOffset = pointOffset(for: selectedCoordinate, centerCoord: centerCoord, metersPerDegreeLat: metersPerDegreeLat, metersPerDegreeLon: metersPerDegreeLon, pointsPerMeter: pointsPerMeter)
+                        let selectedPoint = CGPoint(x: centerPoint.x + selectedOffset.x, y: centerPoint.y + selectedOffset.y)
+                        let midpoint = CGPoint(x: (mePoint.x + selectedPoint.x) / 2, y: (mePoint.y + selectedPoint.y) / 2)
+                        let distanceMeters = GameStateManager.distance(from: meMember.coordinate, to: selectedCoordinate)
 
-                    Path { path in
-                        path.move(to: mePoint)
-                        path.addLine(to: selectedPoint)
+                        Path { path in
+                            path.move(to: mePoint)
+                            path.addLine(to: selectedPoint)
+                        }
+                        .stroke(themeColor.opacity(0.85), lineWidth: 1.0)
+
+                        Text(AppConstants.UI.ScaleRuler.formatDistance(meters: distanceMeters))
+                            .font(.system(size: AppConstants.UI.MapMarkers.callsignFontSize, weight: .bold, design: .monospaced))
+                            .foregroundColor(themeColor)
+                            .lineLimit(1)
+                            .padding(.horizontal, 3.0)
+                            .padding(.vertical, 1.0)
+                            .background(Color.black.opacity(0.85))
+                            .cornerRadius(3)
+                            .fixedSize()
+                            .position(midpoint)
                     }
-                    .stroke(themeColor.opacity(0.85), lineWidth: 1.0)
-
-                    Text(AppConstants.UI.ScaleRuler.formatDistance(meters: distanceMeters))
-                        .font(.system(size: AppConstants.UI.MapMarkers.callsignFontSize, weight: .bold, design: .monospaced))
-                        .foregroundColor(themeColor)
-                        .lineLimit(1)
-                        .padding(.horizontal, 3.0)
-                        .padding(.vertical, 1.0)
-                        .background(Color.black.opacity(0.85))
-                        .cornerRadius(3)
-                        .fixedSize()
-                        .position(midpoint)
                 }
+                .allowsHitTesting(false)
+                .zIndex(1.0)
             }
             .contentShape(Rectangle())
             .simultaneousGesture(
@@ -201,7 +231,7 @@ public struct RadarMapView: View {
                 MagnifyGesture()
                     .onChanged { value in
                         if pinchInitialScale == nil {
-                            pinchInitialScale = gameState.mapStateMachine.scaleMeters
+                            pinchInitialScale = gameState.liveMapScaleMeters > 0 ? gameState.liveMapScaleMeters : gameState.mapStateMachine.scaleMeters
                         }
                         guard let initial = pinchInitialScale, value.magnification > 0 else { return }
                         // Pinching in (magnification > 1) zooms IN (smaller scaleMeters)

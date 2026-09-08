@@ -10,7 +10,9 @@ public struct TacticalRadarMapView: View {
     #if os(watchOS)
     @Environment(\.isLuminanceReduced) private var isLuminanceReduced
     #endif
-    @AppStorage(AppConstants.Storage.isDebugDisplayEnabledKey) private var isDebugFieldEnabled: Bool = false
+    #if DEBUG
+    @AppStorage(AppConstants.Storage.isDebugDisplayEnabledKey) private var isDebugFieldEnabled: Bool = true
+    #endif
     @State private var showingSettingsSheet: Bool = false
     @State private var showingIndicatorMenuSheet: Bool = false
     @State private var showingPaywallSheet: Bool = false
@@ -30,22 +32,15 @@ public struct TacticalRadarMapView: View {
     
     // EKG scan speed — dynamically computed from live heart rate and KIA state.
     private var sweepDuration: Double {
-        let bpm = gameState.isDead ? AppConstants.Health.defaultRestingHeartRate : (gameState.healthKitManager.currentHeartRate > 0 ? gameState.healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
-        return AppConstants.Health.referenceBpm / max(20.0, bpm)
+        let bpm = gameState.effectiveHeartRate
+        return AppConstants.Health.referenceBpm / max(20.0, bpm > 0 ? bpm : AppConstants.Health.defaultRestingHeartRate)
     }
 
     // Numeric BPM readout — mirrors the same effective-heart-rate rule used when
-    // broadcasting telemetry (GameStateManager.sendTelemetry): flatline when KIA,
-    // pinned to the default resting rate when heart-rate upload is disabled.
+    // broadcasting telemetry (GameStateManager.sendTelemetry): flatline (0) when KIA,
+    // speed-simulated or live optical HR.
     private var displayedHeartRate: Int {
-        if gameState.isDead {
-            return Int(AppConstants.Health.flatlineHeartRate)
-        } else if !gameState.isUploadHeartRateEnabled {
-            return Int(AppConstants.Health.defaultRestingHeartRate)
-        } else {
-            let hr = gameState.healthKitManager.currentHeartRate
-            return Int(hr > 0 ? hr : AppConstants.Health.defaultRestingHeartRate)
-        }
+        Int(gameState.effectiveHeartRate)
     }
     
     public init() {}
@@ -109,30 +104,112 @@ public struct TacticalRadarMapView: View {
             // Tactical HUD Overlays (Highest priority over map)
             VStack {
                 // Top HUD (Upper left: Config, Center: Squad Leader / Commander Button, Upper right: +/- on phone or Version & Debug info)
-                HStack(alignment: .top) {
-                    // Upper left: Settings gear
-                    Button(action: {
-                        showingSettingsSheet = true
-                    }) {
-                        ZStack {
-                            Circle()
-                                .fill(Color.black.opacity(0.85))
-                                .shadow(color: .black.opacity(0.75), radius: 2.5)
-                            
-                            Image(systemName: "gearshape.fill")
-                                .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .semibold))
-                                .foregroundColor(uiThemeColor)
+                ZStack(alignment: .top) {
+                    // Left and Right edge controls
+                    HStack(alignment: .top) {
+                        // Upper left: Settings gear
+                        Button(action: {
+                            showingSettingsSheet = true
+                        }) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.black.opacity(0.85))
+                                    .shadow(color: .black.opacity(0.75), radius: 2.5)
+                                
+                                Image(systemName: "gearshape.fill")
+                                    .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .semibold))
+                                    .foregroundColor(uiThemeColor)
+                            }
+                            .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
+                            .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
+                            .contentShape(Circle())
                         }
-                        .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
-                        .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                        .contentShape(Circle())
+                        .buttonStyle(.plain)
+                        .focusable(false)
+
+                        Spacer()
+
+                        // Upper right: (+ / -) stacked vertically on phone (if enabled), or Version & Debug Info on Phone / Watch
+                        #if !os(watchOS)
+                        #if SHOW_PLUS_MINUS_ZOOM_BUTTONS
+                        VStack(spacing: 0) {
+                            Button(action: {
+                                zoomIn()
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color.black.opacity(0.85))
+                                        .shadow(color: .black.opacity(0.75), radius: 2.5)
+                                    Image(systemName: "plus")
+                                        .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .bold))
+                                        .foregroundColor(uiThemeColor)
+                                    Circle()
+                                        .stroke(uiThemeColor.opacity(0.6), lineWidth: 1.2)
+                                }
+                                .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
+                                .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .focusable(false)
+                            
+                            Button(action: {
+                                zoomOut()
+                            }) {
+                                ZStack {
+                                    Circle()
+                                        .fill(Color.black.opacity(0.85))
+                                        .shadow(color: .black.opacity(0.75), radius: 2.5)
+                                    Image(systemName: "minus")
+                                        .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .bold))
+                                        .foregroundColor(uiThemeColor)
+                                    Circle()
+                                        .stroke(uiThemeColor.opacity(0.6), lineWidth: 1.2)
+                                }
+                                .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
+                                .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .focusable(false)
+                        }
+                        #else
+                        VStack(alignment: .trailing, spacing: 2) {
+                            #if DEBUG
+                            if isDebugFieldEnabled {
+                                Text(AppConstants.Version.formattedVersionString)
+                                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                    .foregroundColor(uiThemeColor.opacity(0.6))
+                                Text(gameState.debugStatusString)
+                                    .font(.system(size: 16, weight: .bold, design: .monospaced))
+                                    .foregroundColor(uiThemeColor.opacity(0.6))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            #endif
+                        }
+                        .frame(minWidth: AppConstants.UI.HUD.circleHitboxSize.width, minHeight: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .trailing)
+                        #endif
+                        #else
+                        VStack(alignment: .trailing, spacing: 1) {
+                            #if DEBUG
+                            if isDebugFieldEnabled {
+                                Text(AppConstants.Version.formattedVersionString)
+                                    .font(.system(size: 6, weight: .bold, design: .monospaced))
+                                    .foregroundColor(uiThemeColor.opacity(0.55))
+                                Text(gameState.debugStatusString)
+                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                    .foregroundColor(uiThemeColor.opacity(0.55))
+                                    .lineLimit(1)
+                                    .fixedSize(horizontal: true, vertical: false)
+                            }
+                            #endif
+                        }
+                        .frame(minWidth: AppConstants.UI.HUD.circleHitboxSize.width, minHeight: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .trailing)
+                        #endif
                     }
-                    .buttonStyle(.plain)
-                    .focusable(false)
 
-                    Spacer()
-
-                    // Center Top: Squad Leader / Commander Button (Single star)
+                    // Center Top: Squad Leader / Commander Button (Single star) - perfectly centered horizontally regardless of edge item widths
                     if gameState.subscriptionManager.hasUnlimitedSquadUnlock {
                         Button(action: {
                             gameState.openIndicatorMenu()
@@ -154,85 +231,7 @@ public struct TacticalRadarMapView: View {
                         }
                         .buttonStyle(.plain)
                         .focusable(false)
-                    } else {
-                        // Empty placeholder keeping layout alignment
-                        Color.clear
-                            .frame(width: AppConstants.UI.HUD.rectHitboxSize.width, height: AppConstants.UI.HUD.rectHitboxSize.height)
-                            .allowsHitTesting(false)
                     }
-                    
-                    Spacer()
-                    
-                    // Upper right: (+ / -) stacked vertically on phone (if enabled), or Version & Debug Info on Phone / Watch
-                    #if !os(watchOS)
-                    #if SHOW_PLUS_MINUS_ZOOM_BUTTONS
-                    VStack(spacing: 0) {
-                        Button(action: {
-                            zoomIn()
-                        }) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.black.opacity(0.85))
-                                    .shadow(color: .black.opacity(0.75), radius: 2.5)
-                                Image(systemName: "plus")
-                                    .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .bold))
-                                    .foregroundColor(uiThemeColor)
-                                Circle()
-                                    .stroke(uiThemeColor.opacity(0.6), lineWidth: 1.2)
-                            }
-                            .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
-                            .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .focusable(false)
-                        
-                        Button(action: {
-                            zoomOut()
-                        }) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.black.opacity(0.85))
-                                    .shadow(color: .black.opacity(0.75), radius: 2.5)
-                                Image(systemName: "minus")
-                                    .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .bold))
-                                    .foregroundColor(uiThemeColor)
-                                Circle()
-                                    .stroke(uiThemeColor.opacity(0.6), lineWidth: 1.2)
-                            }
-                            .frame(width: AppConstants.UI.HUD.circleButtonDiameter, height: AppConstants.UI.HUD.circleButtonDiameter)
-                            .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .center)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .focusable(false)
-                    }
-                    #else
-                    VStack(alignment: .trailing, spacing: 2) {
-                        if isDebugFieldEnabled {
-                            Text(AppConstants.Version.formattedVersionString)
-                                .font(.system(size: 9, weight: .bold, design: .monospaced))
-                                .foregroundColor(uiThemeColor.opacity(0.6))
-                            Text(gameState.debugStatusString)
-                                .font(.system(size: 8, weight: .bold, design: .monospaced))
-                                .foregroundColor(uiThemeColor.opacity(0.6))
-                        }
-                    }
-                    .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .trailing)
-                    #endif
-                    #else
-                    VStack(alignment: .trailing, spacing: 1) {
-                        if isDebugFieldEnabled {
-                            Text(AppConstants.Version.formattedVersionString)
-                                .font(.system(size: 6, weight: .bold, design: .monospaced))
-                                .foregroundColor(uiThemeColor.opacity(0.55))
-                            Text(gameState.debugStatusString)
-                                .font(.system(size: 5.5, weight: .bold, design: .monospaced))
-                                .foregroundColor(uiThemeColor.opacity(0.55))
-                        }
-                    }
-                    .frame(width: AppConstants.UI.HUD.circleHitboxSize.width, height: AppConstants.UI.HUD.circleHitboxSize.height, alignment: .trailing)
-                    #endif
                 }
                 .padding(.horizontal, AppConstants.UI.HUD.horizontalPadding)
                 .padding(.top, AppConstants.UI.HUD.topPadding)

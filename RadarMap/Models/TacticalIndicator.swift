@@ -279,11 +279,6 @@ public struct TacticalIndicator: Identifiable, Codable, Equatable {
         return nil
     }
     
-    /// Compact dictionary format for backward-compatibility or direct JSON writes
-    public var firebaseValue: [Any] {
-        return compactArray
-    }
-    
     /// Calculates the aging desaturation progress (0.0 = fresh radar color, 1.0 = fully faded to gray)
     /// Over 5 minutes (300 seconds)
     public func grayFadeFactor(referenceDate: Date = Date()) -> Double {

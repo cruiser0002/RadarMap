@@ -181,64 +181,6 @@ public struct HUDGuideView: View {
                     }
                 }
                 .padding(.horizontal)
-                
-                // Hardware & Interaction Tips
-                VStack(alignment: .leading, spacing: 12) {
-                    Label("Tactical Hardware Tips", systemImage: "applewatch")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundStyle(.primary)
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "digitalcrown.horizontal.press.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(tacticalGreen)
-                                .frame(width: 18)
-                            #if os(watchOS)
-                            Text("**Digital Crown:** Zoom range dynamically from 1m up to 2,500m across discrete [1, 2.5, 5] decade steps.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                            #else
-                            Text("**+/- Zoom Buttons:** Step zoom range dynamically from 1m up to 2,500m across discrete [1, 2.5, 5] decade steps.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                            #endif
-                        }
-                        
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "bolt.heart.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(tacticalGreen)
-                                .frame(width: 18)
-                            Text("**Live Teammate Telemetry:** Teammate markers glide smoothly using dead reckoning and live health monitoring.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                        
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "ruler.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(tacticalGreen)
-                                .frame(width: 18)
-                            Text("**Tap-to-Measure Range:** Tap any teammate or POI to draw a live distance line with 2D ground (XY) distance at the midpoint. Tap again to clear.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "antenna.radiowaves.left.and.right")
-                                .font(.system(size: 12))
-                                .foregroundStyle(tacticalGreen)
-                                .frame(width: 18)
-                            Text("**Independent Operation:** Radar Map operates seamlessly on Apple Watch and iPhone companion.")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding()
-                .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 16))
-                .padding(.horizontal)
                 .padding(.bottom, 24)
             }
         }

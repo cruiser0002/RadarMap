@@ -1,5 +1,6 @@
 import SwiftUI
 
+#if DEBUG
 /// Hidden debug panel, reached by holding the Policy screen for 5 seconds.
 /// Gated behind a password stored in DebugSecrets.swift (gitignored, local-only).
 struct DebugUnlockView: View {
@@ -10,8 +11,17 @@ struct DebugUnlockView: View {
     @State private var isUnlocked: Bool = false
     @State private var showIncorrectPassword: Bool = false
 
-    @AppStorage(AppConstants.Storage.isDebugDisplayEnabledKey) private var isDebugDisplayEnabled: Bool = false
-    @AppStorage(AppConstants.Storage.isEncryptionEnabledKey) private var isEncryptionEnabled: Bool = true
+    @AppStorage(AppConstants.Storage.isDebugDisplayEnabledKey) private var isDebugDisplayEnabled: Bool = true
+
+    /// Synced phone<->watch via `GameStateManager.isEncryptionEnabled` (not a raw per-device
+    /// `@AppStorage` flag) so toggling this here can't leave the two devices unable to decrypt
+    /// each other's telemetry/tactical payloads — see `ConfigSnapshot.isEncryptionEnabled`.
+    private var isEncryptionEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { gameState.isEncryptionEnabled },
+            set: { gameState.isEncryptionEnabled = $0 }
+        )
+    }
 
     private var isProUnlocked: Bool {
         gameState.subscriptionManager.hasUnlimitedSquadUnlock
@@ -81,8 +91,9 @@ struct DebugUnlockView: View {
     private var unlockedForm: some View {
         Form {
             Toggle("Debug Display", isOn: $isDebugDisplayEnabled)
-            Toggle("Encryption", isOn: $isEncryptionEnabled)
+            Toggle("Encryption", isOn: isEncryptionEnabledBinding)
             Toggle("Pro", isOn: proBinding)
         }
     }
 }
+#endif

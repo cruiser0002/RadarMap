@@ -14,6 +14,10 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
         }
     }
     @Published public var blendedHeading: Double = 0.0
+    /// Simple moving average of the last `speedSMASampleCount` raw speed samples (m/s), used to
+    /// simulate HR from motion when no optical sensor reading is present — see `AppConstants.Health`.
+    @Published public private(set) var smoothedSpeedMps: Double = 0.0
+    private var speedSamples: [Double] = []
     @Published public var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published public var isUpdating: Bool = false
     
@@ -75,12 +79,21 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
         return circularInterpolate(from: compassHeading, to: gpsCourse, weight: weight)
     }
     
+    private func updateSmoothedSpeed(withRawSample sample: Double) {
+        speedSamples.append(sample)
+        if speedSamples.count > AppConstants.Location.speedSMASampleCount {
+            speedSamples.removeFirst(speedSamples.count - AppConstants.Location.speedSMASampleCount)
+        }
+        smoothedSpeedMps = speedSamples.reduce(0, +) / Double(speedSamples.count)
+    }
+
     private func recalculateBlendedHeading() {
         let compass = userHeading != nil && userHeading!.headingAccuracy >= 0 ? (userHeading!.trueHeading >= 0 ? userHeading!.trueHeading : userHeading!.magneticHeading) : nil
         let loc = userLocation
         let course = loc != nil && loc!.course >= 0 ? loc!.course : nil
         let speed = max(0.0, loc?.speed ?? 0.0)
-        
+        updateSmoothedSpeed(withRawSample: speed)
+
         let hasValidCompass = compass != nil
         let hasValidCourse = course != nil
         

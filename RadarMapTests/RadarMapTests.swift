@@ -20,6 +20,8 @@ final class RadarMapTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.savedPinKey)
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.customDatabaseURLKey)
         UserDefaults.standard.removeObject(forKey: AppConstants.Storage.radarColorThemeKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.userRoleKey)
+        UserDefaults.standard.removeObject(forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
     }
 
     override func setUp() {
@@ -1025,6 +1027,7 @@ final class RadarMapTests: XCTestCase {
             radarColor: RadarColorTheme.green.color
         )
         XCTAssertEqual(greenAnnotationView.radarColor, .green)
+        XCTAssertEqual(greenAnnotationView.indicatorColor, .blue)
         
         // When radar color theme is red
         let redAnnotationView = MemberAnnotationView(
@@ -1033,6 +1036,7 @@ final class RadarMapTests: XCTestCase {
             radarColor: RadarColorTheme.red.color
         )
         XCTAssertEqual(redAnnotationView.radarColor, .red)
+        XCTAssertEqual(redAnnotationView.indicatorColor, .blue)
     }
     
     func testMemberAnnotationViewDeadTeammateStaleFadesToGray() {
@@ -1053,6 +1057,7 @@ final class RadarMapTests: XCTestCase {
             radarColor: .red
         )
         XCTAssertTrue(view.member.isStale)
+        XCTAssertEqual(view.indicatorColor, .gray)
     }
     
     func testMemberAnnotationViewTeammateNameFollowsRadarColor() {
@@ -1071,6 +1076,7 @@ final class RadarMapTests: XCTestCase {
             radarColor: RadarColorTheme.green.color
         )
         XCTAssertEqual(greenView.radarColor, .green)
+        XCTAssertEqual(greenView.indicatorColor, .blue)
         
         let redView = MemberAnnotationView(
             member: activeTeammate,
@@ -1078,6 +1084,67 @@ final class RadarMapTests: XCTestCase {
             radarColor: RadarColorTheme.red.color
         )
         XCTAssertEqual(redView.radarColor, .red)
+        XCTAssertEqual(redView.indicatorColor, .blue)
+    }
+    
+    func testMemberAnnotationViewCallsignTagActivationOnDistanceRulerSelection() {
+        let teammate1 = SquadMember(
+            id: "TEAMMATE_1",
+            callsign: "VIPER",
+            latitude: 37.77,
+            longitude: -122.41,
+            status: .active
+        )
+        let teammate2 = SquadMember(
+            id: "TEAMMATE_2",
+            callsign: "GHOST",
+            latitude: 37.78,
+            longitude: -122.42,
+            status: .active
+        )
+        
+        let gameState = GameStateManager()
+        
+        // 1. Initially no distance ruler target is selected
+        gameState.selectedAnnotationForDistance = nil
+        
+        let unselectedView1 = MemberAnnotationView(
+            member: teammate1,
+            isMe: false,
+            isSelected: gameState.selectedAnnotationForDistance == .squadMember(id: teammate1.id)
+        )
+        let unselectedView2 = MemberAnnotationView(
+            member: teammate2,
+            isMe: false,
+            isSelected: gameState.selectedAnnotationForDistance == .squadMember(id: teammate2.id)
+        )
+        XCTAssertFalse(unselectedView1.isSelected, "Nametag must be deactivated when not ruler target")
+        XCTAssertFalse(unselectedView2.isSelected, "Nametag must be deactivated when not ruler target")
+        
+        // 2. Select teammate 1 as the distance ruler target
+        gameState.selectedAnnotationForDistance = .squadMember(id: teammate1.id)
+        
+        let selectedView1 = MemberAnnotationView(
+            member: teammate1,
+            isMe: false,
+            isSelected: gameState.selectedAnnotationForDistance == .squadMember(id: teammate1.id)
+        )
+        let notSelectedView2 = MemberAnnotationView(
+            member: teammate2,
+            isMe: false,
+            isSelected: gameState.selectedAnnotationForDistance == .squadMember(id: teammate2.id)
+        )
+        XCTAssertTrue(selectedView1.isSelected, "Whichever player is the active target for distance ruler must have nametag activated")
+        XCTAssertFalse(notSelectedView2.isSelected, "Other players must remain deactivated")
+        
+        // 3. Ruler detachment (selectedAnnotationForDistance = nil)
+        gameState.selectedAnnotationForDistance = nil
+        let detachedView1 = MemberAnnotationView(
+            member: teammate1,
+            isMe: false,
+            isSelected: gameState.selectedAnnotationForDistance == .squadMember(id: teammate1.id)
+        )
+        XCTAssertFalse(detachedView1.isSelected, "Nametag must be deactivated upon ruler detachment")
     }
     
     func testMemberAnnotationViewTeammateIconFollowsRadarMapColorScheme() {
@@ -1096,14 +1163,295 @@ final class RadarMapTests: XCTestCase {
             isMe: false,
             radarColor: RadarColorTheme.red.color
         )
-        XCTAssertEqual(redView.indicatorColor, .red, "Teammate icon must follow red radar map color theme")
+        XCTAssertEqual(redView.indicatorColor, .blue, "Teammate icon must be blue regardless of red radar map color theme")
         
         let greenView = MemberAnnotationView(
             member: teammate,
             isMe: false,
             radarColor: RadarColorTheme.green.color
         )
-        XCTAssertEqual(greenView.indicatorColor, .green, "Teammate icon must follow green radar map color theme")
+        XCTAssertEqual(greenView.indicatorColor, .blue, "Teammate icon must be blue regardless of green radar map color theme")
+        
+        // Stale teammate turns gray
+        var staleTeammate = teammate
+        staleTeammate.lastUpdatedTimestamp = Date().timeIntervalSince1970 - 1000
+        let staleView = MemberAnnotationView(
+            member: staleTeammate,
+            isMe: false,
+            radarColor: RadarColorTheme.green.color
+        )
+        XCTAssertEqual(staleView.indicatorColor, .gray, "Stale teammate icon must turn gray")
+    }
+    
+    func testClanTagExtractionAndComparison() {
+        // Multi-clan tag extraction with comma separation and multiple brackets
+        XCTAssertEqual("[clanA,clanB]blasdf1".clanTags, ["clanA", "clanB"])
+        XCTAssertEqual("[clanA, clanB]blasdf1".clanTags, ["clanA", "clanB"])
+        XCTAssertEqual("[ clanA ,  clanB ]blasdf1".clanTags, ["clanA", "clanB"])
+        XCTAssertEqual("[clanA][clanB]blasdf1".clanTags, ["clanA", "clanB"])
+        XCTAssertEqual("[clanA,clanB,clanC]blasdf1".clanTags, ["clanA", "clanB", "clanC"])
+        XCTAssertEqual("blasdf1".clanTags, [])
+        XCTAssertEqual("[clanA,clanB]blasdf1".clanTag, "clanA")
+        
+        // Multi-clan intersection comparison
+        let playerA = "[clanA,clanB]PlayerA"
+        let playerB = "[clanA]PlayerB"
+        let playerC = "[clanB]PlayerC"
+        let playerD = "[clanD]PlayerD"
+        let playerSolo = "SoloPlayer"
+        
+        XCTAssertTrue(playerA.sharesClan(with: playerB))
+        XCTAssertTrue(playerA.sharesClan(with: playerC))
+        XCTAssertTrue(playerB.sharesClan(with: playerA))
+        XCTAssertFalse(playerB.sharesClan(with: playerC), "Player B [clanA] and Player C [clanB] share no clans")
+        XCTAssertTrue(playerC.sharesClan(with: playerA))
+        XCTAssertFalse(playerC.sharesClan(with: playerB))
+        XCTAssertFalse(playerA.sharesClan(with: playerD))
+        XCTAssertFalse(playerA.sharesClan(with: playerSolo))
+        
+        // Tag extraction
+        XCTAssertEqual("[hawk]blasdf1".clanTag, "hawk")
+        XCTAssertEqual("[hawk]zocviiwer".clanTag, "hawk")
+        XCTAssertEqual("[HAWK]player".clanTag, "HAWK")
+        XCTAssertEqual("[ hawk ]player".clanTag, "hawk")
+        XCTAssertEqual("player [hawk]".clanTag, "hawk")
+        XCTAssertNil("player".clanTag)
+        XCTAssertNil("[]player".clanTag)
+        XCTAssertNil("[   ]player".clanTag)
+        XCTAssertNil("[hawk".clanTag)
+        XCTAssertNil("hawk]".clanTag)
+        XCTAssertNil("]hawk[".clanTag)
+        
+        // Clan comparison
+        XCTAssertTrue("[hawk]blasdf1".hasSameClan(as: "[hawk]zocviiwer"))
+        XCTAssertTrue("[HAWK]blasdf1".hasSameClan(as: "[hawk]zocviiwer"), "Clan comparison must be case-insensitive")
+        XCTAssertFalse("[hawk]blasdf1".hasSameClan(as: "[wolf]zocviiwer"), "Different clans must not match")
+        XCTAssertFalse("[hawk]blasdf1".hasSameClan(as: "zocviiwer"), "Player without clan tag must not match")
+        XCTAssertFalse("blasdf1".hasSameClan(as: "zocviiwer"), "Players with no clan tags must not match")
+        
+        // SquadMember helpers
+        let m1 = SquadMember(id: "1", callsign: "[hawk]blasdf1", latitude: 0, longitude: 0)
+        let m2 = SquadMember(id: "2", callsign: "[HAWK]zocviiwer", latitude: 0, longitude: 0)
+        let m3 = SquadMember(id: "3", callsign: "[wolf]other", latitude: 0, longitude: 0)
+        let m4 = SquadMember(id: "4", callsign: "noClan", latitude: 0, longitude: 0)
+        
+        XCTAssertEqual(m1.clanTag, "hawk")
+        XCTAssertTrue(m1.hasSameClan(as: m2))
+        XCTAssertFalse(m1.hasSameClan(as: m3))
+        XCTAssertFalse(m1.hasSameClan(as: m4))
+        
+        // GameStateManager clan helpers
+        let gs = GameStateManager()
+        gs.myCallsign = "[hawk]blasdf1"
+        XCTAssertTrue(gs.isSameClan(callsign: "[hawk]zocviiwer"))
+        XCTAssertTrue(gs.isSameClan(callsign: "[HAWK]anyone"))
+        XCTAssertFalse(gs.isSameClan(callsign: "[wolf]enemy"))
+        XCTAssertFalse(gs.isSameClan(callsign: "solo"))
+        XCTAssertFalse(gs.isSameClan(callsign: nil))
+        
+        gs.otherSquadMembers = [m2, m3, m4]
+        XCTAssertTrue(gs.isSameClan(memberId: gs.myMemberId))
+        XCTAssertTrue(gs.isSameClan(memberId: "2")) // same clan
+        XCTAssertFalse(gs.isSameClan(memberId: "3")) // different clan
+        XCTAssertFalse(gs.isSameClan(memberId: "4")) // no clan
+    }
+    
+    func testMultiClanTeamOrderVisibilityAsymmetric() {
+        // Concrete proposal scenario:
+        // Player A = [clanA,clanB], Player B = [clanA], Player C = [clanB]
+        // Player B can only see Player A and Player B's team orders, but Player A can see both.
+        // Also verify Enemy and Environmental markers remain visible to everyone.
+        
+        var room = SquadRoom(id: "CLAN_WAR", hostId: "USER_A")
+        room.members["USER_A"] = SquadMember(id: "USER_A", callsign: "[clanA,clanB]PlayerA", latitude: 37.78, longitude: -122.40)
+        room.members["USER_B"] = SquadMember(id: "USER_B", callsign: "[clanA]PlayerB", latitude: 37.781, longitude: -122.401)
+        room.members["USER_C"] = SquadMember(id: "USER_C", callsign: "[clanB]PlayerC", latitude: 37.782, longitude: -122.402)
+        
+        let orderA = TacticalIndicator(
+            id: "ORD_A",
+            type: .goHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.78, longitude: -122.40),
+            placedByMemberId: "USER_A",
+            placedByCallsign: "[clanA,clanB]PlayerA"
+        )
+        let orderB = TacticalIndicator(
+            id: "ORD_B",
+            type: .watchHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.781, longitude: -122.401),
+            placedByMemberId: "USER_B",
+            placedByCallsign: "[clanA]PlayerB"
+        )
+        let orderC = TacticalIndicator(
+            id: "ORD_C",
+            type: .attackHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.782, longitude: -122.402),
+            placedByMemberId: "USER_C",
+            placedByCallsign: "[clanB]PlayerC"
+        )
+        let enemyMarker = TacticalIndicator(
+            id: "ENM_1",
+            type: .infantry,
+            coordinate: CLLocationCoordinate2D(latitude: 37.783, longitude: -122.403),
+            placedByMemberId: "USER_C",
+            placedByCallsign: "[clanB]PlayerC"
+        )
+        let envMarker = TacticalIndicator(
+            id: "ENV_1",
+            type: .water,
+            coordinate: CLLocationCoordinate2D(latitude: 37.784, longitude: -122.404),
+            placedByMemberId: "USER_C",
+            placedByCallsign: "[clanB]PlayerC"
+        )
+        
+        room.indicators[orderA.id] = orderA
+        room.indicators[orderB.id] = orderB
+        room.indicators[orderC.id] = orderC
+        room.indicators[enemyMarker.id] = enemyMarker
+        room.indicators[envMarker.id] = envMarker
+        
+        // 1. Perspective: Player B [clanA]
+        let gsB = createMockGameState()
+        gsB.myMemberId = "USER_B"
+        gsB.myCallsign = "[clanA]PlayerB"
+        gsB.updateAllTacticalIndicators(room: room)
+        
+        let visibleIdsB = Set(gsB.allTacticalIndicators.map { $0.id })
+        XCTAssertTrue(visibleIdsB.contains("ORD_A"), "Player B [clanA] must see Player A's [clanA,clanB] team order")
+        XCTAssertTrue(visibleIdsB.contains("ORD_B"), "Player B must see their own team order")
+        XCTAssertFalse(visibleIdsB.contains("ORD_C"), "Player B [clanA] must NOT see Player C's [clanB] team order")
+        XCTAssertTrue(visibleIdsB.contains("ENM_1"), "Hostile markers must remain visible regardless of clan")
+        XCTAssertTrue(visibleIdsB.contains("ENV_1"), "Environmental markers must remain visible regardless of clan")
+        XCTAssertEqual(visibleIdsB.count, 4)
+        
+        // 2. Perspective: Player A [clanA,clanB]
+        let gsA = createMockGameState()
+        gsA.myMemberId = "USER_A"
+        gsA.myCallsign = "[clanA,clanB]PlayerA"
+        gsA.updateAllTacticalIndicators(room: room)
+        
+        let visibleIdsA = Set(gsA.allTacticalIndicators.map { $0.id })
+        XCTAssertTrue(visibleIdsA.contains("ORD_A"), "Player A must see their own team order")
+        XCTAssertTrue(visibleIdsA.contains("ORD_B"), "Player A [clanA,clanB] must see Player B's [clanA] team order")
+        XCTAssertTrue(visibleIdsA.contains("ORD_C"), "Player A [clanA,clanB] must see Player C's [clanB] team order")
+        XCTAssertTrue(visibleIdsA.contains("ENM_1"), "Hostile markers visible")
+        XCTAssertTrue(visibleIdsA.contains("ENV_1"), "Environmental markers visible")
+        XCTAssertEqual(visibleIdsA.count, 5)
+        
+        // 3. Perspective: Player C [clanB]
+        let gsC = createMockGameState()
+        gsC.myMemberId = "USER_C"
+        gsC.myCallsign = "[clanB]PlayerC"
+        gsC.updateAllTacticalIndicators(room: room)
+        
+        let visibleIdsC = Set(gsC.allTacticalIndicators.map { $0.id })
+        XCTAssertTrue(visibleIdsC.contains("ORD_A"), "Player C [clanB] must see Player A's [clanA,clanB] team order")
+        XCTAssertFalse(visibleIdsC.contains("ORD_B"), "Player C [clanB] must NOT see Player B's [clanA] team order")
+        XCTAssertTrue(visibleIdsC.contains("ORD_C"), "Player C must see their own team order")
+        XCTAssertTrue(visibleIdsC.contains("ENM_1"), "Hostile markers visible")
+        XCTAssertTrue(visibleIdsC.contains("ENV_1"), "Environmental markers visible")
+        XCTAssertEqual(visibleIdsC.count, 4)
+    }
+    
+    func testMemberAnnotationViewClanColors() {
+        let sameClanTeammate = SquadMember(
+            id: "M2",
+            callsign: "[hawk]zocviiwer",
+            latitude: 37.77,
+            longitude: -122.41,
+            status: .active
+        )
+        let differentClanTeammate = SquadMember(
+            id: "M3",
+            callsign: "[wolf]other",
+            latitude: 37.77,
+            longitude: -122.41,
+            status: .active
+        )
+        
+        // Same clan teammate gets green
+        let sameClanView = MemberAnnotationView(
+            member: sameClanTeammate,
+            isMe: false,
+            isSameClan: true
+        )
+        XCTAssertEqual(sameClanView.indicatorColor, .green, "Teammates in same clan as me must be green")
+        
+        // Different clan teammate gets blue
+        let diffClanView = MemberAnnotationView(
+            member: differentClanTeammate,
+            isMe: false,
+            isSameClan: false
+        )
+        XCTAssertEqual(diffClanView.indicatorColor, .blue, "Teammates not in same clan must be blue")
+        
+        // Stale teammate in same clan fades to gray
+        var staleSameClan = sameClanTeammate
+        staleSameClan.lastUpdatedTimestamp = Date().timeIntervalSince1970 - 1000
+        let staleSameClanView = MemberAnnotationView(
+            member: staleSameClan,
+            isMe: false,
+            isSameClan: true
+        )
+        XCTAssertEqual(staleSameClanView.indicatorColor, .gray, "Stale teammates in same clan must fade to gray")
+    }
+    
+    func testGreenIconsHaveHighestTouchPriorityOnUXLayer() {
+        // 1. AppConstants touch priority zIndex hierarchy
+        XCTAssertGreaterThan(
+            AppConstants.UI.MapMarkers.greenTouchPriorityZIndex,
+            AppConstants.UI.MapMarkers.defaultTouchPriorityZIndex,
+            "Green touch priority zIndex must be strictly higher than default touch priority"
+        )
+        XCTAssertGreaterThan(
+            AppConstants.UI.MapMarkers.greenTouchTargetPadding,
+            0,
+            "Green icons must have an expanded touch hitbox padding"
+        )
+        
+        let gameState = GameStateManager()
+        gameState.myCallsign = "[hawk]blasdf1"
+        
+        let sameClanTeammate = SquadMember(id: "M2", callsign: "[hawk]zocviiwer", latitude: 37.77, longitude: -122.41)
+        let diffClanTeammate = SquadMember(id: "M3", callsign: "[wolf]other", latitude: 37.77, longitude: -122.41)
+        let noClanTeammate = SquadMember(id: "M4", callsign: "solo", latitude: 37.77, longitude: -122.41)
+        
+        // 2. Member green identification
+        XCTAssertTrue(gameState.isGreen(member: gameState.localPlayerMember), "Local player must always be green")
+        XCTAssertTrue(gameState.isGreen(member: sameClanTeammate), "Same clan teammate must be green")
+        XCTAssertFalse(gameState.isGreen(member: diffClanTeammate), "Different clan teammate must not be green")
+        XCTAssertFalse(gameState.isGreen(member: noClanTeammate), "Teammate without clan must not be green")
+        
+        // 3. Tactical Indicator green identification
+        let myOrder = TacticalIndicator(type: .watchHere, coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0), placedByMemberId: gameState.myMemberId)
+        let clanOrder = TacticalIndicator(type: .goHere, coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0), placedByMemberId: "M2", placedByCallsign: "[hawk]zocviiwer")
+        let diffClanOrder = TacticalIndicator(type: .attackHere, coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0), placedByMemberId: "M3", placedByCallsign: "[wolf]other")
+        let enemyIndicator = TacticalIndicator(type: .infantry, coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0), placedByMemberId: gameState.myMemberId)
+        let envIndicator = TacticalIndicator(type: .hazard, coordinate: CLLocationCoordinate2D(latitude: 0, longitude: 0), placedByMemberId: gameState.myMemberId)
+        
+        XCTAssertTrue(gameState.isGreen(indicator: myOrder), "My squad orders must be green")
+        XCTAssertTrue(gameState.isGreen(indicator: clanOrder), "Same clan squad orders must be green")
+        XCTAssertFalse(gameState.isGreen(indicator: diffClanOrder), "Different clan squad orders must be blue (not green)")
+        XCTAssertFalse(gameState.isGreen(indicator: enemyIndicator), "Enemy indicators are red (never green)")
+        XCTAssertFalse(gameState.isGreen(indicator: envIndicator), "Environmental indicators are red (never green)")
+        
+        // 4. Stacking order verification (non-green must be sorted before green so green renders on top and catches touches first)
+        let mixedMembers = [sameClanTeammate, diffClanTeammate, noClanTeammate]
+        let sortedMembers = mixedMembers.sorted { m1, m2 in
+            let g1 = gameState.isGreen(member: m1)
+            let g2 = gameState.isGreen(member: m2)
+            if g1 == g2 { return m1.id < m2.id }
+            return !g1 && g2
+        }
+        XCTAssertEqual(sortedMembers.last?.id, sameClanTeammate.id, "Green same-clan member must be sorted last (drawn on top)")
+        
+        let mixedIndicators = [clanOrder, diffClanOrder, enemyIndicator]
+        let sortedIndicators = mixedIndicators.sorted { i1, i2 in
+            let g1 = gameState.isGreen(indicator: i1)
+            let g2 = gameState.isGreen(indicator: i2)
+            if g1 == g2 { return i1.timestamp < i2.timestamp }
+            return !g1 && g2
+        }
+        XCTAssertEqual(sortedIndicators.last?.id, clanOrder.id, "Green same-clan squad order must be sorted last (drawn on top)")
     }
     
     func testMemberAnnotationViewMeIconFollowsRadarMapColorScheme() {
@@ -1122,14 +1470,14 @@ final class RadarMapTests: XCTestCase {
             isMe: true,
             radarColor: RadarColorTheme.red.color
         )
-        XCTAssertEqual(redMeView.indicatorColor, .red, "The 'me' icon must follow the red radar map color scheme")
+        XCTAssertEqual(redMeView.indicatorColor, .green, "The 'me' icon must be green")
         
         let greenMeView = MemberAnnotationView(
             member: myMember,
             isMe: true,
             radarColor: RadarColorTheme.green.color
         )
-        XCTAssertEqual(greenMeView.indicatorColor, .green, "The 'me' icon must follow the green radar map color scheme")
+        XCTAssertEqual(greenMeView.indicatorColor, .green, "The 'me' icon must be green")
     }
     
     func testMemberAnnotationViewRetainsThemeColorWhenKIA() {
@@ -1147,7 +1495,7 @@ final class RadarMapTests: XCTestCase {
             isMe: true,
             radarColor: RadarColorTheme.green.color
         )
-        XCTAssertEqual(deadMeView.indicatorColor, .green, "The theme color must remain radar theme color when the player is KIA")
+        XCTAssertEqual(deadMeView.indicatorColor, .green, "The 'me' theme color must be green when the player is KIA")
         
         let deadTeammate = SquadMember(
             id: "TEAMMATE",
@@ -1162,7 +1510,7 @@ final class RadarMapTests: XCTestCase {
             isMe: false,
             radarColor: RadarColorTheme.red.color
         )
-        XCTAssertEqual(deadTeammateView.indicatorColor, .red, "Teammate theme color must remain red radar color when KIA")
+        XCTAssertEqual(deadTeammateView.indicatorColor, .blue, "Teammate theme color must remain blue when KIA")
     }
     
     func testMemberAnnotationViewRestoresThemeColorWhenRevived() {
@@ -1182,7 +1530,7 @@ final class RadarMapTests: XCTestCase {
             isMe: true,
             radarColor: RadarColorTheme.green.color
         )
-        XCTAssertEqual(greenRevivedMeView.indicatorColor, .green, "Revived local player must restore green theme color even if timestamp is older")
+        XCTAssertEqual(greenRevivedMeView.indicatorColor, .green, "Revived local player must restore green color")
         
         // 2. Red theme revive test
         revivedMe.status = .active
@@ -1192,7 +1540,7 @@ final class RadarMapTests: XCTestCase {
             isMe: true,
             radarColor: RadarColorTheme.red.color
         )
-        XCTAssertEqual(redRevivedMeView.indicatorColor, .red, "Revived local player must restore red theme color")
+        XCTAssertEqual(redRevivedMeView.indicatorColor, .green, "Revived local player must restore green color")
         
         // 3. Test GameStateManager revive restores active status and recent timestamp
         let gameState = GameStateManager()
@@ -1218,7 +1566,7 @@ final class RadarMapTests: XCTestCase {
             status: .downed
         )
         let deadAnnotation = MemberAnnotationView(member: deadSquadMember, isMe: true, radarColor: .red)
-        XCTAssertEqual(deadAnnotation.indicatorColor, .red)
+        XCTAssertEqual(deadAnnotation.indicatorColor, .green)
         
         // Revive: state restores alive and active
         gameState.setDead(false)
@@ -1233,7 +1581,28 @@ final class RadarMapTests: XCTestCase {
             status: .active
         )
         let revivedAnnotation = MemberAnnotationView(member: revivedSquadMember, isMe: true, radarColor: .red)
-        XCTAssertEqual(revivedAnnotation.indicatorColor, .red)
+        XCTAssertEqual(revivedAnnotation.indicatorColor, .green)
+    }
+    
+    func testMapMarkerSizesAndOtherPlayerScaleFactor() {
+        XCTAssertEqual(AppConstants.UI.MapMarkers.otherPlayerScaleFactor, 0.70, accuracy: 0.001)
+        #if os(watchOS)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.tacticalIndicatorIconSize, 11.2, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.environmentalIndicatorIconSize, 11.2, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.tacticalIndicatorRingSize, 16.8, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.orderCallsignYOffset, 14.0, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.iconSize(for: .environment), 11.2, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.iconSize(for: .enemyIndicator), 11.2, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.iconSize(for: .squadOrder), 11.2, accuracy: 0.001)
+        #else
+        XCTAssertEqual(AppConstants.UI.MapMarkers.tacticalIndicatorIconSize, 21.0, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.environmentalIndicatorIconSize, 14.0, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.tacticalIndicatorRingSize, 22.4, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.orderCallsignYOffset, 21.0, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.iconSize(for: .environment), 14.0, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.iconSize(for: .enemyIndicator), 21.0, accuracy: 0.001)
+        XCTAssertEqual(AppConstants.UI.MapMarkers.iconSize(for: .squadOrder), 21.0, accuracy: 0.001)
+        #endif
     }
     
     func testTacticalIconShapes() {
@@ -1730,8 +2099,6 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(AppConstants.Timing.Stale.defaultTimeoutMultiplier, 15.0)
         XCTAssertEqual(AppConstants.Timing.Inactivity.idleCutoffHours, 12.0)
         XCTAssertEqual(AppConstants.Timing.Inactivity.secondsPerHour, 3600.0)
-        XCTAssertEqual(AppConstants.Timing.DeathHold.delayBeforeChargeSeconds, 1.0)
-        XCTAssertEqual(AppConstants.Timing.DeathHold.chargeDurationSeconds, 3.0)
         
         // UI & Gestures
         XCTAssertEqual(AppConstants.UI.defaultCallsign, "")
@@ -2056,7 +2423,7 @@ final class RadarMapTests: XCTestCase {
         // 1. Case-insensitive / whitespace match on member ID
         let ind1 = TacticalIndicator(
             id: "IND_1",
-            type: .attackHere,
+            type: .infantry,
             coordinate: CLLocationCoordinate2D(latitude: 37.785, longitude: -122.406),
             placedByMemberId: "  op_recon  "
         )
@@ -2064,7 +2431,7 @@ final class RadarMapTests: XCTestCase {
         // 2. Placed using member callsign rather than member ID
         let ind2 = TacticalIndicator(
             id: "IND_2",
-            type: .goHere,
+            type: .vehicle,
             coordinate: CLLocationCoordinate2D(latitude: 37.786, longitude: -122.407),
             placedByMemberId: "titan"
         )
@@ -2072,7 +2439,7 @@ final class RadarMapTests: XCTestCase {
         // 3. Unknown member ID -> defaults to empty string
         let ind3 = TacticalIndicator(
             id: "IND_3",
-            type: .watchHere,
+            type: .hazard,
             coordinate: CLLocationCoordinate2D(latitude: 37.787, longitude: -122.408),
             placedByMemberId: "UNKNOWN_ID"
         )
@@ -2282,12 +2649,16 @@ final class RadarMapTests: XCTestCase {
         // Non-Pro user setup
         let nonProState = createMockGameState()
         nonProState.subscriptionManager.hasUnlimitedSquadUnlock = false
+        nonProState.myCallsign = "[DELTA]Operator"
+        
         var room = SquadRoom(id: "DELTA", hostId: "PRO_LEADER")
+        room.members["PRO_LEADER"] = SquadMember(id: "PRO_LEADER", callsign: "[DELTA]Leader", latitude: 37.785, longitude: -122.405)
         let indicator = TacticalIndicator(
             id: "IND-999",
             type: .attackHere,
             coordinate: CLLocationCoordinate2D(latitude: 37.785, longitude: -122.405),
-            placedByMemberId: "PRO_LEADER"
+            placedByMemberId: "PRO_LEADER",
+            placedByCallsign: "[DELTA]Leader"
         )
         room.indicators[indicator.id] = indicator
         nonProState.firebaseManager.activeRoom = room
@@ -2299,6 +2670,7 @@ final class RadarMapTests: XCTestCase {
         // Pro user setup
         let proState = createMockGameState()
         proState.subscriptionManager.hasUnlimitedSquadUnlock = true
+        proState.myCallsign = "[DELTA]Leader"
         proState.firebaseManager.activeRoom = room
         XCTAssertEqual(proState.allTacticalIndicators.count, 1)
         XCTAssertEqual(proState.allTacticalIndicators.first?.type, .attackHere)
@@ -3775,6 +4147,7 @@ final class RadarMapTests: XCTestCase {
         
         // Custom callsign
         gameState.myCallsign = "VIPER"
+        gameState.subscriptionManager.hasUnlimitedSquadUnlock = true
         gameState.placeTacticalIndicator(type: .goHere, at: CLLocationCoordinate2D(latitude: 37.78, longitude: -122.42))
         
         let updatedIndicators = gameState.allTacticalIndicators
@@ -3977,6 +4350,35 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.localPlayerMember.status, .downed, "Local player member status must be downed")
     }
     
+    func testEffectiveHeartRateSimulationAndSensorResolution() {
+        let phoneWCM = WatchConnectivityManager(role: .phone)
+        let phoneGS = createMockGameState(watchConnectivityManager: phoneWCM)
+        phoneGS.healthKitManager.currentHeartRate = 0.0
+        
+        // 1. Stationary phone defaults to resting 75 BPM
+        XCTAssertEqual(phoneGS.effectiveHeartRate, 75.0)
+        
+        // 2. Watch optical HR received over high-speed stream -> reflects sensor
+        phoneGS.healthKitManager.currentHeartRate = 125.0
+        phoneWCM.isWatchLeaseActive = true
+        phoneGS.updateLocalPlayerMember()
+        XCTAssertEqual(phoneGS.effectiveHeartRate, 125.0)
+        XCTAssertEqual(phoneGS.localPlayerMember.heartRate, 125.0)
+        
+        // 3. Watch on wrist (role: .watch) directly reflects live HealthKit sensor reading
+        let watchWCM = WatchConnectivityManager(role: .watch)
+        let watchGS = createMockGameState(watchConnectivityManager: watchWCM)
+        watchGS.healthKitManager.currentHeartRate = 118.0
+        watchGS.updateLocalPlayerMember()
+        XCTAssertEqual(watchGS.effectiveHeartRate, 118.0)
+        XCTAssertEqual(watchGS.localPlayerMember.heartRate, 118.0)
+        
+        // 4. KIA flatlines to 0
+        watchGS.setDead(true)
+        XCTAssertEqual(watchGS.effectiveHeartRate, 0.0)
+        XCTAssertEqual(watchGS.localPlayerMember.heartRate, 0.0)
+    }
+    
     func testBidirectionalKIAButtonAndHeartRateMonitorSync() {
         let phoneState = createMockGameState()
         phoneState.myMemberId = "OPERATOR_1"
@@ -4072,6 +4474,26 @@ final class RadarMapTests: XCTestCase {
         )
         XCTAssertEqual(watchMeAnnotation.member.status, .active)
     }
+    
+    #if os(iOS)
+    func testTacticalMKAnnotationViewCollisionModeAndDisplayPriority() {
+        let view = TacticalMKMapView.TacticalMKAnnotationView(annotation: nil, reuseIdentifier: "test")
+        XCTAssertEqual(view.collisionMode, .none)
+        XCTAssertEqual(view.displayPriority, .required)
+        
+        view.isGreenPriority = false
+        XCTAssertEqual(view.collisionMode, .none, "Non-green annotations must retain collisionMode .none to prevent MapKit from hiding them in clusters")
+        XCTAssertEqual(view.displayPriority, .required, "Non-green annotations must retain displayPriority .required to prevent MapKit from hiding them")
+        
+        view.isGreenPriority = true
+        XCTAssertEqual(view.collisionMode, .none)
+        XCTAssertEqual(view.displayPriority, .required)
+        
+        view.prepareForReuse()
+        XCTAssertEqual(view.collisionMode, .none)
+        XCTAssertEqual(view.displayPriority, .required)
+    }
+    #endif
     
     func testKiaStateStability_NoFlickerOnInFlightTelemetryOrRosterSync() {
         let state = createMockGameState()
@@ -4856,6 +5278,101 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(decoded, [.vehicle, .armor, .vehicle, .armor, .drone, .water, .emergency])
     }
     
+    func testTacticalIndicatorCategoryAndMarkerColorsAndFade() {
+        // 1. Category Base Colors: Team Orders are green; Tactical and Environmental are red.
+        XCTAssertEqual(TacticalIndicatorCategory.squadOrder.baseColor, .green)
+        XCTAssertEqual(TacticalIndicatorCategory.enemyIndicator.baseColor, .red)
+        XCTAssertEqual(TacticalIndicatorCategory.environment.baseColor, .red)
+        
+        // 2. Type Base Colors
+        let squadOrders: [TacticalIndicatorType] = [
+            .watchHere, .goHere, .attackHere, .protectHere, .flag, .point1, .point2, .point3
+        ]
+        for type in squadOrders {
+            XCTAssertEqual(type.baseColor, .green, "\(type.rawValue) must have green base color")
+        }
+        
+        let tacticalEnemies: [TacticalIndicatorType] = [
+            .infantry, .vehicle, .armor, .drone
+        ]
+        for type in tacticalEnemies {
+            XCTAssertEqual(type.baseColor, .red, "\(type.rawValue) must have red base color")
+        }
+        
+        let environmental: [TacticalIndicatorType] = [
+            .water, .hazard, .fire, .snow, .closure, .emergency
+        ]
+        for type in environmental {
+            XCTAssertEqual(type.baseColor, .red, "\(type.rawValue) must have red base color")
+        }
+        
+        // 3. TacticalIndicator Base Colors & Fade Mechanics
+        let now = Date()
+        
+        // Team orders dropped by me are green
+        let myOrderIndicator = TacticalIndicator(
+            type: .goHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.7, longitude: -122.4),
+            placedByMemberId: "ME",
+            timestamp: now.timeIntervalSince1970
+        )
+        XCTAssertEqual(myOrderIndicator.baseColor(isPlacedByMe: true), .green, "Team orders dropped by me must be green")
+        XCTAssertEqual(myOrderIndicator.baseColor, .green)
+        XCTAssertEqual(myOrderIndicator.grayFadeFactor(referenceDate: now), 0.0)
+        XCTAssertEqual(myOrderIndicator.grayFadeFactor(referenceDate: now.addingTimeInterval(300)), 0.0)
+        
+        // Other people's team orders are blue
+        let othersOrderIndicator = TacticalIndicator(
+            type: .attackHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.7, longitude: -122.4),
+            placedByMemberId: "OTHER_PERSON",
+            timestamp: now.timeIntervalSince1970
+        )
+        XCTAssertEqual(othersOrderIndicator.baseColor(isPlacedByMe: false), .blue, "Other people's team orders must be blue")
+        XCTAssertEqual(othersOrderIndicator.grayFadeFactor(referenceDate: now), 0.0)
+        XCTAssertEqual(othersOrderIndicator.grayFadeFactor(referenceDate: now.addingTimeInterval(300)), 0.0)
+        
+        // Team order marks within the same clan are also green
+        let sameClanOrderIndicator = TacticalIndicator(
+            type: .protectHere,
+            coordinate: CLLocationCoordinate2D(latitude: 37.7, longitude: -122.4),
+            placedByMemberId: "CLAN_MATE",
+            placedByCallsign: "[hawk]zocviiwer",
+            timestamp: now.timeIntervalSince1970
+        )
+        XCTAssertEqual(sameClanOrderIndicator.baseColor(isPlacedByMe: false, isSameClan: true), .green, "Team orders within the same clan must be green")
+        XCTAssertEqual(sameClanOrderIndicator.baseColor(isPlacedByMe: false, isSameClan: false), .blue, "Team orders not within the same clan must be blue")
+        
+        // Tactical and environmental markers are red regardless of issuer
+        let tacticalIndicator = TacticalIndicator(
+            type: .armor,
+            coordinate: CLLocationCoordinate2D(latitude: 37.7, longitude: -122.4),
+            placedByMemberId: "M1",
+            timestamp: now.timeIntervalSince1970
+        )
+        XCTAssertEqual(tacticalIndicator.baseColor(isPlacedByMe: true), .red)
+        XCTAssertEqual(tacticalIndicator.baseColor(isPlacedByMe: false), .red)
+        XCTAssertEqual(tacticalIndicator.baseColor, .red)
+        XCTAssertEqual(tacticalIndicator.grayFadeFactor(referenceDate: now), 0.0, accuracy: 0.001)
+        XCTAssertFalse(tacticalIndicator.isFullyFaded(referenceDate: now))
+        XCTAssertEqual(tacticalIndicator.grayFadeFactor(referenceDate: now.addingTimeInterval(150)), 0.5, accuracy: 0.001)
+        XCTAssertFalse(tacticalIndicator.isFullyFaded(referenceDate: now.addingTimeInterval(150)))
+        XCTAssertEqual(tacticalIndicator.grayFadeFactor(referenceDate: now.addingTimeInterval(300)), 1.0, accuracy: 0.001)
+        XCTAssertTrue(tacticalIndicator.isFullyFaded(referenceDate: now.addingTimeInterval(300)))
+        
+        let envIndicator = TacticalIndicator(
+            type: .hazard,
+            coordinate: CLLocationCoordinate2D(latitude: 37.7, longitude: -122.4),
+            placedByMemberId: "M1",
+            timestamp: now.timeIntervalSince1970
+        )
+        XCTAssertEqual(envIndicator.baseColor(isPlacedByMe: true), .red)
+        XCTAssertEqual(envIndicator.baseColor(isPlacedByMe: false), .red)
+        XCTAssertEqual(envIndicator.baseColor, .red)
+        XCTAssertEqual(envIndicator.grayFadeFactor(referenceDate: now), 0.0)
+        XCTAssertEqual(envIndicator.grayFadeFactor(referenceDate: now.addingTimeInterval(300)), 0.0)
+    }
+    
     func testMapSpanDeltaAndScaleRulerIsotropicGeometry() {
         let referenceCoord = CLLocationCoordinate2D(latitude: 37.785834, longitude: -122.406417)
         let minorScaleMeters: Double = 50.0
@@ -5257,37 +5774,37 @@ final class RadarMapTests: XCTestCase {
         XCTAssertTrue(phoneLS.isDomainEquivalent(to: watchLS), "sync_ts is control metadata only and must be excluded from domain equivalence")
     }
     
-    // 9. Watch uses Phone WCSession cache when Phone is reachable and fresh_until has not expired.
+    // 9. Watch uses Phone WCSession cache when Phone is reachable and its active_until lease has not expired.
     func testCompanionSync_9_WatchUsesPhoneCacheWhenReachableAndFresh() {
         let now = Date().timeIntervalSince1970
         let phoneReachable = true
-        let phoneFreshUntil: TimeInterval? = now + 5.0 // Fresh for 5 more seconds
-        
-        let isFresh = (phoneFreshUntil != nil && now < phoneFreshUntil!)
-        let shouldUseWCSession = (phoneReachable && isFresh)
-        XCTAssertTrue(shouldUseWCSession, "Watch should use WCSession data source when Phone is reachable and fresh")
+        let phoneActiveUntil: TimeInterval? = now + 5.0 // Lease valid for 5 more seconds
+
+        let isLeaseActive = (phoneActiveUntil != nil && now < phoneActiveUntil!)
+        let shouldUseWCSession = (phoneReachable && isLeaseActive)
+        XCTAssertTrue(shouldUseWCSession, "Watch should use WCSession data source when Phone is reachable and its lease is active")
     }
-    
+
     // 10. Watch reads Firebase when Phone is unreachable.
     func testCompanionSync_10_WatchReadsFirebaseWhenPhoneUnreachable() {
         let now = Date().timeIntervalSince1970
         let phoneReachable = false
-        let phoneFreshUntil: TimeInterval? = now + 5.0
-        
-        let isFresh = (phoneFreshUntil != nil && now < phoneFreshUntil!)
-        let shouldUseWCSession = (phoneReachable && isFresh)
+        let phoneActiveUntil: TimeInterval? = now + 5.0
+
+        let isLeaseActive = (phoneActiveUntil != nil && now < phoneActiveUntil!)
+        let shouldUseWCSession = (phoneReachable && isLeaseActive)
         XCTAssertFalse(shouldUseWCSession, "Watch should fall back to Firebase when Phone is unreachable")
     }
-    
-    // 11. Watch reads Firebase when Phone data has expired.
+
+    // 11. Watch reads Firebase when Phone's active_until lease has expired.
     func testCompanionSync_11_WatchReadsFirebaseWhenPhoneDataExpired() {
         let now = Date().timeIntervalSince1970
         let phoneReachable = true
-        let phoneFreshUntil: TimeInterval? = now - 1.0 // Expired 1 second ago
-        
-        let isFresh = (phoneFreshUntil != nil && now < phoneFreshUntil!)
-        let shouldUseWCSession = (phoneReachable && isFresh)
-        XCTAssertFalse(shouldUseWCSession, "Watch should fall back to Firebase when Phone data has expired")
+        let phoneActiveUntil: TimeInterval? = now - 1.0 // Lease expired 1 second ago
+
+        let isLeaseActive = (phoneActiveUntil != nil && now < phoneActiveUntil!)
+        let shouldUseWCSession = (phoneReachable && isLeaseActive)
+        XCTAssertFalse(shouldUseWCSession, "Watch should fall back to Firebase when Phone's lease has expired")
     }
     
     // 12. Out-of-order remote telemetry for one player is rejected without affecting other players.
@@ -5535,13 +6052,14 @@ final class RadarMapTests: XCTestCase {
         let wcm = WatchConnectivityManager()
         let gameState = createMockGameState(watchConnectivityManager: wcm)
         
-        // 1. Initial / idle state (no other player telemetry, no watch HR) -> "00000000"
+        // 1. Initial / idle state (no server connection, no listeners, no companion comms) -> "00000000"
         XCTAssertEqual(gameState.debugStatusString, "00000000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
         
-        // 2. Connected to Firebase active room (other player telemetry active, web low-speed) -> "N0N00000"
+        // 2. Connected to Firebase active room with listeners attached -> "UD000000"
         gameState.firebaseManager.isConnected = true
         gameState.firebaseManager.activeRoom = SquadRoom(id: "ALPHA", hostId: gameState.myMemberId)
+        gameState.firebaseManager.startTelemetryPolling(roomId: "ALPHA")
         
         let expRoom = expectation(description: "Process active room")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -5549,12 +6067,11 @@ final class RadarMapTests: XCTestCase {
         }
         wait(for: [expRoom], timeout: 1.0)
         
-        XCTAssertEqual(gameState.debugStatusString, "N0N00000")
+        XCTAssertEqual(gameState.debugStatusString, "UD000000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
         
-        // 3. Incoming Watch HR telemetry received on phone, active_until in the future -> "NWN00000"
-        // (isWatchLeaseActive is polled by a 1Hz timer inside WatchConnectivityManager, so the
-        // test waits on the published value itself rather than a fixed short delay.)
+        // 3. Incoming Watch HR telemetry received on phone, active_until in the future -> "00W00000"
+        // (Phone yields network ownership and listeners to Watch companion, companion comms shows 'W')
         let leaseFreshTime = Date().timeIntervalSince1970 + 60.0
         let hsEnvelope: [String: Any] = [
             "w2p_hs": [
@@ -5572,18 +6089,18 @@ final class RadarMapTests: XCTestCase {
         wait(for: [leaseActiveExp], timeout: 2.0)
         leaseActiveCancellable?.cancel()
 
-        XCTAssertEqual(gameState.debugStatusString, "NWN00000")
+        XCTAssertEqual(gameState.debugStatusString, "00W00000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
 
-        // 4. Low-speed payload becomes idle (no new low-speed packet for > 3s) -> Character 3 cycles back to '0' -> "NW000000"
+        // 4. Low-speed payload becomes idle -> Character 3 still shows 'W' because Watch high-speed lease is active -> "00W00000"
         gameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970 - 4.0
-        XCTAssertEqual(gameState.debugStatusString, "NW000000")
+        XCTAssertEqual(gameState.debugStatusString, "00W00000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
 
-        // 5. Leaving room (no other player telemetry, watch HR still active) -> "0W000000"
+        // 5. Leaving room (no server connection, watch HR still active) -> "00W00000"
         gameState.firebaseManager.isConnected = false
         gameState.firebaseManager.activeRoom = nil
-        XCTAssertEqual(gameState.debugStatusString, "0W000000")
+        XCTAssertEqual(gameState.debugStatusString, "00W00000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
 
         // 6. Watch HR expires / resets, active_until in the past -> "00000000"
@@ -5618,8 +6135,6 @@ final class RadarMapTests: XCTestCase {
             ]
         ]
         wcm.handleIncomingApplicationContext(staleActiveUntilEnvelope)
-        // No transition is expected here, so there's no publisher edge to wait on — just give the
-        // 1Hz lease-monitor timer a full cycle to run and confirm it still reads inactive.
         let settleExp = expectation(description: "Lease monitor tick settles")
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
             settleExp.fulfill()
@@ -5628,15 +6143,62 @@ final class RadarMapTests: XCTestCase {
         XCTAssertFalse(wcm.isWatchLeaseActive, "Expired active_until must not be treated as active even though fresh_until is still in the future")
         XCTAssertEqual(gameState.debugStatusString, "00000000", "Companion must not be marked active once active_until has passed, regardless of fresh_until")
 
-        // 7. Incoming Watch low-speed payload -> Character 3 shows 'W', then cycles back to '0' when idle
+        // 7. Incoming Watch low-speed payload (HS idle) -> Character 3 is '0' (HS idle), Character 4 shows 'W' (LS active) -> "000W0000"
         gameState.lastLowSpeedPayloadSource = "W"
         gameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970
-        XCTAssertEqual(gameState.debugStatusString, "00W00000")
+        XCTAssertEqual(gameState.debugStatusString, "000W0000")
         
         // Age the low-speed payload timestamp by 4 seconds (idle) -> cycles back to "00000000"
         gameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970 - 4.0
         XCTAssertEqual(gameState.debugStatusString, "00000000")
         XCTAssertEqual(gameState.debugStatusString.count, 8)
+
+        // 8. On Watch role (receiving low-speed comms from Phone, HS idle) -> Character 3 is '0' (HS idle), Character 4 shows 'P' (LS active) -> "000P0000"
+        let watchWcm = WatchConnectivityManager(role: .watch)
+        let watchGameState = createMockGameState(watchConnectivityManager: watchWcm)
+        watchGameState.lastLowSpeedPayloadSource = "P"
+        watchGameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970
+        XCTAssertEqual(watchGameState.debugStatusString, "000P0000")
+        XCTAssertEqual(watchGameState.debugStatusString.count, 8)
+
+        // 9. On Phone role, both Watch HS and Watch LS active concurrently -> "00WW0000"
+        let dualPhoneWcm = WatchConnectivityManager(role: .phone)
+        let dualPhoneGameState = createMockGameState(watchConnectivityManager: dualPhoneWcm)
+        let dualFreshTime = Date().timeIntervalSince1970 + 60.0
+        dualPhoneWcm.handleIncomingApplicationContext([
+            "w2p_hs": [
+                "active_until": dualFreshTime,
+                "hr": 80.0
+            ]
+        ])
+        let dualPhoneExp = expectation(description: "Process dualPhone HS")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            dualPhoneExp.fulfill()
+        }
+        wait(for: [dualPhoneExp], timeout: 1.0)
+        dualPhoneGameState.lastLowSpeedPayloadSource = "W"
+        dualPhoneGameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970
+        XCTAssertEqual(dualPhoneGameState.debugStatusString, "00WW0000")
+        XCTAssertEqual(dualPhoneGameState.debugStatusString.count, 8)
+
+        // 10. On Watch role, both Phone HS and Phone LS active concurrently -> "00PP0000"
+        let dualWatchWcm = WatchConnectivityManager(role: .watch)
+        let dualWatchGameState = createMockGameState(watchConnectivityManager: dualWatchWcm)
+        dualWatchWcm.handleIncomingApplicationContext([
+            "p2w_hs": [
+                "active_until": dualFreshTime,
+                "remote_telemetry": "{}"
+            ]
+        ])
+        let dualWatchExp = expectation(description: "Process dualWatch HS")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            dualWatchExp.fulfill()
+        }
+        wait(for: [dualWatchExp], timeout: 1.0)
+        dualWatchGameState.lastLowSpeedPayloadSource = "P"
+        dualWatchGameState.lastLowSpeedPayloadTimestamp = Date().timeIntervalSince1970
+        XCTAssertEqual(dualWatchGameState.debugStatusString, "00PP0000")
+        XCTAssertEqual(dualWatchGameState.debugStatusString.count, 8)
     }
     
     func testNewPlayerJoiningResolvesCallsignInsteadOfShowingMemberId() {
@@ -6517,6 +7079,99 @@ final class RadarMapTests: XCTestCase {
 
         // Touching the button (isHolding: true) forces full brightness (1.0) regardless of elapsed time
         XCTAssertEqual(calculateOpacity(isHolding: true, hrElapsed: 10.0), 1.0, accuracy: 0.001)
+    }
+
+    // MARK: - Role Selection & Slider Tests
+
+    func testMemberRoleHierarchyAndTierGating() {
+        let ranks = MemberRole.allRanksOrdered
+        XCTAssertEqual(ranks.count, 2)
+        XCTAssertEqual(ranks[0], .player)
+        XCTAssertEqual(ranks[1], .leader)
+
+        XCTAssertEqual(MemberRole.player.displayName, "Player")
+        XCTAssertEqual(MemberRole.leader.displayName, "Team Leader")
+
+        XCTAssertFalse(MemberRole.player.isProRequired)
+        XCTAssertTrue(MemberRole.leader.isProRequired)
+
+        XCTAssertEqual(MemberRole.player.rawValue, "player")
+        XCTAssertEqual(MemberRole.leader.rawValue, "leader")
+
+        XCTAssertTrue(MemberRole.player < MemberRole.leader)
+    }
+
+    func testGameStateRoleSelectionFreeTierClampedToPlayer() {
+        let gameState = createMockGameState()
+        gameState.subscriptionManager.activeEngineMode = .mock
+        gameState.subscriptionManager.hasUnlimitedSquadUnlock = false
+
+        // Attempting to select Team Leader on free tier clamps back to Player
+        gameState.myRole = .leader
+        XCTAssertEqual(gameState.myRole, .player)
+        XCTAssertEqual(gameState.localPlayerMember.role, .player)
+    }
+
+    func testGameStateRoleSelectionProTierAllowsTeamLeader() {
+        let gameState = createMockGameState()
+        gameState.subscriptionManager.activeEngineMode = .mock
+        gameState.subscriptionManager.debugForceUnlockPro()
+
+        // With Pro unlocked, selecting Team Leader succeeds
+        gameState.myRole = .leader
+        XCTAssertEqual(gameState.myRole, .leader)
+        XCTAssertEqual(gameState.localPlayerMember.role, .leader)
+
+        // Switching back to Player succeeds
+        gameState.myRole = .player
+        XCTAssertEqual(gameState.myRole, .player)
+        XCTAssertEqual(gameState.localPlayerMember.role, .player)
+    }
+
+    func testConfigSnapshotRoleSerialization() {
+        let snapshot = ConfigSnapshot(callsign: "VIPER", role: "leader")
+        guard let data = try? JSONEncoder().encode(snapshot),
+              let decoded = try? JSONDecoder().decode(ConfigSnapshot.self, from: data) else {
+            XCTFail("ConfigSnapshot failed to encode/decode")
+            return
+        }
+        XCTAssertEqual(decoded.role, "leader")
+
+        // Backward compatibility: JSON without role defaults to player
+        let jsonWithoutRole = """
+        {"callsign":"GHOST","roomName":"ALPHA","pin":"1234","databaseURL":"","theme":"Green","isPro":false,"isUploadHeartRateEnabled":true,"isUploadLocationEnabled":true,"configTs":100}
+        """.data(using: .utf8)!
+        let decodedLegacy = try? JSONDecoder().decode(ConfigSnapshot.self, from: jsonWithoutRole)
+        XCTAssertNotNil(decodedLegacy)
+        XCTAssertEqual(decodedLegacy?.role, "player")
+    }
+
+    func testHostRoomUsesSelectedRole() {
+        let gameState = createMockGameState()
+        gameState.subscriptionManager.activeEngineMode = .mock
+        gameState.subscriptionManager.debugForceUnlockPro()
+        gameState.myRole = .leader
+
+        let name = "LEADER_SQUAD"
+        let pin = "1234"
+        let exp = expectation(description: "Host room completes")
+        gameState.hostRoom(name: name, pin: pin) { success in
+            XCTAssertTrue(success)
+            XCTAssertEqual(gameState.firebaseManager.activeRoom?.members[gameState.myMemberId]?.role, .leader)
+            XCTAssertEqual(gameState.localPlayerMember.role, .leader)
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 1.0)
+    }
+
+    func testRoleSliderGatingLogic() {
+        // Free tier gating verification
+        let freeUnlockedRanks = MemberRole.allRanksOrdered.filter { !$0.isProRequired }
+        XCTAssertEqual(freeUnlockedRanks, [.player])
+
+        // Pro tier gating verification
+        let proUnlockedRanks = MemberRole.allRanksOrdered
+        XCTAssertEqual(proUnlockedRanks, [.player, .leader])
     }
 }
 

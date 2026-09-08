@@ -65,7 +65,6 @@ final class TacticalIndicatorMKAnnotation: NSObject, MKAnnotation {
 /// Coordinator state tracking gesture transitions and preventing feedback loops.
 @MainActor
 final class TacticalPhoneCameraState: ObservableObject {
-    var isHandlingUserInteraction = false
     // True for the duration of an active pinch gesture. MapKit drops userTrackingMode to
     // .none the instant a pinch begins — even a zoom-only pinch that never moves the map
     // center — which would otherwise be misread by the pan-detection delegates below as
@@ -103,10 +102,24 @@ public struct TacticalMKMapView: UIViewRepresentable {
         // (see TacticalRadarMapView.snapScaleToRadarLadder). Letting MapKit fully own the
         // camera (rather than fighting it with our own setCamera calls) is what avoids the
         // camera fighting itself on tracking-mode transitions.
+        //
+        // A fresh MKMapView otherwise starts at MapKit's own default world region, and only
+        // eases into place once userTrackingMode animates the camera over — an animation that
+        // rapid presentation toggling (switch-view button mashed) tears down and restarts
+        // before it ever completes, leaving the map visibly stuck zoomed out at that default
+        // region. Seeding the initial region explicitly from the radar's own current center
+        // and scale means the map is already framed correctly the instant it appears, with no
+        // dependence on that animation finishing.
+        let initialCenter = gameState.mapStateMachine.effectiveCenter(userCoord: gameState.localPlayerMember.coordinate)
+        let initialSpanDelta = AppConstants.UI.RadarScale.mapSpanDelta(forRadarScaleMeters: gameState.selectedScaleMeters)
+        let initialRegion = MKCoordinateRegion(
+            center: initialCenter,
+            span: MKCoordinateSpan(latitudeDelta: initialSpanDelta, longitudeDelta: initialSpanDelta)
+        )
+        mapView.setRegion(initialRegion, animated: false)
+
         if gameState.mapStateMachine.trackingState.isLocked {
             mapView.userTrackingMode = .follow
-        } else if let panned = gameState.mapStateMachine.trackingState.pannedCoordinate {
-            mapView.setCenter(panned, animated: false)
         }
         mapView.isPitchEnabled = false
         mapView.isRotateEnabled = false
@@ -184,6 +197,46 @@ public struct TacticalMKMapView: UIViewRepresentable {
     }
     
     // MARK: - Coordinator
+    final class TacticalMKAnnotationView: MKAnnotationView {
+        override init(annotation: MKAnnotation?, reuseIdentifier: String?) {
+            super.init(annotation: annotation, reuseIdentifier: reuseIdentifier)
+            collisionMode = .none
+            displayPriority = .required
+        }
+        
+        required init?(coder aDecoder: NSCoder) {
+            super.init(coder: aDecoder)
+            collisionMode = .none
+            displayPriority = .required
+        }
+
+        override func prepareForReuse() {
+            super.prepareForReuse()
+            collisionMode = .none
+            displayPriority = .required
+        }
+
+        var isGreenPriority: Bool = false {
+            didSet {
+                zPriority = isGreenPriority ? .max : .defaultUnselected
+                layer.zPosition = isGreenPriority ? 100.0 : 10.0
+                displayPriority = .required
+                collisionMode = .none
+            }
+        }
+        
+        override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+            if super.point(inside: point, with: event) {
+                return true
+            }
+            if isGreenPriority {
+                let padding = AppConstants.UI.MapMarkers.greenTouchTargetPadding
+                let expanded = bounds.insetBy(dx: -padding, dy: -padding)
+                return expanded.contains(point)
+            }
+            return false
+        }
+    }
     
     public final class Coordinator: NSObject, MKMapViewDelegate, UIGestureRecognizerDelegate {
         var parent: TacticalMKMapView
@@ -230,7 +283,21 @@ public struct TacticalMKMapView: UIViewRepresentable {
         private func applyMemberContent(member: SquadMember, isMe: Bool, to view: MKAnnotationView, size: CGFloat) {
             view.centerOffset = .zero
             view.bounds = CGRect(x: 0, y: 0, width: size, height: size)
+            view.clipsToBounds = false
+            view.collisionMode = .none
+            view.displayPriority = .required
             let radarColor = parent.gameState.radarColorTheme.color
+            let isSameClan = !isMe && parent.gameState.isSameClan(callsign: member.callsign)
+            let isGreen = isMe || isSameClan
+            if let tacView = view as? TacticalMKAnnotationView {
+                tacView.isGreenPriority = isGreen
+            } else {
+                view.zPriority = isGreen ? .max : .defaultUnselected
+                view.layer.zPosition = isGreen ? 100.0 : 10.0
+                view.displayPriority = .required
+                view.collisionMode = .none
+            }
+            let isSelected = !isMe && (parent.gameState.selectedAnnotationForDistance == .squadMember(id: member.id))
             let onTap: () -> Void = { [weak self] in
                 guard let self, self.parent.gameState.pendingIndicatorPlacementType == nil else { return }
                 if isMe {
@@ -241,13 +308,18 @@ public struct TacticalMKMapView: UIViewRepresentable {
             }
             let key = ObjectIdentifier(view)
             if let host = memberHosts[key] {
-                host.rootView = MemberAnnotationView(member: member, isMe: isMe, radarColor: radarColor, onTap: onTap)
+                host.rootView = MemberAnnotationView(member: member, isMe: isMe, isSameClan: isSameClan, isSelected: isSelected, radarColor: radarColor, onTap: onTap)
+                host.view.clipsToBounds = false
                 host.view.frame = view.bounds
+                host.view.layoutIfNeeded()
             } else {
                 view.subviews.forEach { $0.removeFromSuperview() }
-                let host = UIHostingController(rootView: MemberAnnotationView(member: member, isMe: isMe, radarColor: radarColor, onTap: onTap))
+                let host = UIHostingController(rootView: MemberAnnotationView(member: member, isMe: isMe, isSameClan: isSameClan, isSelected: isSelected, radarColor: radarColor, onTap: onTap))
                 host.view.backgroundColor = .clear
+                host.view.clipsToBounds = false
+                host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
                 host.view.frame = view.bounds
+                host.view.layoutIfNeeded()
                 view.addSubview(host.view)
                 memberHosts[key] = host
             }
@@ -261,12 +333,25 @@ public struct TacticalMKMapView: UIViewRepresentable {
         /// Creates or updates the hosted TacticalIndicatorOverlayView content for `view`.
         private func applyTacticalContent(indicator: TacticalIndicator, to view: MKAnnotationView) {
             let touchTargetSize = AppConstants.UI.MapMarkers.tacticalIndicatorRingSize
-            let half = touchTargetSize / 2
-            view.frame = CGRect(x: 0, y: 0, width: touchTargetSize, height: touchTargetSize)
             view.centerOffset = .zero
+            view.bounds = CGRect(x: 0, y: 0, width: touchTargetSize, height: touchTargetSize)
+            view.clipsToBounds = false
+            view.collisionMode = .none
+            view.displayPriority = .required
             
             let key = ObjectIdentifier(view)
             let radarColor = parent.gameState.radarColorTheme.color
+            let isPlacedByMe = (indicator.placedByMemberId == parent.gameState.myMemberId)
+            let isSameClan = parent.gameState.isIndicatorFromSameClan(indicator)
+            let isGreen = (indicator.category == .squadOrder) && (isPlacedByMe || isSameClan)
+            if let tacView = view as? TacticalMKAnnotationView {
+                tacView.isGreenPriority = isGreen
+            } else {
+                view.zPriority = isGreen ? .max : .defaultUnselected
+                view.layer.zPosition = isGreen ? 100.0 : 10.0
+                view.displayPriority = .required
+                view.collisionMode = .none
+            }
             let onDelete: () -> Void = { [weak self] in
                 self?.parent.gameState.removeTacticalIndicator(id: indicator.id)
             }
@@ -278,21 +363,30 @@ public struct TacticalMKMapView: UIViewRepresentable {
             if let host = tacticalHosts[key] {
                 host.rootView = TacticalIndicatorOverlayView(
                     indicator: indicator,
+                    isPlacedByMe: isPlacedByMe,
+                    isSameClan: isSameClan,
                     radarColor: radarColor,
                     onDelete: onDelete,
                     onTap: onTap
                 )
-                host.view.frame = CGRect(x: -half, y: -half, width: touchTargetSize, height: touchTargetSize)
+                host.view.clipsToBounds = false
+                host.view.frame = view.bounds
+                host.view.layoutIfNeeded()
             } else {
                 view.subviews.forEach { $0.removeFromSuperview() }
                 let host = UIHostingController(rootView: TacticalIndicatorOverlayView(
                     indicator: indicator,
+                    isPlacedByMe: isPlacedByMe,
+                    isSameClan: isSameClan,
                     radarColor: radarColor,
                     onDelete: onDelete,
                     onTap: onTap
                 ))
                 host.view.backgroundColor = .clear
-                host.view.frame = CGRect(x: -half, y: -half, width: touchTargetSize, height: touchTargetSize)
+                host.view.clipsToBounds = false
+                host.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                host.view.frame = view.bounds
+                host.view.layoutIfNeeded()
                 view.addSubview(host.view)
                 tacticalHosts[key] = host
             }
@@ -306,6 +400,8 @@ public struct TacticalMKMapView: UIViewRepresentable {
         /// Creates or updates the hosted DistanceLabelView content for `view`, auto-sizing the
         /// hosting view's bounds to the label's intrinsic size.
         private func applyDistanceLabelContent(text: String, to view: MKAnnotationView) {
+            view.collisionMode = .none
+            view.displayPriority = .required
             let radarColor = parent.gameState.radarColorTheme.color
             let key = ObjectIdentifier(view)
             let rootView = DistanceLabelView(text: text, radarColor: radarColor)
@@ -367,6 +463,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
                 distanceLabelAnnotation = label
                 mapView.addAnnotation(label)
             }
+            refreshMemberSelectionState(in: mapView)
         }
 
         private func clearDistanceLine(in mapView: MKMapView) {
@@ -380,6 +477,17 @@ public struct TacticalMKMapView: UIViewRepresentable {
                 }
                 mapView.removeAnnotation(existingLabel)
                 distanceLabelAnnotation = nil
+            }
+            refreshMemberSelectionState(in: mapView)
+        }
+
+        private func refreshMemberSelectionState(in mapView: MKMapView) {
+            let existingMembers = mapView.annotations.compactMap { $0 as? SquadMemberAnnotation }
+            for anno in existingMembers {
+                if let view = mapView.view(for: anno) {
+                    let teammateFrameSize = AppConstants.UI.MapMarkers.markerFrameSize * AppConstants.UI.MapMarkers.otherPlayerScaleFactor
+                    applyMemberContent(member: anno.member, isMe: false, to: view, size: teammateFrameSize)
+                }
             }
         }
 
@@ -498,7 +606,8 @@ public struct TacticalMKMapView: UIViewRepresentable {
                     existing.coordinate = displayCoordinate
                     existing.member = member
                     if let view = mapView.view(for: existing) {
-                        applyMemberContent(member: member, isMe: false, to: view, size: AppConstants.UI.MapMarkers.markerFrameSize)
+                        let teammateFrameSize = AppConstants.UI.MapMarkers.markerFrameSize * AppConstants.UI.MapMarkers.otherPlayerScaleFactor
+                        applyMemberContent(member: member, isMe: false, to: view, size: teammateFrameSize)
                     }
                 } else {
                     let newAnno = SquadMemberAnnotation(member: member)
@@ -540,9 +649,9 @@ public struct TacticalMKMapView: UIViewRepresentable {
         public func mapView(_ mapView: MKMapView, viewFor annotation: MKAnnotation) -> MKAnnotationView? {
             if annotation is MKUserLocation {
                 let identifier = "UserLocationView"
-                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? TacticalMKAnnotationView
                 if view == nil {
-                    view = MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    view = TacticalMKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
                     view?.canShowCallout = false
                 }
                 view?.annotation = annotation
@@ -554,23 +663,24 @@ public struct TacticalMKMapView: UIViewRepresentable {
 
             if let memberAnno = annotation as? SquadMemberAnnotation {
                 let identifier = "SquadMemberAnnotationView"
-                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? TacticalMKAnnotationView
                 if view == nil {
-                    view = MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    view = TacticalMKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
                     view?.canShowCallout = false
                 }
                 view?.annotation = annotation
                 if let view {
-                    applyMemberContent(member: memberAnno.member, isMe: false, to: view, size: AppConstants.UI.MapMarkers.markerFrameSize)
+                    let teammateFrameSize = AppConstants.UI.MapMarkers.markerFrameSize * AppConstants.UI.MapMarkers.otherPlayerScaleFactor
+                    applyMemberContent(member: memberAnno.member, isMe: false, to: view, size: teammateFrameSize)
                 }
                 return view
             }
             
             if let tacticalAnno = annotation as? TacticalIndicatorMKAnnotation {
                 let identifier = "TacticalIndicatorAnnotationView"
-                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier)
+                var view = mapView.dequeueReusableAnnotationView(withIdentifier: identifier) as? TacticalMKAnnotationView
                 if view == nil {
-                    view = MKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
+                    view = TacticalMKAnnotationView(annotation: annotation, reuseIdentifier: identifier)
                     view?.canShowCallout = false
                 }
                 view?.annotation = annotation

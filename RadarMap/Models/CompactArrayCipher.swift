@@ -3,7 +3,7 @@ import CryptoKit
 
 /// AES-256-GCM helpers for encrypting the compact wire arrays used by `TelemetryPacket`
 /// and `TacticalIndicator` (see docs/CLOUD_DATA_MANAGEMENT.md §5.E). Gated end-to-end
-/// by `AppConstants.Security.telemetryEncryptionEnabled`.
+/// by `GameStateManager.isEncryptionEnabled` / `ConfigSnapshot.isEncryptionEnabled`.
 public enum CompactArrayCipherError: Error {
     case malformedCiphertext
     case malformedPlaintext

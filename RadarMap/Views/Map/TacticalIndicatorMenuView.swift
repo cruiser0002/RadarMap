@@ -46,7 +46,7 @@ public struct TacticalIndicatorMenuView: View {
                                 Text("Back")
                             }
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(themeColor)
+                            .foregroundColor(selectedCategory?.baseColor ?? themeColor)
                         } else {
                             Image(systemName: "xmark")
                                 .font(.system(size: 12, weight: .semibold))
@@ -69,6 +69,10 @@ public struct TacticalIndicatorMenuView: View {
                     }
                 }) {
                     HStack {
+                        Image(systemName: category.iconName)
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundColor(category.baseColor)
+                        
                         Text(category.title)
                             .font(.system(size: 14, weight: .bold, design: .monospaced))
                             .foregroundColor(.white)
@@ -85,7 +89,7 @@ public struct TacticalIndicatorMenuView: View {
                     .cornerRadius(8)
                     .overlay(
                         RoundedRectangle(cornerRadius: 8)
-                            .stroke(themeColor.opacity(0.3), lineWidth: 1)
+                            .stroke(category.baseColor.opacity(0.3), lineWidth: 1)
                     )
                 }
                 .buttonStyle(.plain)
@@ -117,7 +121,7 @@ public struct TacticalIndicatorMenuView: View {
                             Spacer()
                             
                             TacticalIndicatorIcon(type: type, size: 16)
-                                .foregroundColor(themeColor)
+                                .foregroundColor(type.baseColor)
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
@@ -125,7 +129,7 @@ public struct TacticalIndicatorMenuView: View {
                         .cornerRadius(8)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
-                                .stroke(themeColor.opacity(0.3), lineWidth: 1)
+                                .stroke(type.baseColor.opacity(0.3), lineWidth: 1)
                         )
                     }
                     .buttonStyle(.plain)

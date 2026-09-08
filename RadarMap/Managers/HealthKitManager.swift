@@ -7,7 +7,6 @@ import HealthKit
 public final class HealthKitManager: NSObject, ObservableObject {
     @Published public var currentHeartRate: Double = AppConstants.Health.defaultRestingHeartRate
     @Published public var isSessionActive: Bool = false
-    @Published public var isLowPowerPPGEnabled: Bool = true
     /// Share-side authorization only — HealthKit deliberately never exposes read-side grant/deny
     /// status. Workout share is requested in the same call as heart rate read, so this is the
     /// closest available proxy for "did the user allow HealthKit access." Not meaningful on iOS,
@@ -22,7 +21,6 @@ public final class HealthKitManager: NSObject, ObservableObject {
     private let healthStore = HKHealthStore()
     private var workoutSession: HKWorkoutSession?
     private var workoutBuilder: HKLiveWorkoutBuilder?
-    private var ppgDutyCycleTimer: AnyCancellable?
     #endif
 
     public override init() {
@@ -30,7 +28,30 @@ public final class HealthKitManager: NSObject, ObservableObject {
         #if os(watchOS)
         if HKHealthStore.isHealthDataAvailable() {
             authorizationStatus = healthStore.authorizationStatus(for: HKObjectType.workoutType())
+            if authorizationStatus == .sharingAuthorized {
+                queryLatestHeartRateSample()
+            }
         }
+        #endif
+    }
+
+    public func queryLatestHeartRateSample() {
+        #if os(watchOS)
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        guard let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate) else { return }
+        
+        let sortDescriptor = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+        let query = HKSampleQuery(sampleType: heartRateType, predicate: nil, limit: 1, sortDescriptors: [sortDescriptor]) { [weak self] _, samples, _ in
+            guard let sample = samples?.first as? HKQuantitySample else { return }
+            let heartRateUnit = HKUnit.count().unitDivided(by: .minute())
+            let value = sample.quantity.doubleValue(for: heartRateUnit)
+            if value > 0 {
+                DispatchQueue.main.async {
+                    self?.currentHeartRate = value
+                }
+            }
+        }
+        healthStore.execute(query)
         #endif
     }
 
@@ -54,6 +75,9 @@ public final class HealthKitManager: NSObject, ObservableObject {
                     return
                 }
                 self.authorizationStatus = self.healthStore.authorizationStatus(for: HKObjectType.workoutType())
+                if success {
+                    self.queryLatestHeartRateSample()
+                }
                 completion(success)
             }
         }
@@ -79,7 +103,11 @@ public final class HealthKitManager: NSObject, ObservableObject {
             
             workoutSession?.delegate = self
             workoutBuilder?.delegate = self
-            workoutBuilder?.dataSource = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: workoutConfig)
+            let liveDataSource = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: workoutConfig)
+            if let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate) {
+                liveDataSource.enableCollection(for: heartRateType, predicate: nil)
+            }
+            workoutBuilder?.dataSource = liveDataSource
             
             let startDate = Date()
             workoutSession?.startActivity(with: startDate)
@@ -97,9 +125,6 @@ public final class HealthKitManager: NSObject, ObservableObject {
             workoutBuilder?.beginCollection(withStart: startDate) { [weak self] success, error in
                 DispatchQueue.main.async {
                     self?.isSessionActive = success
-                    if success, self?.isLowPowerPPGEnabled == true {
-                        self?.startPPGDutyCycle()
-                    }
                 }
             }
         } catch {
@@ -111,25 +136,8 @@ public final class HealthKitManager: NSObject, ObservableObject {
         #endif
     }
     
-    #if os(watchOS)
-    /// To preserve background execution runtime when the wrist is lowered,
-    /// HKWorkoutSession must remain running continuously. Pausing the session causes
-    /// watchOS to suspend background execution.
-    private func startPPGDutyCycle() {
-        ppgDutyCycleTimer?.cancel()
-        ppgDutyCycleTimer = nil
-        guard let session = workoutSession else { return }
-        
-        if session.state == .paused {
-            session.resume()
-        }
-    }
-    #endif
-    
     public func pauseLiveHeartRateSession() {
         #if os(watchOS)
-        ppgDutyCycleTimer?.cancel()
-        ppgDutyCycleTimer = nil
         guard let session = workoutSession, session.state == .running else { return }
         session.pause()
         #else
@@ -143,9 +151,7 @@ public final class HealthKitManager: NSObject, ObservableObject {
             startLiveHeartRateSession()
             return
         }
-        if isLowPowerPPGEnabled {
-            startPPGDutyCycle()
-        } else if session.state == .paused {
+        if session.state == .paused {
             session.resume()
         }
         #else
@@ -155,8 +161,6 @@ public final class HealthKitManager: NSObject, ObservableObject {
     
     public func stopLiveHeartRateSession() {
         #if os(watchOS)
-        ppgDutyCycleTimer?.cancel()
-        ppgDutyCycleTimer = nil
         guard let session = workoutSession else { return }
         session.end()
         workoutBuilder?.endCollection(withEnd: Date()) { [weak self] _, _ in

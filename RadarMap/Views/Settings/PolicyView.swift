@@ -2,7 +2,9 @@ import SwiftUI
 
 public struct PolicyView: View {
     @EnvironmentObject var gameState: GameStateManager
+    #if DEBUG
     @State private var showDebugUnlock: Bool = false
+    #endif
 
     public init() {}
 
@@ -21,6 +23,12 @@ public struct PolicyView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.top, 4)
+                .contentShape(Rectangle())
+                #if DEBUG
+                .onLongPressGesture(minimumDuration: 2.0) {
+                    showDebugUnlock = true
+                }
+                #endif
                 
                 // Summary Card
                 VStack(alignment: .leading, spacing: 6) {
@@ -208,15 +216,12 @@ public struct PolicyView: View {
             .padding(.horizontal, 8)
             .padding(.bottom, 16)
         }
-        .contentShape(Rectangle())
-        .simultaneousGesture(
-            LongPressGesture(minimumDuration: 5.0)
-                .onEnded { _ in showDebugUnlock = true }
-        )
+        #if DEBUG
         .sheet(isPresented: $showDebugUnlock) {
             DebugUnlockView()
                 .environmentObject(gameState)
         }
+        #endif
         .navigationTitle("Policy")
         #if os(watchOS) || os(iOS)
         .navigationBarTitleDisplayMode(.inline)

@@ -79,9 +79,11 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 pin: defaults.string(forKey: AppConstants.Storage.savedPinKey) ?? "",
                 databaseURL: defaults.string(forKey: AppConstants.Storage.customDatabaseURLKey) ?? "",
                 theme: defaults.string(forKey: AppConstants.Storage.radarColorThemeKey) ?? "Green",
+                role: defaults.string(forKey: AppConstants.Storage.userRoleKey) ?? "player",
                 isPro: false,
                 isUploadHeartRateEnabled: defaults.object(forKey: AppConstants.Storage.isUploadHeartRateEnabledKey) as? Bool ?? true,
                 isUploadLocationEnabled: defaults.object(forKey: AppConstants.Storage.isUploadLocationEnabledKey) as? Bool ?? true,
+                isEncryptionEnabled: defaults.object(forKey: AppConstants.Storage.isEncryptionEnabledKey) as? Bool ?? true,
                 configTs: 0
             )
             self.localLS = seeded
@@ -401,6 +403,11 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
             } else if self.localRole == .phone, let w2pHS = envelope.w2pHS {
                 self.latestRemoteActiveUntil = w2pHS.activeUntil
                 self.latestRemoteHeartRate = w2pHS.heartRate
+                let active = (w2pHS.activeUntil > Date().timeIntervalSince1970)
+                if self.isWatchLeaseActive != active {
+                    self.isWatchLeaseActive = active
+                    self.onWatchLeaseStatusChanged?(active)
+                }
                 if !w2pHS.remotePlayerTelemetryJson.isEmpty && w2pHS.remotePlayerTelemetryJson != "{}" {
                     self.latestRemoteTelemetryJson = w2pHS.remotePlayerTelemetryJson
                     self.onHighSpeedTelemetryReceived?(w2pHS.remotePlayerTelemetryJson)

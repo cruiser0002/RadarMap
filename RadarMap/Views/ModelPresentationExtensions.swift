@@ -47,11 +47,25 @@ extension TacticalIndicatorCategory {
             return "leaf.fill"
         }
     }
+    
+    /// Tactical base color: Team Orders remain green; Tactical and Environmental markers are red.
+    public var baseColor: Color {
+        switch self {
+        case .squadOrder:
+            return .green
+        case .enemyIndicator, .environment:
+            return .red
+        }
+    }
 }
 
 // MARK: - TacticalIndicatorType Presentation Extensions
 
 extension TacticalIndicatorType {
+    /// Tactical base color derived from indicator category
+    public var baseColor: Color {
+        category.baseColor
+    }
     /// SF Symbol descriptor (system name or custom asset catalog symbol name)
     public var iconName: String {
         switch self {
@@ -114,6 +128,29 @@ extension TacticalIndicatorType {
         } else {
             return Image(systemName: iconName).renderingMode(.template)
         }
+    }
+}
+
+// MARK: - TacticalIndicator Presentation Extensions
+
+extension TacticalIndicator {
+    /// Tactical base color taking into account whether the indicator was placed by the local player
+    /// or a member of the same clan:
+    /// - Team orders dropped by me or teammates in the same clan are green.
+    /// - Other people's team orders are blue.
+    /// - Tactical & environmental markers are red.
+    public func baseColor(isPlacedByMe: Bool, isSameClan: Bool = false) -> Color {
+        switch category {
+        case .squadOrder:
+            return (isPlacedByMe || isSameClan) ? .green : .blue
+        case .enemyIndicator, .environment:
+            return .red
+        }
+    }
+    
+    /// Default base color (assumes placed by me if unqueried)
+    public var baseColor: Color {
+        baseColor(isPlacedByMe: true, isSameClan: false)
     }
 }
 

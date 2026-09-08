@@ -19,9 +19,14 @@ public struct ConfigSnapshot: Codable, Equatable {
     /// yet" — so this field is adopted unconditionally on the receiving side, empty included.
     public var databaseURL: String
     public var theme: String
+    public var role: String
     public var isPro: Bool
     public var isUploadHeartRateEnabled: Bool
     public var isUploadLocationEnabled: Bool
+    /// Whether this device encrypts its own outbound telemetry/tactical writes (AES-256-GCM).
+    /// Synced phone<->watch like every other config field so both devices agree on it — see
+    /// `GameStateManager.isEncryptionEnabled` and docs/CLOUD_DATA_MANAGEMENT.md §5.E.
+    public var isEncryptionEnabled: Bool
     public var configTs: TimeInterval
 
     public init(
@@ -30,9 +35,11 @@ public struct ConfigSnapshot: Codable, Equatable {
         pin: String = "",
         databaseURL: String = "",
         theme: String = "Green",
+        role: String = "player",
         isPro: Bool = false,
         isUploadHeartRateEnabled: Bool = true,
         isUploadLocationEnabled: Bool = true,
+        isEncryptionEnabled: Bool = true,
         configTs: TimeInterval = 0
     ) {
         self.callsign = callsign
@@ -40,15 +47,17 @@ public struct ConfigSnapshot: Codable, Equatable {
         self.pin = pin
         self.databaseURL = databaseURL
         self.theme = theme
+        self.role = role
         self.isPro = isPro
         self.isUploadHeartRateEnabled = isUploadHeartRateEnabled
         self.isUploadLocationEnabled = isUploadLocationEnabled
+        self.isEncryptionEnabled = isEncryptionEnabled
         self.configTs = configTs
     }
 
     enum CodingKeys: String, CodingKey {
-        case callsign, roomName, pin, databaseURL, theme, isPro
-        case isUploadHeartRateEnabled, isUploadLocationEnabled
+        case callsign, roomName, pin, databaseURL, theme, role, isPro
+        case isUploadHeartRateEnabled, isUploadLocationEnabled, isEncryptionEnabled
         case configTs
     }
 
@@ -59,9 +68,11 @@ public struct ConfigSnapshot: Codable, Equatable {
         self.pin = try container.decodeIfPresent(String.self, forKey: .pin) ?? ""
         self.databaseURL = try container.decodeIfPresent(String.self, forKey: .databaseURL) ?? ""
         self.theme = try container.decodeIfPresent(String.self, forKey: .theme) ?? "Green"
+        self.role = try container.decodeIfPresent(String.self, forKey: .role) ?? "player"
         self.isPro = try container.decodeIfPresent(Bool.self, forKey: .isPro) ?? false
         self.isUploadHeartRateEnabled = try container.decodeIfPresent(Bool.self, forKey: .isUploadHeartRateEnabled) ?? true
         self.isUploadLocationEnabled = try container.decodeIfPresent(Bool.self, forKey: .isUploadLocationEnabled) ?? true
+        self.isEncryptionEnabled = try container.decodeIfPresent(Bool.self, forKey: .isEncryptionEnabled) ?? true
         self.configTs = try container.decodeIfPresent(TimeInterval.self, forKey: .configTs) ?? 0.0
     }
 
@@ -71,9 +82,11 @@ public struct ConfigSnapshot: Codable, Equatable {
                pin == other.pin &&
                databaseURL == other.databaseURL &&
                theme == other.theme &&
+               role == other.role &&
                isPro == other.isPro &&
                isUploadHeartRateEnabled == other.isUploadHeartRateEnabled &&
                isUploadLocationEnabled == other.isUploadLocationEnabled &&
+               isEncryptionEnabled == other.isEncryptionEnabled &&
                configTs == other.configTs
     }
 }
@@ -81,12 +94,12 @@ public struct ConfigSnapshot: Codable, Equatable {
 public struct LoginCycleSnapshot: Codable, Equatable {
     public var loginCycle: LoginCycleState
     public var loginCycleTs: TimeInterval
-    
+
     public init(loginCycle: LoginCycleState = .inactive, loginCycleTs: TimeInterval = 0) {
         self.loginCycle = loginCycle
         self.loginCycleTs = loginCycleTs
     }
-    
+
     public func isEquivalent(to other: LoginCycleSnapshot) -> Bool {
         return loginCycle == other.loginCycle && loginCycleTs == other.loginCycleTs
     }
@@ -95,12 +108,12 @@ public struct LoginCycleSnapshot: Codable, Equatable {
 public struct MembershipSnapshot: Codable, Equatable {
     public var membersJson: String
     public var memberTs: TimeInterval
-    
+
     public init(membersJson: String = "[]", memberTs: TimeInterval = 0) {
         self.membersJson = membersJson
         self.memberTs = memberTs
     }
-    
+
     public func isEquivalent(to other: MembershipSnapshot) -> Bool {
         return membersJson == other.membersJson && memberTs == other.memberTs
     }
@@ -109,12 +122,12 @@ public struct MembershipSnapshot: Codable, Equatable {
 public struct TacticalSnapshot: Codable, Equatable {
     public var tacticalJson: String
     public var tacticalTs: TimeInterval
-    
+
     public init(tacticalJson: String = "[]", tacticalTs: TimeInterval = 0) {
         self.tacticalJson = tacticalJson
         self.tacticalTs = tacticalTs
     }
-    
+
     public func isEquivalent(to other: TacticalSnapshot) -> Bool {
         return tacticalJson == other.tacticalJson && tacticalTs == other.tacticalTs
     }
@@ -123,12 +136,12 @@ public struct TacticalSnapshot: Codable, Equatable {
 public struct PlayerStateSnapshot: Codable, Equatable {
     public var isDead: Bool
     public var isDeadTs: TimeInterval
-    
+
     public init(isDead: Bool = false, isDeadTs: TimeInterval = 0) {
         self.isDead = isDead
         self.isDeadTs = isDeadTs
     }
-    
+
     public func isEquivalent(to other: PlayerStateSnapshot) -> Bool {
         return isDead == other.isDead && isDeadTs == other.isDeadTs
     }
@@ -139,7 +152,7 @@ public struct PlayerStateSnapshot: Codable, Equatable {
 public struct PhoneToWatchHighSpeed: Codable, Equatable {
     public var activeUntil: TimeInterval
     public var remotePlayerTelemetryJson: String
-    
+
     public init(
         activeUntil: TimeInterval = 0,
         remotePlayerTelemetryJson: String = "{}"
@@ -147,7 +160,7 @@ public struct PhoneToWatchHighSpeed: Codable, Equatable {
         self.activeUntil = activeUntil
         self.remotePlayerTelemetryJson = remotePlayerTelemetryJson
     }
-    
+
     enum CodingKeys: String, CodingKey {
         case activeUntil = "active_until"
         case remotePlayerTelemetryJson = "remote_telemetry"
@@ -155,7 +168,7 @@ public struct PhoneToWatchHighSpeed: Codable, Equatable {
         case legacyRemoteTelemetryJson = "remotePlayerTelemetryJson"
         case legacyActiveUntil = "activeUntil"
     }
-    
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.activeUntil = (try? container.decode(TimeInterval.self, forKey: .activeUntil)) ??
@@ -164,7 +177,7 @@ public struct PhoneToWatchHighSpeed: Codable, Equatable {
                                         (try? container.decode(String.self, forKey: .slideRemoteTelemetrySnapshot)) ??
                                         (try? container.decode(String.self, forKey: .legacyRemoteTelemetryJson)) ?? "{}"
     }
-    
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(activeUntil, forKey: .activeUntil)
@@ -176,7 +189,7 @@ public struct WatchToPhoneHighSpeed: Codable, Equatable {
     public var activeUntil: TimeInterval
     public var heartRate: Double
     public var remotePlayerTelemetryJson: String
-    
+
     public init(
         activeUntil: TimeInterval = 0,
         heartRate: Double = 75.0,
@@ -186,7 +199,7 @@ public struct WatchToPhoneHighSpeed: Codable, Equatable {
         self.heartRate = heartRate
         self.remotePlayerTelemetryJson = remotePlayerTelemetryJson
     }
-    
+
     enum CodingKeys: String, CodingKey {
         case activeUntil = "active_until"
         case heartRate = "hr"
@@ -196,7 +209,7 @@ public struct WatchToPhoneHighSpeed: Codable, Equatable {
         case legacyRemoteTelemetryJson = "remotePlayerTelemetryJson"
         case legacyActiveUntil = "activeUntil"
     }
-    
+
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.activeUntil = (try? container.decode(TimeInterval.self, forKey: .activeUntil)) ??
@@ -207,7 +220,7 @@ public struct WatchToPhoneHighSpeed: Codable, Equatable {
                                         (try? container.decode(String.self, forKey: .slideRemoteTelemetrySnapshot)) ??
                                         (try? container.decode(String.self, forKey: .legacyRemoteTelemetryJson)) ?? "{}"
     }
-    
+
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(activeUntil, forKey: .activeUntil)
@@ -227,7 +240,7 @@ public struct LowSpeedSnapshot: Codable, Equatable {
     public var membership: MembershipSnapshot
     public var tactical: TacticalSnapshot
     public var playerState: PlayerStateSnapshot
-    
+
     public init(
         syncTs: TimeInterval = 0,
         config: ConfigSnapshot = ConfigSnapshot(),
@@ -243,7 +256,7 @@ public struct LowSpeedSnapshot: Codable, Equatable {
         self.tactical = tactical
         self.playerState = playerState
     }
-    
+
     /// Checks whether all domain-state structures and their timestamps are equivalent.
     /// Deliberately ignores syncTs.
     public func isDomainEquivalent(to other: LowSpeedSnapshot) -> Bool {
@@ -262,7 +275,7 @@ public struct ApplicationContextEnvelope: Codable, Equatable {
     public var w2pHS: WatchToPhoneHighSpeed?
     public var p2wLS: LowSpeedSnapshot?
     public var w2pLS: LowSpeedSnapshot?
-    
+
     public init(
         p2wHS: PhoneToWatchHighSpeed? = nil,
         w2pHS: WatchToPhoneHighSpeed? = nil,
@@ -274,7 +287,7 @@ public struct ApplicationContextEnvelope: Codable, Equatable {
         self.p2wLS = p2wLS
         self.w2pLS = w2pLS
     }
-    
+
     enum CodingKeys: String, CodingKey {
         case p2wHS = "p2w_hs"
         case w2pHS = "w2p_hs"
@@ -291,7 +304,7 @@ public enum DeviceRole {
 }
 
 public struct MergeEngine {
-    
+
     /// Determines the winner between a Phone version and a Watch version of a structure.
     /// Rules:
     /// 1. Newer *_ts wins.
@@ -312,7 +325,7 @@ public struct MergeEngine {
             return (watchValue, watchTs, false)
         }
     }
-    
+
     /// Merges an incoming counterpart LowSpeedSnapshot into the local LowSpeedSnapshot.
     /// Returns the updated local snapshot and whether the local device advertises any structure that wins against peer.
     public static func merge(
@@ -322,9 +335,9 @@ public struct MergeEngine {
     ) -> (mergedLocal: LowSpeedSnapshot, localHasWinningStructure: Bool) {
         var merged = local
         var localHasWinningStructure = false
-        
+
         let isPhone = (localDevice == .phone)
-        
+
         // 1. Config merge
         let phoneConfig = isPhone ? local.config : peer.config
         let watchConfig = isPhone ? peer.config : local.config
@@ -345,7 +358,7 @@ public struct MergeEngine {
             }
             merged.config = configRes.winnerValue
         }
-        
+
         // 2. Login Cycle merge
         let phoneCycle = isPhone ? local.loginCycle : peer.loginCycle
         let watchCycle = isPhone ? peer.loginCycle : local.loginCycle
@@ -366,7 +379,7 @@ public struct MergeEngine {
             }
             merged.loginCycle = cycleRes.winnerValue
         }
-        
+
         // 3. Membership merge
         let phoneMem = isPhone ? local.membership : peer.membership
         let watchMem = isPhone ? peer.membership : local.membership
@@ -387,7 +400,7 @@ public struct MergeEngine {
             }
             merged.membership = memRes.winnerValue
         }
-        
+
         // 4. Tactical merge
         let phoneTac = isPhone ? local.tactical : peer.tactical
         let watchTac = isPhone ? peer.tactical : local.tactical
@@ -408,7 +421,7 @@ public struct MergeEngine {
             }
             merged.tactical = tacRes.winnerValue
         }
-        
+
         // 5. Player State merge
         let phonePlayer = isPhone ? local.playerState : peer.playerState
         let watchPlayer = isPhone ? peer.playerState : local.playerState
@@ -429,7 +442,7 @@ public struct MergeEngine {
             }
             merged.playerState = playerRes.winnerValue
         }
-        
+
         return (merged, localHasWinningStructure)
     }
 }

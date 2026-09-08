@@ -24,6 +24,8 @@ public struct TacticalIndicatorIcon: View {
 
 public struct TacticalIndicatorOverlayView: View {
     public let indicator: TacticalIndicator
+    public let isPlacedByMe: Bool
+    public let isSameClan: Bool
     public let radarColor: Color
     public let onDelete: () -> Void
     public let onTap: (() -> Void)?
@@ -36,11 +38,15 @@ public struct TacticalIndicatorOverlayView: View {
 
     public init(
         indicator: TacticalIndicator,
-        radarColor: Color,
+        isPlacedByMe: Bool = true,
+        isSameClan: Bool = false,
+        radarColor: Color = .green,
         onDelete: @escaping () -> Void,
         onTap: (() -> Void)? = nil
     ) {
         self.indicator = indicator
+        self.isPlacedByMe = isPlacedByMe
+        self.isSameClan = isSameClan
         self.radarColor = radarColor
         self.onDelete = onDelete
         self.onTap = onTap
@@ -48,27 +54,31 @@ public struct TacticalIndicatorOverlayView: View {
     
     /// Calculate color taking into account the 5-minute fade to gray rule for enemy indicators
     private func markerColor(fadeFactor: Double) -> Color {
+        let base = indicator.baseColor(isPlacedByMe: isPlacedByMe, isSameClan: isSameClan)
         if indicator.category == .enemyIndicator {
             if fadeFactor >= 1.0 {
                 return Color.gray.opacity(0.85)
             } else if fadeFactor > 0.0 {
-                // Blend radar theme color towards gray
-                return radarColor.opacity(1.0 - (fadeFactor * 0.5))
+                // Blend marker base color towards gray
+                return base.opacity(1.0 - (fadeFactor * 0.5))
             }
         }
-        return radarColor
+        return base
     }
     
     public var body: some View {
         let markers = AppConstants.UI.MapMarkers.self
-        let iconSize: CGFloat = markers.tacticalIndicatorIconSize
+        let iconSize: CGFloat = markers.iconSize(for: indicator.category)
         let ringSize: CGFloat = markers.tacticalIndicatorRingSize
         let touchTargetSize: CGFloat = ringSize
         let fadeFactor = indicator.grayFadeFactor()
-        // Use the raw radar color for the cache key so it stays stable across the 5-min fade.
+        let baseColor = indicator.baseColor(isPlacedByMe: isPlacedByMe, isSameClan: isSameClan)
+        // Use the raw base color for the cache key so it stays stable across the 5-min fade.
         // The grayscale desaturation is applied as a GPU-side modifier on the returned Image,
         // which is cheaper and doesn't defeat the sprite cache.
         let color = markerColor(fadeFactor: fadeFactor)   // used only for the label overlay below
+        
+        let isGreen = (indicator.category == .squadOrder) && (isPlacedByMe || isSameClan)
         
         ZStack {
             // Delete countdown progress ring only visible during hold
@@ -84,12 +94,13 @@ public struct TacticalIndicatorOverlayView: View {
             }
             
             // Center Tactical Indicator Icon (Pre-rendered Hardware GPU Texture)
-            // Cache key uses `radarColor` (stable) — grayscale fade handled by GPU modifier below.
-            TacticalSpriteCache.shared.indicatorSprite(type: indicator.type, color: radarColor, size: iconSize)
+            // Cache key uses `baseColor` (stable) — grayscale fade handled by GPU modifier below.
+            TacticalSpriteCache.shared.indicatorSprite(type: indicator.type, color: baseColor, size: iconSize)
                 .grayscale(indicator.category == .enemyIndicator ? fadeFactor : 0.0)
         }
         .frame(width: touchTargetSize, height: touchTargetSize)
-        .contentShape(Circle())
+        .contentShape(Circle().inset(by: isGreen ? -markers.greenTouchTargetPadding : 0))
+#if false
         .overlay(alignment: .top) {
             if indicator.category == .squadOrder,
                let callsign = indicator.placedByCallsign?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -106,6 +117,7 @@ public struct TacticalIndicatorOverlayView: View {
                     .offset(y: markers.orderCallsignYOffset)
             }
         }
+#endif
         .highPriorityGesture(
             DragGesture(minimumDistance: 0)
                 .onChanged { _ in

@@ -7,9 +7,40 @@ public enum MemberStatus: String, Codable {
     case inactive
 }
 
-public enum MemberRole: String, Codable {
+public enum MemberRole: String, Codable, CaseIterable, Identifiable, Comparable {
     case player
     case leader
+
+    public var id: String { rawValue }
+
+    public var displayName: String {
+        switch self {
+        case .player: return "Player"
+        case .leader: return "Team Leader"
+        }
+    }
+
+    public var isProRequired: Bool {
+        switch self {
+        case .player: return false
+        case .leader: return true
+        }
+    }
+
+    public var rankOrder: Int {
+        switch self {
+        case .player: return 0
+        case .leader: return 1
+        }
+    }
+
+    public static func < (lhs: MemberRole, rhs: MemberRole) -> Bool {
+        lhs.rankOrder < rhs.rankOrder
+    }
+
+    public static var allRanksOrdered: [MemberRole] {
+        allCases.sorted { $0.rankOrder < $1.rankOrder }
+    }
 }
 
 public struct SquadMember: Identifiable, Codable, Equatable {
@@ -201,5 +232,73 @@ public struct SquadMember: Identifiable, Codable, Equatable {
     /// Determines whether the member's telemetry is stale relative to a reference date.
     public func isStale(asOf now: Date) -> Bool {
         isStale(updateInterval: SquadMember.defaultUpdateInterval, multiplier: SquadMember.staleTimeoutMultiplier, asOf: now)
+    }
+}
+
+// MARK: - Clan Name Parsing & Comparison
+
+extension String {
+    /// Extracts all clan tags enclosed in brackets `[...]` per internet gaming convention.
+    /// Supports comma-separated multi-clans e.g. `[clanA,clanB]` and multiple brackets `[clanA][clanB]`.
+    /// Returns an array of trimmed, non-empty clan names in order of appearance.
+    public var clanTags: [String] {
+        var tags: [String] = []
+        var searchStart = startIndex
+        while searchStart < endIndex,
+              let openBracket = self[searchStart...].firstIndex(of: "["),
+              let closeBracket = self[openBracket...].firstIndex(of: "]"),
+              openBracket < closeBracket {
+            let contentStart = index(after: openBracket)
+            let bracketContent = String(self[contentStart..<closeBracket])
+            let components = bracketContent.split(separator: ",")
+            for comp in components {
+                let trimmed = comp.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    tags.append(trimmed)
+                }
+            }
+            searchStart = index(after: closeBracket)
+        }
+        return tags
+    }
+    
+    /// The primary or first clan tag enclosed in brackets `[...]`, if any.
+    public var clanTag: String? {
+        clanTags.first
+    }
+    
+    /// Returns true if both callsigns share at least one common clan tag (case-insensitively).
+    public func sharesClan(with otherCallsign: String) -> Bool {
+        let myClans = Set(self.clanTags.map { $0.lowercased() })
+        guard !myClans.isEmpty else { return false }
+        let otherClans = Set(otherCallsign.clanTags.map { $0.lowercased() })
+        return !myClans.isDisjoint(with: otherClans)
+    }
+    
+    /// Returns true if both callsigns share at least one common clan tag (case-insensitively).
+    public func hasSameClan(as otherCallsign: String) -> Bool {
+        sharesClan(with: otherCallsign)
+    }
+}
+
+extension SquadMember {
+    /// All clan tags extracted from the callsign.
+    public var clanTags: [String] {
+        callsign.clanTags
+    }
+    
+    /// Clan tag extracted from the callsign (first tag if multiple), if any.
+    public var clanTag: String? {
+        callsign.clanTag
+    }
+    
+    /// Returns true if this member and another member share at least one clan.
+    public func sharesClan(with other: SquadMember) -> Bool {
+        callsign.sharesClan(with: other.callsign)
+    }
+    
+    /// Returns true if this member and another member belong to the same clan.
+    public func hasSameClan(as other: SquadMember) -> Bool {
+        callsign.hasSameClan(as: other.callsign)
     }
 }

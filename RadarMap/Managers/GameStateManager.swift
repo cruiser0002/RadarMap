@@ -53,6 +53,35 @@ public final class GameStateManager: ObservableObject {
             }
         }
     }
+    /// Whether this device encrypts its own outbound telemetry/tactical writes. Synced
+    /// phone<->watch via `ConfigSnapshot.isEncryptionEnabled` (not a raw per-device flag) so the
+    /// two devices can't disagree about it and silently fail to decrypt each other's payloads —
+    /// see docs/CLOUD_DATA_MANAGEMENT.md §5.E.
+    public var isEncryptionEnabled: Bool {
+        get { watchConnectivityManager.localLS.config.isEncryptionEnabled }
+        set { watchConnectivityManager.mutateLocalConfig { $0.isEncryptionEnabled = newValue } }
+    }
+    public var myRole: MemberRole {
+        get {
+            let roleStr = watchConnectivityManager.localLS.config.role
+            let parsed = MemberRole(rawValue: roleStr) ?? .player
+            if parsed.isProRequired && !subscriptionManager.hasUnlimitedSquadUnlock {
+                return .player
+            }
+            return parsed
+        }
+        set {
+            let effectiveRole = (newValue.isProRequired && !subscriptionManager.hasUnlimitedSquadUnlock) ? .player : newValue
+            watchConnectivityManager.mutateLocalConfig { $0.role = effectiveRole.rawValue }
+            UserDefaults.standard.set(effectiveRole.rawValue, forKey: AppConstants.Storage.userRoleKey)
+            updateLocalPlayerMember()
+            if let activeRoom = firebaseManager.activeRoom, var member = activeRoom.members[myMemberId] {
+                member.role = effectiveRole
+                firebaseManager.activeRoom?.members[myMemberId] = member
+                firebaseManager.updateMember(member)
+            }
+        }
+    }
     /// Coarse room-lifecycle state, mirrored from `localLS.loginCycle`. `sessionStateMachine`,
     /// `isInitiatingHost`, and `isJoining` (below) track richer local in-flight state that
     /// `LoginCycleState`'s 3 coarse cases (inactive/hostActive/joinActive) don't capture, and stay
@@ -262,6 +291,15 @@ public final class GameStateManager: ObservableObject {
         isHosting = sessionStateMachine.state.isHosting
         isInitiatingHost = sessionStateMachine.state.isInitiatingHost
         isJoining = sessionStateMachine.state.isJoining
+        // `isHosting`'s setter is the only writer of `loginCycle`, and it only ever
+        // publishes .hostActive/.inactive — there's no `isJoined`-style computed property
+        // for the symmetric .joined(room:) case. Publish .joinActive directly here so the
+        // peer device's LWW merge actually learns "this device joined a room"; without
+        // this, `loginCycle` never leaves .inactive on a successful join and the peer
+        // never converges on the joined session.
+        if case .joined = sessionStateMachine.state {
+            watchConnectivityManager.mutateLocalLoginCycle { $0.loginCycle = .joinActive }
+        }
         if let err = sessionStateMachine.state.errorMessage {
             errorMessage = err
         }
@@ -366,25 +404,32 @@ public final class GameStateManager: ObservableObject {
             if let members = currentRoom?.members {
                 if let direct = members[trimmedPlacedBy] ?? members[ind.placedByMemberId] {
                     resolvedMember = direct
-                } else if let caseMatch = members.first(where: {
-                    $0.key.caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame ||
-                    $0.value.id.caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame
-                })?.value {
-                    resolvedMember = caseMatch
-                } else if let callsignMatch = members.values.first(where: {
-                    !$0.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-                    $0.callsign.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame
-                }) {
-                    resolvedMember = callsignMatch
+                } else {
+                    for (key, member) in members {
+                        if key.caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame ||
+                           member.id.caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame {
+                            resolvedMember = member
+                            break
+                        }
+                    }
+                    if resolvedMember == nil {
+                        for member in members.values {
+                            let clean = member.callsign.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !clean.isEmpty && clean.caseInsensitiveCompare(trimmedPlacedBy) == .orderedSame {
+                                resolvedMember = member
+                                break
+                            }
+                        }
+                    }
                 }
             }
             
             let trimmedLocalId = self.myMemberId.trimmingCharacters(in: .whitespacesAndNewlines)
             let trimmedLocalCallsign = self.myCallsign.trimmingCharacters(in: .whitespacesAndNewlines)
-            let isLocalPlayer = !trimmedPlacedBy.isEmpty && (
+            let isLocalPlayer = self.localIndicators[ind.id] != nil || (!trimmedPlacedBy.isEmpty && (
                 trimmedPlacedBy.caseInsensitiveCompare(trimmedLocalId) == .orderedSame ||
                 (!trimmedLocalCallsign.isEmpty && trimmedPlacedBy.caseInsensitiveCompare(trimmedLocalCallsign) == .orderedSame)
-            )
+            ))
             
             if let member = resolvedMember, !member.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 updated.placedByCallsign = member.callsign
@@ -398,7 +443,14 @@ public final class GameStateManager: ObservableObject {
             return updated
         }
         
-        let sorted = mapped.sorted { $0.timestamp < $1.timestamp }
+        // Squad orders are clan-private: visible only to the issuer ("Me") or teammates sharing >= 1 clan.
+        // Enemy indicators and environmental hazards remain squad-wide (visible to all players).
+        let visible = mapped.filter { ind in
+            guard ind.category == .squadOrder else { return true }
+            return isIndicatorFromSameClan(ind)
+        }
+        
+        let sorted = visible.sorted { $0.timestamp < $1.timestamp }
         if allTacticalIndicators != sorted {
             allTacticalIndicators = sorted
             syncTacticalToWatchConnectivity()
@@ -505,10 +557,49 @@ public final class GameStateManager: ObservableObject {
         role: .player
     )
     
+    /// Simulated HR derived from the 20-sample SMA of movement speed (`LocationHeadingManager.smoothedSpeedMps`).
+    /// Stands in for `AppConstants.Health.defaultRestingHeartRate` wherever no watch optical
+    /// reading is present — see `isWatchHeartRateSourcePresent`.
+    public var simulatedHeartRateFromSpeed: Double {
+        min(
+            AppConstants.Health.maxSimulatedHeartRate,
+            AppConstants.Health.defaultRestingHeartRate + locationHeadingManager.smoothedSpeedMps * AppConstants.Health.simulatedHeartRateSlopeBpmPerMps
+        )
+    }
+
+    /// True when a watch optical reading is present:
+    /// - On watchOS (or when localRole == .watch): the watch IS the optical heart rate source. Present when
+    ///   `healthKitManager.currentHeartRate > 0 || healthKitManager.isSessionActive`.
+    /// - On iOS/other: the watch's `w2p_hs` lease is active (`isWatchLeaseActive`), or an optical reading
+    ///   has been directly supplied (e.g. mock test injection).
+    public var isWatchHeartRateSourcePresent: Bool {
+        if watchConnectivityManager.localRole == .watch {
+            return healthKitManager.currentHeartRate > 0 || healthKitManager.isSessionActive
+        } else {
+            return watchConnectivityManager.isWatchLeaseActive || (healthKitManager.currentHeartRate > 0 && healthKitManager.currentHeartRate != AppConstants.Health.defaultRestingHeartRate)
+        }
+    }
+
+    /// Canonical effective heart rate for the local player.
+    /// - If KIA/downed: flatline 0.0 BPM.
+    /// - If heart rate upload/sharing is disabled: speed-simulated resting HR.
+    /// - Otherwise: live optical heart rate if available, falling back to speed-simulated HR.
+    public var effectiveHeartRate: Double {
+        if isDead {
+            return AppConstants.Health.flatlineHeartRate
+        } else if !isUploadHeartRateEnabled {
+            return simulatedHeartRateFromSpeed
+        } else if isWatchHeartRateSourcePresent {
+            return healthKitManager.currentHeartRate
+        } else {
+            return simulatedHeartRateFromSpeed
+        }
+    }
+
     public func updateLocalPlayerMember() {
         let rawLoc = locationHeadingManager.userLocation?.coordinate ?? AppConstants.Location.fallbackCoordinate
         let rawHeading = locationHeadingManager.blendedHeading
-        let hr = isDead ? AppConstants.Health.flatlineHeartRate : (healthKitManager.currentHeartRate > 0 ? healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
+        let hr = effectiveHeartRate
         localPlayerMember = SquadMember(
             id: myMemberId,
             callsign: myCallsign.isEmpty ? "OPERATOR" : myCallsign,
@@ -520,7 +611,7 @@ public final class GameStateManager: ObservableObject {
             lastUpdatedTimestamp: Date().timeIntervalSince1970,
             sequenceNumber: localSequenceCounter,
             status: isDead ? .downed : .active,
-            role: isCurrentMemberHost ? .leader : .player
+            role: firebaseManager.activeRoom?.members[myMemberId]?.role ?? myRole
         )
     }
     
@@ -667,7 +758,7 @@ public final class GameStateManager: ObservableObject {
         if let hr = heartRate {
             effectiveHr = isDead ? AppConstants.Health.flatlineHeartRate : hr
         } else {
-            effectiveHr = isDead ? AppConstants.Health.flatlineHeartRate : (healthKitManager.currentHeartRate > 0 ? healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
+            effectiveHr = effectiveHeartRate
         }
         let json: String
         if !persistentRemoteTelemetry.isEmpty,
@@ -679,7 +770,7 @@ public final class GameStateManager: ObservableObject {
         }
         watchConnectivityManager.advertiseWatchHighSpeed(heartRate: effectiveHr, remotePlayerTelemetryJson: json)
     }
-    
+
     // MARK: - Inbound WCSession Callbacks & Watch-Centric Cloud Policy
 
     private func setupWatchConnectivity() {
@@ -914,7 +1005,7 @@ public final class GameStateManager: ObservableObject {
             if isHosting {
                 isHost = true
             } else if let room = room {
-                isHost = room.hostId == memberId || (room.members[memberId]?.role == .leader)
+                isHost = room.hostId == memberId
             } else {
                 isHost = false
             }
@@ -990,15 +1081,20 @@ public final class GameStateManager: ObservableObject {
                 if old.config.callsign != newLS.config.callsign {
                     self.updateLocalMember()
                     self.updateAllTacticalIndicators()
+                    self.updateOtherSquadMembers()
                 }
                 if old.playerState.isDead != newLS.playerState.isDead
                     || old.loginCycle.loginCycle != newLS.loginCycle.loginCycle
-                    || old.config.callsign != newLS.config.callsign {
+                    || old.config.callsign != newLS.config.callsign
+                    || old.config.role != newLS.config.role {
                     self.updateLocalPlayerMember()
                 }
                 if self.subscriptionManager.hasUnlimitedSquadUnlock != newLS.config.isPro {
                     self.subscriptionManager.hasUnlimitedSquadUnlock = newLS.config.isPro
                     UserDefaults.standard.set(newLS.config.isPro, forKey: AppConstants.Storage.hasUnlimitedSquadUnlockKey)
+                    if !newLS.config.isPro && self.myRole.isProRequired {
+                        self.myRole = .player
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -1227,10 +1323,6 @@ public final class GameStateManager: ObservableObject {
         syncTacticalToWatchConnectivity()
     }
     
-    public func purgeIconsOnLogout() {
-        purgeLocalSessionAndIcons()
-    }
-    
     public func setWristActive(_ active: Bool) {
         firebaseManager.setWristActive(active)
         if active {
@@ -1303,6 +1395,53 @@ public final class GameStateManager: ObservableObject {
         return String(digest.prefix(shortMemberIdLength).map { alphabet[Int($0) % alphabet.count] })
     }
 
+    // MARK: - Clan Affiliation Helpers
+
+    /// Checks whether the given callsign shares the same clan tag as the local player (`myCallsign`).
+    public func isSameClan(callsign: String?) -> Bool {
+        guard let callsign = callsign else { return false }
+        return myCallsign.hasSameClan(as: callsign)
+    }
+
+    /// Checks whether the given member (by member ID) shares the same clan tag as the local player.
+    public func isSameClan(memberId: String) -> Bool {
+        if memberId == myMemberId { return true }
+        if let member = otherSquadMembers.first(where: { $0.id == memberId }) {
+            return isSameClan(callsign: member.callsign)
+        }
+        if let roomMember = firebaseManager.activeRoom?.members[memberId] {
+            return isSameClan(callsign: roomMember.callsign)
+        }
+        return false
+    }
+
+    /// Checks whether a tactical indicator was placed by a member of the same clan (or local player).
+    public func isIndicatorFromSameClan(_ indicator: TacticalIndicator) -> Bool {
+        if indicator.placedByMemberId == myMemberId || localIndicators[indicator.id] != nil { return true }
+        let trimmedLocal = myCallsign.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedLocal.isEmpty,
+           let callsign = indicator.placedByCallsign?.trimmingCharacters(in: .whitespacesAndNewlines),
+           callsign.caseInsensitiveCompare(trimmedLocal) == .orderedSame {
+            return true
+        }
+        if let callsign = indicator.placedByCallsign, !callsign.isEmpty {
+            if isSameClan(callsign: callsign) { return true }
+        }
+        return isSameClan(memberId: indicator.placedByMemberId)
+    }
+
+    /// Determines whether a squad member renders as a green icon (local player or same clan).
+    public func isGreen(member: SquadMember) -> Bool {
+        if member.id == myMemberId { return true }
+        return isSameClan(callsign: member.callsign)
+    }
+
+    /// Determines whether a tactical indicator renders as a green icon (team order placed by local player or same clan).
+    public func isGreen(indicator: TacticalIndicator) -> Bool {
+        guard indicator.category == .squadOrder else { return false }
+        return indicator.placedByMemberId == myMemberId || isIndicatorFromSameClan(indicator)
+    }
+
     /// ASCII `[A-Za-z0-9]` only — the character set every Firebase-RTDB-path-derived text field
     /// (room name, PIN) is restricted to. Deliberately narrower than "not a Firebase-illegal
     /// character": rejecting all non-ASCII outright (Greek letters, emoji, CJK, combining marks)
@@ -1335,7 +1474,21 @@ public final class GameStateManager: ObservableObject {
 
         return String(result.prefix(AppConstants.UI.maxPinLength))
     }
-    
+
+    /// ASCII alphanumerics plus space and `[ ]` — the latter preserved so `String.clanTag`
+    /// (SquadMember.swift) can still extract a bracket-enclosed clan tag out of a sanitized
+    /// callsign; a plain-alphanumerics filter like `sanitizeRoomNameInput`'s would silently break
+    /// clan-tag matching for every user who types one.
+    private static let callsignAllowedCharacters = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 []")
+
+    /// Sanitizes free-typed text destined for the Callsign field: strips to
+    /// `callsignAllowedCharacters`, uppercases (matching room name's convention and keeping
+    /// `hasSameClan`'s case-insensitive comparison moot), truncated to `maxLength`.
+    public static func sanitizeCallsignInput(_ input: String, maxLength: Int = AppConstants.UI.maxCallsignLength) -> String {
+        let filtered = String(String.UnicodeScalarView(input.unicodeScalars.filter { callsignAllowedCharacters.contains($0) }))
+        return String(filtered.uppercased().prefix(maxLength))
+    }
+
     /// Resolves which Firebase Realtime Database the upcoming host/join session should use and
     /// applies it to `firebaseManager`. Precedence: an explicit `databaseURL` (e.g. decoded from
     /// a scanned QR code) always wins, regardless of `isCustomDatabaseURLEnabled` — that toggle
@@ -1419,7 +1572,7 @@ public final class GameStateManager: ObservableObject {
         }
 
         let squadId = cleanedName + FirebaseSyncManager.deriveRoomPadding(pin: cleanedPin, name: cleanedName)
-        let hostMember = makeCurrentSquadMember(role: .leader)
+        let hostMember = makeCurrentSquadMember(role: myRole)
         let passHash = FirebaseSyncManager.hashPin(cleanedPin, salt: squadId)
 
         let capacity = subscriptionManager.hasUnlimitedSquadUnlock ? AppConstants.Subscription.proTierMaxCapacity : AppConstants.Subscription.freeTierMaxCapacity
@@ -1437,7 +1590,7 @@ public final class GameStateManager: ObservableObject {
         sendSessionAction(.startHost(name: cleanedName, pin: cleanedPin))
         errorMessage = nil
         purgeLocalSessionAndIcons()
-        firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: squadId)
+        firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: squadId, isEncryptionEnabled: isEncryptionEnabled)
 
         firebaseManager.createRoom(room) { [weak self] result in
             guard let self = self else { return }
@@ -1445,6 +1598,7 @@ public final class GameStateManager: ObservableObject {
             case .success:
                 self.sendSessionAction(.hostSuccess(room: room))
                 self.clearFieldErrors()
+                self.updateLocalPlayerMember()
                 self.startTacticalSession()
                 completion?(true)
             case .failure(let error):
@@ -1523,16 +1677,27 @@ public final class GameStateManager: ObservableObject {
         sendSessionAction(.startJoin(id: cleanId, pin: cleanedPin))
         errorMessage = nil
         purgeLocalSessionAndIcons()
-        firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: cleanId)
+        firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: cleanId, isEncryptionEnabled: isEncryptionEnabled)
 
-        let localMember = makeCurrentSquadMember(role: .player)
+        let localMember = makeCurrentSquadMember(role: myRole)
 
         firebaseManager.joinRoom(id: cleanId, member: localMember, pin: cleanedPin) { [weak self] result in
             guard let self = self else { return }
             switch result {
             case .success(let room):
-                self.sendSessionAction(.joinSuccess(room: room))
+                // A room that wasn't disbanded gracefully (app killed, crash, connectivity
+                // loss) survives server-side with its original `hostId` intact. If the
+                // device "joining" is that same host reconnecting to its own room, treat it
+                // as a host reconnect rather than a join — otherwise `loginCycle` would
+                // publish .joinActive, the peer would adopt this device as a non-host member,
+                // and host-only affordances (disband, tactical authority) would be lost.
+                if room.hostId == self.myMemberId {
+                    self.sendSessionAction(.hostSuccess(room: room))
+                } else {
+                    self.sendSessionAction(.joinSuccess(room: room))
+                }
                 self.clearFieldErrors()
+                self.updateLocalPlayerMember()
                 self.startTacticalSession()
                 onResult?(.success(room))
             case .failure(let error):
@@ -1579,13 +1744,21 @@ public final class GameStateManager: ObservableObject {
         self.clearFieldErrors()
         self.errorMessage = nil
 
-        firebaseManager.setEncryptionContext(pin: self.savedPin, roomId: cleanId)
+        firebaseManager.setEncryptionContext(pin: self.savedPin, roomId: cleanId, isEncryptionEnabled: isEncryptionEnabled)
 
         self.isApplyingRemoteSync = true
         firebaseManager.connectToExistingRoom(roomId: cleanId) { [weak self] success in
             guard let self = self else { return }
             self.isApplyingRemoteSync = false
             if success {
+                // Keep `sessionStateMachine` in step with the peer-driven adoption, not just
+                // the `isHosting`/`isJoining` flags set above — otherwise a session adopted
+                // from a WCSession merge (rather than this device's own hostRoom/joinRoom call)
+                // leaves the state machine stuck on `.disconnected`, diverging from a
+                // locally-initiated session for any consumer that reads `sessionStateMachine.state`.
+                if let room = self.firebaseManager.activeRoom {
+                    self.sendSessionAction(isHosting ? .hostSuccess(room: room) : .joinSuccess(room: room))
+                }
                 self.startTacticalSession()
             }
         }
@@ -1636,7 +1809,7 @@ public final class GameStateManager: ObservableObject {
         let now = Date().timeIntervalSince1970
         if var room = firebaseManager.activeRoom, var member = room.members[myMemberId] {
             member.status = dead ? .downed : .active
-            member.heartRate = dead ? AppConstants.Health.flatlineHeartRate : (healthKitManager.currentHeartRate > 0 ? healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
+            member.heartRate = effectiveHeartRate
             member.lastUpdatedTimestamp = now
             room.members[myMemberId] = member
             firebaseManager.activeRoom = room
@@ -1653,8 +1826,8 @@ public final class GameStateManager: ObservableObject {
     private func makeCurrentSquadMember(role: MemberRole) -> SquadMember {
         let loc = locationHeadingManager.userLocation?.coordinate ?? (firebaseManager.activeRoom?.members[myMemberId]?.coordinate ?? AppConstants.Location.fallbackCoordinate)
         let heading = locationHeadingManager.blendedHeading
-        let hr = isDead ? AppConstants.Health.flatlineHeartRate : (healthKitManager.currentHeartRate > 0 ? healthKitManager.currentHeartRate : AppConstants.Health.defaultRestingHeartRate)
-        
+        let hr = effectiveHeartRate
+
         return SquadMember(
             id: myMemberId,
             callsign: myCallsign,
@@ -1767,15 +1940,16 @@ public final class GameStateManager: ObservableObject {
             return
         }
         
-        let rawHr = heartRate ?? healthKitManager.currentHeartRate
         let effectiveHr: Double
         if isDead {
             effectiveHr = AppConstants.Health.flatlineHeartRate
         } else if !isUploadHeartRateEnabled {
-            // HR upload opted out: broadcast default resting HR (75 BPM)
-            effectiveHr = AppConstants.Health.defaultRestingHeartRate
+            // HR upload opted out: broadcast the speed-simulated resting HR rather than the raw sensor value
+            effectiveHr = simulatedHeartRateFromSpeed
+        } else if let explicitHr = heartRate {
+            effectiveHr = explicitHr
         } else {
-            effectiveHr = rawHr > 0 ? rawHr : AppConstants.Health.defaultRestingHeartRate
+            effectiveHr = self.effectiveHeartRate
         }
         let currentHr = effectiveHr
         
@@ -1835,10 +2009,6 @@ public final class GameStateManager: ObservableObject {
         pendingIndicatorPlacementType = type
     }
     
-    public func cancelIndicatorPlacement() {
-        pendingIndicatorPlacementType = nil
-    }
-    
     public func placeTacticalIndicator(at coordinate: CLLocationCoordinate2D) {
         guard let type = pendingIndicatorPlacementType else { return }
         placeTacticalIndicator(type: type, at: coordinate)
@@ -1855,8 +2025,8 @@ public final class GameStateManager: ObservableObject {
         let currentIndicators = allTacticalIndicators
         
         if type.category == .squadOrder {
-            let existingFromIssuer = currentIndicators.filter { $0.category == .squadOrder && $0.placedByMemberId == myMemberId }
-            for ind in existingFromIssuer {
+            let existingSameType = currentIndicators.filter { $0.type == type && $0.placedByMemberId == myMemberId }
+            for ind in existingSameType {
                 removeTacticalIndicator(id: ind.id)
             }
         }
@@ -1909,68 +2079,56 @@ public final class GameStateManager: ObservableObject {
     }
 }
 
+#if DEBUG
 extension GameStateManager {
     /// 8-character text-based debug field.
-    /// - Character 1 (index 0): "Other player" telemetry stream
-    ///   - 'N' when receiving other player telemetry from the web (Firebase active room).
-    ///   - 'P' when Watch is receiving other player telemetry from Phone companion.
-    ///   - '0' when no other player telemetry stream is active.
-    /// - Character 2 (index 1): Watch -> Phone HR telemetry stream
-    ///   - 'W' when Phone is receiving live HR from Watch companion (or Watch is streaming HR).
-    ///   - '0' when no Watch HR stream is active.
-    /// - Character 3 (index 2): Low-speed codable source (active within 3.0s of receipt, cycles back to 0 when idle)
-    ///   - 'N' when low-speed codable packet received from web (Firebase).
-    ///   - 'P' when Watch low-speed packet received from Phone companion.
-    ///   - 'W' when Phone low-speed packet received from Watch companion.
-    ///   - '0' when idle (> 3.0s without low-speed codable packet) or disconnected.
-    /// - Characters 4..8 (indices 3..7): Reserved placeholder zeros ("00000").
+    /// Driven purely by reading the status of existing variables (zero helper functions).
+    /// - Character 1 (index 0): Upstream link to server attached
+    ///   - 'U' when upstream link to server is attached (`hasNetworkOwnership && isConnected && activeRoom != nil`).
+    ///   - '0' when upstream link is not attached or inactive.
+    /// - Character 2 (index 1): Server listener attached
+    ///   - 'D' when downstream server listener is attached (`firebaseManager.attachedTelemetryRoomId != nil`).
+    ///   - '0' when server listener is not attached.
+    /// - Character 3 (index 2): HS stream transmission activity
+    ///   - 'P' when high-speed stream transmission is active from Phone.
+    ///   - 'W' when high-speed stream transmission is active from Watch.
+    ///   - '0' when no high-speed stream data.
+    /// - Character 4 (index 3): LS stream transmission activity
+    ///   - 'P' when low-speed stream transmission is active from Phone.
+    ///   - 'W' when low-speed stream transmission is active from Watch.
+    ///   - '0' when no low-speed stream data.
+    /// - Characters 5..8 (indices 4..7): Reserved placeholder zeros ("0000").
     public var debugStatusString: String {
-        let otherPlayerChar: Character
-        let watchHRChar: Character
-        let lowSpeedChar: Character
         let now = Date().timeIntervalSince1970
         
-        #if os(watchOS)
-        // Character 1: Other player telemetry stream
-        let isReceivingFromPhone = (isPhoneActive || watchConnectivityManager.isReachable) && watchConnectivityManager.isWatchLeaseActive
-        if isReceivingFromPhone {
-            otherPlayerChar = "P"
-        } else if firebaseManager.isConnected && firebaseManager.activeRoom != nil {
-            otherPlayerChar = "N"
+        // Character 1: Upstream link to server attached (U or 0)
+        let isUpstreamAttached = hasNetworkOwnership && firebaseManager.isConnected && (firebaseManager.activeRoom != nil)
+        let upstreamChar: Character = isUpstreamAttached ? "U" : "0"
+        
+        // Character 2: Server listener attached (D or 0)
+        let isListenerAttached = firebaseManager.attachedTelemetryRoomId != nil
+        let listenerChar: Character = isListenerAttached ? "D" : "0"
+        
+        // Character 3: HS stream transmission activity (P from phone, W from watch, 0 no data)
+        let isHSActive = watchConnectivityManager.isWatchLeaseActive || (watchConnectivityManager.latestRemoteActiveUntil > now)
+        let hsChar: Character
+        if watchConnectivityManager.localRole == .phone {
+            hsChar = (isHSActive || isWatchActive) ? "W" : "0"
         } else {
-            otherPlayerChar = "0"
+            hsChar = (isHSActive || isPhoneActive) ? "P" : "0"
         }
         
-        // Character 2: Watch -> Phone HR telemetry stream
-        if healthKitManager.currentHeartRate > 0 {
-            watchHRChar = "W"
+        // Character 4: LS stream transmission activity (P from phone, W from watch, 0 no data)
+        let isRecentLowSpeed = (now - lastLowSpeedPayloadTimestamp) < 3.0
+        let lsChar: Character
+        if watchConnectivityManager.localRole == .phone {
+            lsChar = (isRecentLowSpeed && lastLowSpeedPayloadSource == "W") ? "W" : "0"
         } else {
-            watchHRChar = "0"
-        }
-        #else
-        // Character 1: Other player telemetry stream
-        if firebaseManager.isConnected && firebaseManager.activeRoom != nil {
-            otherPlayerChar = "N"
-        } else {
-            otherPlayerChar = "0"
+            lsChar = (isRecentLowSpeed && lastLowSpeedPayloadSource == "P") ? "P" : "0"
         }
         
-        // Character 2: Watch -> Phone HR telemetry stream
-        if watchConnectivityManager.isWatchLeaseActive {
-            watchHRChar = "W"
-        } else {
-            watchHRChar = "0"
-        }
-        #endif
-        
-        // Character 3: Low-speed codable source (active for 3.0s, cycles back to 0 when idle)
-        if (now - lastLowSpeedPayloadTimestamp) < 3.0 {
-            lowSpeedChar = lastLowSpeedPayloadSource
-        } else {
-            lowSpeedChar = "0"
-        }
-        
-        return "\(otherPlayerChar)\(watchHRChar)\(lowSpeedChar)00000"
+        return "\(upstreamChar)\(listenerChar)\(hsChar)\(lsChar)0000"
     }
 }
+#endif
 

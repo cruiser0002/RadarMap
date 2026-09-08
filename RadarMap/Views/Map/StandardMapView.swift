@@ -94,6 +94,24 @@ struct NativeSwiftUIMapView: View {
         }
     }
     
+    private var sortedOtherSquadMembers: [SquadMember] {
+        gameState.otherSquadMembers.sorted { m1, m2 in
+            let g1 = gameState.isGreen(member: m1)
+            let g2 = gameState.isGreen(member: m2)
+            if g1 == g2 { return m1.id < m2.id }
+            return !g1 && g2
+        }
+    }
+    
+    private var sortedTacticalIndicators: [TacticalIndicator] {
+        gameState.allTacticalIndicators.sorted { i1, i2 in
+            let g1 = gameState.isGreen(indicator: i1)
+            let g2 = gameState.isGreen(indicator: i2)
+            if g1 == g2 { return i1.timestamp < i2.timestamp }
+            return !g1 && g2
+        }
+    }
+    
     var body: some View {
         MapReader { proxy in
             Map(
@@ -102,7 +120,7 @@ struct NativeSwiftUIMapView: View {
                 interactionModes: .pan
             ) {
                 // Remote Teammates
-                ForEach(otherSquadMembers, id: \.id) { member in
+                ForEach(sortedOtherSquadMembers, id: \.id) { member in
                     let displayCoordinate = gameState.remoteDisplayPositions[member.id] ?? member.coordinate
                     Annotation(
                         member.callsign,
@@ -112,6 +130,8 @@ struct NativeSwiftUIMapView: View {
                         MemberAnnotationView(
                             member: member,
                             isMe: false,
+                            isSameClan: gameState.isSameClan(callsign: member.callsign),
+                            isSelected: gameState.selectedAnnotationForDistance == .squadMember(id: member.id),
                             radarColor: radarThemeColor,
                             onTap: {
                                 guard gameState.pendingIndicatorPlacementType == nil else { return }
@@ -124,7 +144,7 @@ struct NativeSwiftUIMapView: View {
                 }
 
                 // Tactical Indicators
-                ForEach(gameState.allTacticalIndicators, id: \.id) { indicator in
+                ForEach(sortedTacticalIndicators, id: \.id) { indicator in
                     Annotation(
                         "",
                         coordinate: indicator.coordinate,
@@ -132,6 +152,8 @@ struct NativeSwiftUIMapView: View {
                     ) {
                         TacticalIndicatorOverlayView(
                             indicator: indicator,
+                            isPlacedByMe: indicator.placedByMemberId == gameState.myMemberId,
+                            isSameClan: gameState.isIndicatorFromSameClan(indicator),
                             radarColor: radarThemeColor,
                             onDelete: {
                                 gameState.removeTacticalIndicator(id: indicator.id)
