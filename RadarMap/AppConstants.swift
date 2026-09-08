@@ -522,12 +522,17 @@ public enum AppConstants {
                 return policy.nearestAllowedScale(to: minorScaleMeters)
             }
             
-            /// Converts a MapKit MapCamera distance (altitude) to an equivalent clamped minor radar scale in meters.
-            public static func scaleMeters(forCameraDistance distance: Double) -> Double {
+            /// Converts a MapKit MapCamera distance (altitude) to continuous minor radar scale in meters.
+            public static func continuousScaleMeters(forCameraDistance distance: Double) -> Double {
                 let visibleMetersLat = distance * (2.0 * tan(15.0 * .pi / 180.0))
                 let outerRadarMeters = (visibleMetersLat / referenceScreenAspectRatio) * radarRadiusRatio
                 let minorScaleMeters = outerRadarMeters / 4.0
-                return policy.nearestAllowedScale(to: minorScaleMeters)
+                return max(minScaleMeters, min(maxiOSScaleMeters, minorScaleMeters))
+            }
+            
+            /// Converts a MapKit MapCamera distance (altitude) to an equivalent clamped minor radar scale in meters.
+            public static func scaleMeters(forCameraDistance distance: Double) -> Double {
+                return policy.nearestAllowedScale(to: continuousScaleMeters(forCameraDistance: distance))
             }
             
             /// Converts a minor radar scale in meters to an equivalent MapKit MapCamera distance (altitude).
@@ -560,18 +565,20 @@ public enum AppConstants {
             
             /// Formats a distance in meters for display (e.g. range ring distance label or ruler label).
             public static func formatDistance(meters: Double) -> String {
-                if meters < AppConstants.Location.metersPerKilometer {
-                    if meters.truncatingRemainder(dividingBy: 1.0) == 0 {
-                        return "\(Int(meters))m"
+                let roundedToTenth = (meters * 10.0).rounded() / 10.0
+                if roundedToTenth < AppConstants.Location.metersPerKilometer {
+                    if abs(roundedToTenth.rounded() - roundedToTenth) < 1e-5 {
+                        return "\(Int(roundedToTenth.rounded()))m"
                     } else {
-                        return String(format: "%.1fm", meters)
+                        return String(format: "%.1fm", roundedToTenth)
                     }
                 } else {
-                    let km = meters / AppConstants.Location.metersPerKilometer
-                    if km.truncatingRemainder(dividingBy: 1.0) == 0 {
-                        return "\(Int(km))km"
+                    let km = roundedToTenth / AppConstants.Location.metersPerKilometer
+                    let kmTenth = (km * 10.0).rounded() / 10.0
+                    if abs(kmTenth.rounded() - kmTenth) < 1e-5 {
+                        return "\(Int(kmTenth.rounded()))km"
                     } else {
-                        return String(format: "%.1fkm", km)
+                        return String(format: "%.1fkm", kmTenth)
                     }
                 }
             }

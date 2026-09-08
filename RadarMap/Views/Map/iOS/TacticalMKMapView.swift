@@ -509,13 +509,15 @@ public struct TacticalMKMapView: UIViewRepresentable {
         }
         
         @objc private func readLiveRulerGeometry() {
-            // Ruler must always reflect the map's true current scale in real time —
-            // tracking every change, including during camera animations — not just
-            // while a pinch gesture is active. Per UX spec: "displays actual map
-            // zoom scale in real time tracking its every change even during animations."
             guard let mapView = activeMapView else { return }
-            // Read-only: this loop never writes the camera. The ruler just honestly reports
-            // whatever scale the (fully MapKit-owned) camera actually is.
+            // When not actively pinching, the camera is locked at selectedScaleMeters via CameraZoomRange.
+            // Avoid projecting screen pixels at rest so tiny projection offsets never distort exact ladder scales (e.g. 25m, 10m).
+            if !cameraState.isPinching {
+                if abs(parent.gameState.liveMapScaleMeters - parent.gameState.selectedScaleMeters) > 0.001 {
+                    parent.gameState.liveMapScaleMeters = parent.gameState.selectedScaleMeters
+                }
+                return
+            }
             let liveScale = currentRulerScale(in: mapView)
             if abs(parent.gameState.liveMapScaleMeters - liveScale) > 0.05 {
                 parent.gameState.liveMapScaleMeters = liveScale
@@ -523,18 +525,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
         }
 
         func currentRulerScale(in mapView: MKMapView) -> CLLocationDistance {
-            let rulerWidthPoints = Double(AppConstants.UI.HUD.rulerBarWidth + (AppConstants.UI.HUD.rulerNotchMajorWidth * 2))
-            let centerPoint = CGPoint(x: mapView.bounds.midX, y: mapView.bounds.midY)
-            let p1 = CGPoint(x: centerPoint.x - (rulerWidthPoints / 2.0), y: centerPoint.y)
-            let p2 = CGPoint(x: centerPoint.x + (rulerWidthPoints / 2.0), y: centerPoint.y)
-            
-            let c1 = mapView.convert(p1, toCoordinateFrom: mapView)
-            let c2 = mapView.convert(p2, toCoordinateFrom: mapView)
-            
-            let loc1 = CLLocation(latitude: c1.latitude, longitude: c1.longitude)
-            let loc2 = CLLocation(latitude: c2.latitude, longitude: c2.longitude)
-            let dist = loc1.distance(from: loc2)
-            return max(1.0, dist)
+            AppConstants.UI.RadarScale.continuousScaleMeters(forCameraDistance: mapView.camera.centerCoordinateDistance)
         }
 
         /// Re-centers on the user for both the center-map button and the auto-relock-on-

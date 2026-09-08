@@ -2561,6 +2561,20 @@ final class RadarMapTests: XCTestCase {
         }
     }
     
+    func testContinuousScaleMetersRoundtripAccuracy() {
+        let testScales: [Double] = [1.0, 2.5, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0]
+        for scale in testScales {
+            let cameraDist = AppConstants.UI.RadarScale.cameraDistance(forScale: scale)
+            let continuousScale = AppConstants.UI.RadarScale.continuousScaleMeters(forCameraDistance: cameraDist)
+            XCTAssertEqual(continuousScale, scale, accuracy: 0.001, "Continuous camera distance conversion must match scale \(scale)m exactly without decimal offset")
+            
+            // Format check: exact ladder scales must format as clean integer strings (e.g. "25m", "10m")
+            let formatted = AppConstants.UI.ScaleRuler.formatLiveRulerDistance(minorScaleMeters: continuousScale)
+            let expectedFormatted = AppConstants.UI.ScaleRuler.formatRulerDistance(minorScaleMeters: scale)
+            XCTAssertEqual(formatted, expectedFormatted, "Formatted live scale for \(scale)m must match expected discrete label")
+        }
+    }
+    
     func testSquadMemberDirectCoordinates() {
         let member = SquadMember(id: "M1", callsign: "VIPER", latitude: 37.77, longitude: -122.41, heading: 45.0, heartRate: 85.0)
         XCTAssertEqual(member.id, "M1")

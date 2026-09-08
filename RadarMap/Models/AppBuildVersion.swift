@@ -3,7 +3,7 @@ import Foundation
 
 public enum AppBuildVersion {
     public static let marketingVersion: String = "1.0.0"
-    public static let buildNumber: Int = 580
+    public static let buildNumber: Int = 582
     public static var formatted: String {
         "v\(marketingVersion)b\(buildNumber)"
     }
