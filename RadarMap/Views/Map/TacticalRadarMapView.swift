@@ -205,7 +205,7 @@ public struct TacticalRadarMapView: View {
                                 .fill(Color.black.opacity(0.85))
                                 .shadow(color: .black.opacity(0.75), radius: 2.5)
                             
-                            Image(systemName: gameState.mapCenterLockState.iconName)
+                            Image(systemName: gameState.showsAsCenterLocked ? "location.fill" : "location")
                                 .font(.system(size: AppConstants.UI.HUD.circleIconFontSize, weight: .semibold))
                                 .foregroundColor(uiThemeColor)
                         }

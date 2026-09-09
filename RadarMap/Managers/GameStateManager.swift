@@ -194,7 +194,24 @@ public final class GameStateManager: ObservableObject {
             }
         }
     }
-    
+
+    /// Whether MapKit's native `.follow` user-tracking mode is actually confirmed engaged on the
+    /// iOS map presentation (TacticalMKMapView), as opposed to merely requested. Set optimistically
+    /// false when a recenter is requested and only flipped true once MapKit's delegate confirms the
+    /// transition — see Coordinator.recenterOnUser / mapView(_:didChange:) in TacticalMKMapView.
+    /// Radar presentation and watchOS have no native map to confirm against, so this stays at its
+    /// default and is ignored there (see `showsAsCenterLocked`).
+    @Published public var isMapFollowConfirmed: Bool = true
+
+    /// True when the map-centering HUD button should render as "locked". Combines the app-level
+    /// tracking intent (`mapCenterLockState`) with, on the iOS map presentation only, confirmation
+    /// that native `.follow` tracking is actually engaged — so the button can't lie and show
+    /// "locked" while the camera has silently stopped following the user (e.g. a pinch-release
+    /// recenter that never got confirmed).
+    public var showsAsCenterLocked: Bool {
+        mapCenterLockState.isLocked && (selectedPresentation != .map || isMapFollowConfirmed)
+    }
+
     // Tactical Indicators & Commander Menu State
     @Published public var showIndicatorMenuSheet: Bool = false
     @Published public var pendingIndicatorPlacementType: TacticalIndicatorType? = nil
@@ -1123,7 +1140,12 @@ public final class GameStateManager: ObservableObject {
             }
             .store(in: &cancellables)
         
-        // Coalesced local-member refresh
+        // Coalesced local-member refresh. Throttled (rather than debounced-to-zero) to cap the
+        // re-render rate at the same cadence as the radar UI's own display refresh — location and
+        // heading can otherwise deliver updates far faster than SwiftUI can retire the resulting
+        // re-render on watchOS, and a zero-duration debounce doesn't limit sustained bursts, only
+        // coalesces updates landing in the same run-loop turn. `latest: true` ensures the most
+        // recent sensor values still win rather than being dropped.
         Publishers.MergeMany(
             locationHeadingManager.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
             healthKitManager.objectWillChange.map { _ in () }.eraseToAnyPublisher(),
@@ -1131,7 +1153,7 @@ public final class GameStateManager: ObservableObject {
             locationHeadingManager.$blendedHeading.map { _ in () }.eraseToAnyPublisher(),
             healthKitManager.$currentHeartRate.map { _ in () }.eraseToAnyPublisher()
         )
-        .debounce(for: .seconds(0), scheduler: RunLoop.main)
+        .throttle(for: .seconds(AppConstants.Timing.DisplayRefresh.radarUIIntervalSeconds), scheduler: RunLoop.main, latest: true)
         .sink { [weak self] in
             self?.updateLocalPlayerMember()
             self?.objectWillChange.send()

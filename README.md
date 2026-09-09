@@ -23,6 +23,7 @@
 * ⚡ **WatchConnectivity Companion Synchronization**:
   * Immediate local rendering with persistent context staging in `WCSession`.
   * Dual-stream pipeline: high-speed stream for live sensor data (Phone GPS priority & Watch biometrics) and low-speed snapshot sync for markers, room lifecycle, and configuration.
+  * Ephemeral room lifecycle state: login lifecycle state starts as inactive by default and is never saved across sessions, preventing stale session resumption on app launch.
   * Automatic network handover between paired iPhone and standalone Apple Watch.
   * *Details:* [**`COMPANION_DATA_SYNC_MODEL.md`**](docs/COMPANION_DATA_SYNC_MODEL.md)
 * 📍 **Tactical Markers & Orders**:

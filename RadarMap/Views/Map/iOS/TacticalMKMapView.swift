@@ -258,6 +258,13 @@ public struct TacticalMKMapView: UIViewRepresentable {
         private var isRecentering = false
         private var wasLockedBeforePinch = false
 
+        // Set once dismantleUIView/tearDown runs (e.g. switching away from the .map presentation).
+        // MapKit fires a final didChange(mode: .none)/regionDidChange as tracking naturally stops
+        // during teardown — without this guard, the existing pan-detection logic misreads that as
+        // "user panned away" and unlocks tracking, so switching to radar and back silently drops
+        // follow-me mode.
+        private var isTornDown = false
+
         // Hosting controllers for member marker content, keyed by the MKAnnotationView they're
         // attached to. Reused across syncAnnotations passes instead of being torn down and
         // recreated every call — recreating a UIHostingController on every single sync (which
@@ -504,6 +511,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
         }
         
         func tearDown() {
+            isTornDown = true
             displayLink?.invalidate()
             displayLink = nil
         }
@@ -537,6 +545,10 @@ public struct TacticalMKMapView: UIViewRepresentable {
         func recenterOnUser(in mapView: MKMapView) {
             guard !isRecentering else { return }
             isRecentering = true
+            // Optimistically unconfirmed until mapView(_:didChange:) reports .follow — if the
+            // transition silently never lands (e.g. no fresh location yet), the HUD button stays
+            // truthful ("unlocked") instead of assuming the request succeeded.
+            parent.gameState.isMapFollowConfirmed = false
             mapView.setUserTrackingMode(.follow, animated: true)
             // Self-healing fallback in case .follow never gets confirmed (e.g. no user
             // location yet) — don't let a missed confirmation permanently wedge the guard.
@@ -566,14 +578,30 @@ public struct TacticalMKMapView: UIViewRepresentable {
                 parent.gameState.sendMapAction(.setScale(meters: snapped))
                 parent.gameState.liveMapScaleMeters = snapped
 
-                if let userCoord = mapView.userLocation.location?.coordinate {
-                    parent.gameState.sendMapAction(.pan(to: mapView.centerCoordinate, userCoord: userCoord))
-                }
+                // Note: a pinch-to-zoom deliberately never dispatches a `.pan` action, even
+                // though it can shift `mapView.centerCoordinate` noticeably (MapKit zooms toward
+                // the pinch's focal point, not the user). Treating that incidental drift as a
+                // manual pan spuriously unlocked tracking on pure zoom gestures — see the
+                // recenter below, which re-engages `.follow` unconditionally when the pinch
+                // started locked, regardless of how far the zoom moved the center.
 
-                mapView.setCameraZoomRange(.init(minCenterCoordinateDistance: targetDistance, maxCenterCoordinateDistance: targetDistance), animated: true)
+                // Not animated: the live pinch has already settled the camera visually close to
+                // targetDistance, so the snap to the exact discrete value is imperceptible — and
+                // critically, this avoids racing an animated setCameraZoomRange transition against
+                // recenterOnUser's animated setUserTrackingMode(.follow) below. Two concurrent
+                // animated camera transitions were coalescing/dropping the .follow didChange
+                // callback, leaving the HUD button stuck showing "unlocked" even once the camera
+                // had visibly settled back into following the user.
+                mapView.setCameraZoomRange(.init(minCenterCoordinateDistance: targetDistance, maxCenterCoordinateDistance: targetDistance), animated: false)
 
                 if wasLockedBeforePinch && parent.gameState.mapStateMachine.trackingState.isLocked {
                     recenterOnUser(in: mapView)
+                    // Show the HUD button as locked immediately rather than waiting on
+                    // mapView(_:didChange:) to confirm .follow. The camera is already sitting at
+                    // the exact target distance (set above) and the pinch never actually left
+                    // .locked, so re-engaging .follow here is a formality, not a real transition —
+                    // there's no meaningful risk of the button lying ahead of the camera.
+                    parent.gameState.isMapFollowConfirmed = true
                 }
 
                 wasLockedBeforePinch = false
@@ -752,8 +780,10 @@ public struct TacticalMKMapView: UIViewRepresentable {
         // panning has taken the map off centering (spec: "standard mapkit pan, map no
         // longer centers on local user").
         public func mapView(_ mapView: MKMapView, didChange mode: MKUserTrackingMode, animated: Bool) {
+            guard !isTornDown else { return }
             if mode == .follow {
                 isRecentering = false
+                parent.gameState.isMapFollowConfirmed = true
             }
             // See TacticalPhoneCameraState.isPinching: a zoom-only pinch also drops tracking
             // to .none and must not be misread as the user having panned away. Likewise while
@@ -762,6 +792,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
             // onto whatever (interpolated, effectively arbitrary) coordinate it reports.
             guard !cameraState.isPinching, !isRecentering else { return }
             guard mode == .none, let userCoord = mapView.userLocation.location?.coordinate else { return }
+            parent.gameState.isMapFollowConfirmed = false
             parent.gameState.sendMapAction(.pan(to: mapView.centerCoordinate, userCoord: userCoord))
         }
 
@@ -769,6 +800,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
         // map re-locks automatically once panned back near the user (spec: "if panned back
         // near user, reapply center map mode").
         public func mapView(_ mapView: MKMapView, regionDidChangeAnimated animated: Bool) {
+            guard !isTornDown else { return }
             guard !cameraState.isPinching, !isRecentering else { return }
             guard mapView.userTrackingMode == .none,
                   let userCoord = mapView.userLocation.location?.coordinate else { return }

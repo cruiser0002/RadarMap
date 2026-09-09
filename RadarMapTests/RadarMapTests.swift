@@ -5890,7 +5890,7 @@ final class RadarMapTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
     }
     
-    // 15. GameStateManager init does NOT overwrite localLS loginCycleTs with current timestamp.
+    // 15. GameStateManager init does NOT overwrite localLS playerState timestamps, and verifies loginCycle defaults to inactive (ts: 0).
     func testCompanionSync_15_GameStateManagerInitPreservesPersistedTimestamps() {
         let savedLS = LowSpeedSnapshot(
             syncTs: 100,
@@ -5906,8 +5906,9 @@ final class RadarMapTests: XCTestCase {
         let wcm = WatchConnectivityManager()
         let gameState = GameStateManager(watchConnectivityManager: wcm)
         
-        // Ensure init did not advance loginCycleTs to Date().timeIntervalSince1970
-        XCTAssertEqual(gameState.watchConnectivityManager.localLS.loginCycle.loginCycleTs, 50, "Init must not advance loginCycleTs")
+        // Ensure loginCycle is not restored across sessions and starts as inactive with 0 timestamp
+        XCTAssertEqual(gameState.watchConnectivityManager.localLS.loginCycle.loginCycle, .inactive)
+        XCTAssertEqual(gameState.watchConnectivityManager.localLS.loginCycle.loginCycleTs, 0.0, "Login cycle state must not be saved across sessions and starts inactive with 0 timestamp")
         XCTAssertEqual(gameState.watchConnectivityManager.localLS.playerState.isDeadTs, 50, "Init must not advance isDeadTs")
         
         UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
@@ -6646,6 +6647,63 @@ final class RadarMapTests: XCTestCase {
             exp.fulfill()
         }
         wait(for: [exp], timeout: 1.0)
+    }
+    
+    // 28. Login lifecycle state is never saved across sessions and starts as inactive (ts: 0) by default.
+    func testCompanionSync_28_LoginCycleStateNotSavedAcrossSessionsAndDefaultsToInactive() {
+        let wcm = WatchConnectivityManager()
+        
+        // Mutate local login cycle to hostActive
+        wcm.mutateLocalLoginCycle {
+            $0.loginCycle = .hostActive
+        }
+        XCTAssertEqual(wcm.localLS.loginCycle.loginCycle, .hostActive)
+        XCTAssertGreaterThan(wcm.localLS.loginCycle.loginCycleTs, 0)
+        
+        // Wait for async persistence to write to UserDefaults
+        let expSave = expectation(description: "Wait for local persistence")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            // Check that raw persisted data in UserDefaults has loginCycle stripped to .inactive (ts: 0)
+            if let data = UserDefaults.standard.data(forKey: "wc_local_ls_snapshot"),
+               let saved = try? JSONDecoder().decode(LowSpeedSnapshot.self, from: data) {
+                XCTAssertEqual(saved.loginCycle.loginCycle, .inactive, "Persisted loginCycle must be .inactive")
+                XCTAssertEqual(saved.loginCycle.loginCycleTs, 0.0, "Persisted loginCycleTs must be 0")
+            } else {
+                XCTFail("Expected persisted wc_local_ls_snapshot in UserDefaults")
+            }
+            expSave.fulfill()
+        }
+        wait(for: [expSave], timeout: 1.0)
+        
+        // Inject a simulated legacy payload with active loginCycle into UserDefaults to simulate a restart
+        let activeLS = LowSpeedSnapshot(
+            syncTs: 500,
+            config: ConfigSnapshot(callsign: "SESSION_CALLSIGN", configTs: 100),
+            loginCycle: LoginCycleSnapshot(loginCycle: .joinActive, loginCycleTs: 500),
+            playerState: PlayerStateSnapshot(isDead: true, isDeadTs: 200)
+        )
+        let activeData = try! JSONEncoder().encode(activeLS)
+        UserDefaults.standard.set(activeData, forKey: "wc_local_ls_snapshot")
+        UserDefaults.standard.set(activeData, forKey: "wc_peer_ls_snapshot")
+        
+        // Cold-boot new manager instance
+        let restartedWCM = WatchConnectivityManager()
+        
+        // Config and player state restored
+        XCTAssertEqual(restartedWCM.localLS.config.callsign, "SESSION_CALLSIGN")
+        XCTAssertTrue(restartedWCM.localLS.playerState.isDead)
+        
+        // LoginCycle state MUST be inactive with 0 timestamp
+        XCTAssertEqual(restartedWCM.localLS.loginCycle.loginCycle, .inactive, "Login lifecycle state must start as .inactive by default")
+        XCTAssertEqual(restartedWCM.localLS.loginCycle.loginCycleTs, 0.0, "Login lifecycle timestamp must default to 0.0")
+        
+        // PeerLS loginCycle state MUST also be inactive with 0 timestamp
+        XCTAssertEqual(restartedWCM.peerLS?.loginCycle.loginCycle, .inactive, "Peer login lifecycle state must start as .inactive")
+        XCTAssertEqual(restartedWCM.peerLS?.loginCycle.loginCycleTs, 0.0, "Peer login lifecycle timestamp must default to 0.0")
+        
+        // Clean up
+        UserDefaults.standard.removeObject(forKey: "wc_local_ls_snapshot")
+        UserDefaults.standard.removeObject(forKey: "wc_peer_ls_snapshot")
     }
     
     // MARK: - Privacy Toggle & Data Gating Tests

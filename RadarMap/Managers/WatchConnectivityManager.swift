@@ -65,7 +65,10 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         
         // Load persisted snapshots if available
         if let data = UserDefaults.standard.data(forKey: localLSPersistenceKey),
-           let saved = try? JSONDecoder().decode(LowSpeedSnapshot.self, from: data) {
+           var saved = try? JSONDecoder().decode(LowSpeedSnapshot.self, from: data) {
+            // Login lifecycle state is session-ephemeral and must not be saved across sessions.
+            // It always starts as .inactive (with timestamp 0) by default upon launch.
+            saved.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
             self.localLS = saved
         } else {
             // First launch on this device since localLS was introduced: seed config from the
@@ -86,11 +89,13 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 isEncryptionEnabled: defaults.object(forKey: AppConstants.Storage.isEncryptionEnabledKey) as? Bool ?? true,
                 configTs: 0
             )
+            seeded.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
             self.localLS = seeded
         }
         
         if let data = UserDefaults.standard.data(forKey: peerLSPersistenceKey),
-           let savedPeer = try? JSONDecoder().decode(LowSpeedSnapshot.self, from: data) {
+           var savedPeer = try? JSONDecoder().decode(LowSpeedSnapshot.self, from: data) {
+            savedPeer.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
             self.peerLS = savedPeer
         }
         
@@ -449,16 +454,20 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     // MARK: - Local Persistence
 
     private func saveLocalState(_ snapshot: LowSpeedSnapshot) {
+        var toSave = snapshot
+        toSave.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
         contextQueue.async {
-            if let data = try? JSONEncoder().encode(snapshot) {
+            if let data = try? JSONEncoder().encode(toSave) {
                 UserDefaults.standard.set(data, forKey: self.localLSPersistenceKey)
             }
         }
     }
 
     private func savePeerState(_ snapshot: LowSpeedSnapshot) {
+        var toSave = snapshot
+        toSave.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
         contextQueue.async {
-            if let data = try? JSONEncoder().encode(snapshot) {
+            if let data = try? JSONEncoder().encode(toSave) {
                 UserDefaults.standard.set(data, forKey: self.peerLSPersistenceKey)
             }
         }
