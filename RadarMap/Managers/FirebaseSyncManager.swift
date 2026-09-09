@@ -682,7 +682,27 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             guard let self = self else { return }
 
             if let json = value as? [String: Any], let existingId = json["id"] as? String, !existingId.isEmpty {
-                // Room exists already
+                // Room exists already. If it's this same identity re-hosting its own still-alive
+                // room (survived an ungraceful exit, or a companion device redundantly pressing
+                // Host under the shared phone/watch identity — see deriveMemberId), adopt it as a
+                // success instead of failing: server state must not depend on which companion
+                // device happened to perform the hand-off.
+                if let data = try? JSONSerialization.data(withJSONObject: json),
+                   let existingRoom = try? JSONDecoder().decode(SquadRoom.self, from: data),
+                   existingRoom.hostId == room.hostId {
+                    DispatchQueue.main.async {
+                        self.activeRoom = existingRoom
+                        self.isConnected = true
+                        self.memberLatestTimestamps.removeAll()
+                        self.memberLatestSequences.removeAll()
+                        self.startTelemetryPolling(roomId: existingRoom.id)
+                        completion?(.success(existingRoom))
+                    }
+                    return
+                }
+
+                // A genuinely different identity already owns this room id — unrelated identities
+                // must still not collide.
                 let err = FirebaseSyncError.roomAlreadyExists
                 DispatchQueue.main.async {
                     self.errorMessage = err.localizedDescription

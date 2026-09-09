@@ -711,7 +711,7 @@ public final class GameStateManager: ObservableObject {
         let roster = room.members.values.map { member in
             SquadMember(id: member.id, callsign: member.callsign, latitude: 0.0, longitude: 0.0, role: member.role)
         }.sorted { $0.id < $1.id }
-        
+
         if let data = try? JSONEncoder().encode(roster), let json = String(data: data, encoding: .utf8) {
             if watchConnectivityManager.localLS.membership.membersJson == json {
                 return
@@ -720,7 +720,7 @@ public final class GameStateManager: ObservableObject {
             watchConnectivityManager.updateLocalStructures(membership: mem)
         }
     }
-    
+
     public func syncTacticalToWatchConnectivity(timestamp: TimeInterval? = nil) {
         guard !isApplyingRemoteSync else { return }
         let indicators = allTacticalIndicators
@@ -1589,7 +1589,13 @@ public final class GameStateManager: ObservableObject {
 
         sendSessionAction(.startHost(name: cleanedName, pin: cleanedPin))
         errorMessage = nil
-        purgeLocalSessionAndIcons()
+        // Deliberately no purgeLocalSessionAndIcons() here: a redundant Host press (e.g. the
+        // companion device re-hosting the same room under the shared identity) must not wipe
+        // already-synced session state before we even know the network call is redundant.
+        // firebaseManager.createRoom's own completion assigns the real server room, and the
+        // reactive $activeRoom sink in bindManagers() diffs otherSquadMembers/allTacticalIndicators
+        // from that — a genuine room change still clears stale icons correctly, just from real
+        // data instead of blasting to empty first.
         firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: squadId, isEncryptionEnabled: isEncryptionEnabled)
 
         firebaseManager.createRoom(room) { [weak self] result in
@@ -1676,7 +1682,13 @@ public final class GameStateManager: ObservableObject {
 
         sendSessionAction(.startJoin(id: cleanId, pin: cleanedPin))
         errorMessage = nil
-        purgeLocalSessionAndIcons()
+        // Deliberately no purgeLocalSessionAndIcons() here: a redundant Join press (e.g. the
+        // companion device re-joining the same room under the shared identity) must not wipe
+        // already-synced session state before we even know the network call is redundant.
+        // firebaseManager.joinRoom's own completion assigns the real server room, and the
+        // reactive $activeRoom sink in bindManagers() diffs otherSquadMembers/allTacticalIndicators
+        // from that — a genuine room change still clears stale icons correctly, just from real
+        // data instead of blasting to empty first.
         firebaseManager.setEncryptionContext(pin: cleanedPin, roomId: cleanId, isEncryptionEnabled: isEncryptionEnabled)
 
         let localMember = makeCurrentSquadMember(role: myRole)
