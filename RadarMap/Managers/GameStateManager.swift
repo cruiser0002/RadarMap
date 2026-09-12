@@ -505,11 +505,10 @@ public final class GameStateManager: ObservableObject {
         let currentRoom = room ?? firebaseManager.activeRoom
         guard let currentRoom = currentRoom else {
             if !otherSquadMembers.isEmpty { otherSquadMembers = [] }
-            let hadTelemetry = !persistentRemoteTelemetry.isEmpty
+            // Not re-advertised immediately — persistentRemoteTelemetry is read fresh by the
+            // single 1Hz activeAdvertisementTimer tick (see advertiseActiveLease), which is the
+            // sole trigger for *_hs sends.
             persistentRemoteTelemetry.removeAll()
-            if hadTelemetry {
-                advertiseWatchHighSpeedState()
-            }
             syncMembershipToWatchConnectivity()
             pruneSelectionIfStale()
             return
@@ -518,12 +517,8 @@ public final class GameStateManager: ObservableObject {
         if otherSquadMembers != filtered {
             otherSquadMembers = filtered
         }
-        let previousCount = persistentRemoteTelemetry.count
         let activeMemberIds = Set(currentRoom.members.keys)
         persistentRemoteTelemetry = persistentRemoteTelemetry.filter { activeMemberIds.contains($0.key) }
-        if persistentRemoteTelemetry.count != previousCount {
-            advertiseWatchHighSpeedState()
-        }
         syncMembershipToWatchConnectivity()
         pruneSelectionIfStale()
     }
@@ -645,12 +640,26 @@ public final class GameStateManager: ObservableObject {
         // Watch is primary cloud client
         return true
         #else
+        // `isWatchLeaseActive` is only refreshed by WatchConnectivityManager's 1Hz timer (or a
+        // fresh HS payload arriving) — a plain read here can be up to a full tick stale, or
+        // indefinitely stale if that timer isn't running (e.g. suspended in the background).
+        // Correct a stale "still active" reading against the actual lease deadline before deciding ownership.
+        watchConnectivityManager.correctStaleLeaseExpiry()
         // Phone connects only if Watch lease is expired/inactive
         return !watchConnectivityManager.isWatchLeaseActive
         #endif
     }
     @Published public var isPhoneActive: Bool = false
     @Published public var isWatchActive: Bool = false
+
+    /// Is the user looking at this device right now (foreground/on-wrist)? Canonical, externally
+    /// read flag — owned here, not by `FirebaseSyncManager`, since it gates WCSession-domain
+    /// behavior (`updateActiveAdvertisementTimer`) as well as Firebase-domain behavior
+    /// (`evaluateListenerGate`), and WCSession must stay decoupled from the Firebase manager's
+    /// own lifecycle (see COMPANION_DATA_SYNC_MODEL.md's "Zero Web/Firebase Coupling" invariant).
+    /// `FirebaseSyncManager` still keeps its own private copy for its adaptive-polling math; set
+    /// via `setWristActive(_:)` below, never read externally.
+    @Published public private(set) var isWristActive: Bool = true
 
     
     public var lastLowSpeedPayloadTimestamp: TimeInterval = 0
@@ -706,6 +715,9 @@ public final class GameStateManager: ObservableObject {
 
         // Request HealthKit workout session authorization at app launch
         healthKitManager.requestAuthorization()
+
+        // Continuous companion lease advertisement across WCSession (strictly Phone <-> Watch)
+        updateActiveAdvertisementTimer()
     }
 
     // MARK: - Outbound WCSession Structure Synchronization
@@ -750,24 +762,24 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
-    /// Updates persistent remote telemetry map with incoming packets, prunes departed members,
-    /// and advertises the complete accumulated snapshot over WatchConnectivity (Watch -> Phone).
+    /// Updates persistent remote telemetry map with incoming packets and prunes departed members.
+    /// Does not itself trigger a WatchConnectivity send — the single 1Hz activeAdvertisementTimer
+    /// tick (see advertiseActiveLease) reads persistentRemoteTelemetry fresh on every fire and is
+    /// the sole place `*_hs` (one atomic Codable struct) is actually sent.
     public func updateRemoteTelemetry(packets: [TelemetryPacket] = []) {
         for packet in packets {
             if packet.memberId != myMemberId {
                 persistentRemoteTelemetry[packet.memberId] = packet.toCompactArray()
             }
         }
-        
+
         // Prune departed members who are no longer in the active squad room
         if let room = firebaseManager.activeRoom {
             let activeIds = Set(room.members.keys)
             persistentRemoteTelemetry = persistentRemoteTelemetry.filter { activeIds.contains($0.key) }
         }
-        
-        advertiseWatchHighSpeedState()
     }
-    
+
     /// Serializes and advertises the complete accumulated remote telemetry snapshot (Watch -> Phone).
     public func advertiseWatchHighSpeedState(heartRate: Double? = nil) {
         guard watchConnectivityManager.localRole == .watch else { return }
@@ -833,7 +845,13 @@ public final class GameStateManager: ObservableObject {
         // 3. Lease status changed (peer active_until lease monitored locally)
         watchConnectivityManager.onWatchLeaseStatusChanged = { [weak self] isWatchActive in
             guard let self = self else { return }
+            if self.watchConnectivityManager.localRole == .phone {
+                self.isWatchActive = isWatchActive
+            } else {
+                self.isPhoneActive = isWatchActive
+            }
             self.evaluateListenerGate()
+            self.objectWillChange.send()
         }
         
         // 4. Low-speed converged snapshot received
@@ -881,8 +899,13 @@ public final class GameStateManager: ObservableObject {
                 }
             }
 
-            // Tactical indicators adoption — watch only (phone is the canonical owner of localIndicators)
-            #if os(watchOS)
+            // Tactical indicators adoption. Applies on both platforms: *_ls is a single merged
+            // structure and nothing in it is platform-exclusive. MergeEngine.merge only lets this
+            // structure "win" when its timestamp is newer than what's already adopted, so on a
+            // device whose own Firebase listener is attached and current this is a no-op; it only
+            // takes effect when this device's own listener is detached (e.g. Phone while Watch
+            // holds the network lease, evaluateListenerGate()) and the peer's relayed copy is the
+            // only source of current tactical state.
             if let tacData = mergedSnapshot.tactical.tacticalJson.data(using: .utf8),
                let indicators = try? JSONDecoder().decode([TacticalIndicator].self, from: tacData) {
                 var newLocalMap: [String: TacticalIndicator] = [:]
@@ -892,8 +915,7 @@ public final class GameStateManager: ObservableObject {
                 self.localIndicators = newLocalMap
                 self.updateAllTacticalIndicators()
             }
-            #endif
-            
+
             // Membership adoption: update room members while preserving live coordinates
             if cycle.loginCycle != .inactive,
                let memData = mergedSnapshot.membership.membersJson.data(using: .utf8),
@@ -960,7 +982,12 @@ public final class GameStateManager: ObservableObject {
             firebaseManager.stopTelemetryPolling()
             return
         }
-        let appActive = firebaseManager.isWristActive
+        let appActive = isWristActive
+        // Correct a stale "still active" reading against the actual lease deadline rather than
+        // trusting the 1Hz timer's possibly-stale cache (see hasNetworkOwnership) —
+        // evaluateListenerGate is called from one-off triggers (app resume, reachability change)
+        // that need an up-to-date answer immediately, not whenever the timer next happens to tick.
+        watchConnectivityManager.correctStaleLeaseExpiry()
         let peerLeaseActive = watchConnectivityManager.isWatchLeaseActive
         #if os(watchOS)
         let isWatch = true
@@ -997,17 +1024,30 @@ public final class GameStateManager: ObservableObject {
             }
             .store(in: &cancellables)
 
-        // Re-evaluates the Listener gate and the active-advertisement timer on a bare scenePhase
-        // flip, even with no companion event (telemetry/lease/reachability) in flight to trigger
-        // them otherwise. `@Published` publishes from `willSet`, before the backing field is
-        // actually updated, so re-reading `firebaseManager.isWristActive` from a synchronous sink
-        // would see the stale value — `.receive(on:)` defers to the next run loop turn, by which
-        // point the write has landed.
-        firebaseManager.$isWristActive
+        watchConnectivityManager.$p2wHS
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                self?.evaluateListenerGate()
-                self?.updateActiveAdvertisementTimer()
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        watchConnectivityManager.$w2pHS
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        watchConnectivityManager.$isWatchLeaseActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] active in
+                guard let self = self else { return }
+                if self.watchConnectivityManager.localRole == .phone {
+                    self.isWatchActive = active
+                } else {
+                    self.isPhoneActive = active
+                }
+                self.objectWillChange.send()
             }
             .store(in: &cancellables)
         
@@ -1085,8 +1125,7 @@ public final class GameStateManager: ObservableObject {
         // backing field is actually updated, so reading `watchConnectivityManager.localLS` (e.g.
         // via the `isDead`/`myCallsign`/etc. computed properties, which the side effects below
         // call into) from a synchronous sink would see the stale pre-change value —
-        // `.receive(on:)` defers to the next run loop turn, by which point the write has landed
-        // (same fix as the `$isWristActive` sink above).
+        // `.receive(on:)` defers to the next run loop turn, by which point the write has landed.
         watchConnectivityManager.$localLS
             .dropFirst()
             .receive(on: DispatchQueue.main)
@@ -1126,16 +1165,14 @@ public final class GameStateManager: ObservableObject {
             }
             .store(in: &cancellables)
         
-        // Stream heart rate updates
+        // Stream heart rate updates. `*_hs` (p2w_hs/w2p_hs) is one Codable struct sent as one
+        // atomic unit at a single 1Hz rate — advertiseActiveLease()'s timer tick is the sole
+        // trigger for that send (see updateActiveAdvertisementTimer), so this sink does not call
+        // advertiseWatchHighSpeedState() itself; it only needs to keep healthKitManager.currentHeartRate
+        // current, which the timer tick reads via effectiveHeartRate on its next 1Hz fire.
         healthKitManager.$currentHeartRate
             .sink { [weak self] hr in
                 guard let self = self else { return }
-                #if os(watchOS)
-                let effectiveHr = self.isDead ? AppConstants.Health.flatlineHeartRate : hr
-                if effectiveHr > 0 || self.isDead {
-                    self.advertiseWatchHighSpeedState(heartRate: effectiveHr)
-                }
-                #endif
                 self.broadcastLocalTelemetry(heartRate: hr, force: false)
             }
             .store(in: &cancellables)
@@ -1211,8 +1248,18 @@ public final class GameStateManager: ObservableObject {
     public func startTacticalSession() {
         locationHeadingManager.requestPermissions()
         locationHeadingManager.startUpdates()
-        healthKitManager.requestAuthorization { [weak self] _ in
-            self?.healthKitManager.startLiveHeartRateSession()
+        // Companion adoption (a low-speed convergence push from the phone) can call this from a
+        // passive background WCSession wake. Starting a live HKWorkoutSession there has been
+        // observed to hang forever in a synchronous HealthKit XPC call (enableCollection ->
+        // healthd), blocking main until the OS watchdog SIGKILLs the app after its 600s
+        // background-action budget. Only kick HealthKit off when the watch is actually
+        // active/on-wrist (a real foreground start); otherwise handleAppResume() ->
+        // resumeLiveHeartRateSession() starts it the next time the app is actually foregrounded,
+        // since isTacticalSessionActive will already be true by then.
+        if isWristActive {
+            healthKitManager.requestAuthorization { [weak self] _ in
+                self?.healthKitManager.startLiveHeartRateSession()
+            }
         }
 
         restartHeartbeatTimer()
@@ -1235,8 +1282,6 @@ public final class GameStateManager: ObservableObject {
         deadReckoningTimer = nil
         freshnessExpiryTimer?.cancel()
         freshnessExpiryTimer = nil
-        activeAdvertisementTimer?.cancel()
-        activeAdvertisementTimer = nil
         remoteDisplayPositions = [:]
         lastSentLocation = nil
         lastSentHeading = nil
@@ -1265,19 +1310,25 @@ public final class GameStateManager: ObservableObject {
     /// Guarantees this device's own `active_until` lease (`p2w_hs` on Phone, `w2p_hs` on Watch)
     /// refreshes at least once per `activeAdvertisementCadenceSeconds` while genuinely active, so
     /// a gap in incidental traffic (no HR sample, no telemetry to relay) can't let the 5s lease
-    /// lapse and trigger a spurious ownership/listener flip. Gated on `isTacticalSessionActive &&
-    /// isWristActive`, not `isWristActive` alone — advertising a lease only means something when
-    /// there's an actual session for the peer to help with.
+    /// lapse. WCSession transport is strictly for Phone-to-Watch companion communication and is
+    /// completely decoupled from Firebase/server room connection. Gated solely on `isWristActive`
+    /// (whether the user has the app open/active on this device) — owned by `GameStateManager`
+    /// itself, not `FirebaseSyncManager`, precisely so this timer's lifecycle never depends on the
+    /// Firebase manager's own lifecycle.
     ///
     /// Deliberately NOT gated on `isReachable`: that property reflects live two-way messaging
     /// availability (foreground/high-priority-background), which is known to unreliably read
     /// `false` even while a companion is genuinely alive and running (e.g. a watch mid-workout
     /// with the screen off) — exactly this app's primary posture. `updateApplicationContext`
-    /// (what this ultimately calls) is explicitly designed to keep working via the system
+    /// (what this ultimately falls back to) is explicitly designed to keep working via the system
     /// WatchConnectivity daemon regardless of reachability, so gating on it would risk suppressing
     /// real lease refreshes to a backgrounded-but-active companion for a negligible power saving.
+    ///
+    /// This timer is also the sole trigger for the high-speed `*_hs` send (see `advertiseActiveLease`
+    /// below) — `*_hs` is one Codable struct sent as one atomic unit at this single 1Hz rate,
+    /// regardless of which underlying source (HR, telemetry, lease) actually changed.
     private func updateActiveAdvertisementTimer() {
-        guard isTacticalSessionActive, firebaseManager.isWristActive else {
+        guard isWristActive else {
             activeAdvertisementTimer?.cancel()
             activeAdvertisementTimer = nil
             return
@@ -1303,6 +1354,7 @@ public final class GameStateManager: ObservableObject {
         #else
         watchConnectivityManager.advertisePhoneHighSpeed()
         #endif
+        self.objectWillChange.send()
         onActiveLeaseAdvertised?()
     }
 
@@ -1345,23 +1397,34 @@ public final class GameStateManager: ObservableObject {
         syncTacticalToWatchConnectivity()
     }
     
+    /// Canonical setter for `isWristActive` — always forwards to `firebaseManager.setWristActive`
+    /// and re-runs both gates unconditionally (no `guard isWristActive != active else { return }`
+    /// short-circuit). That guard was considered and deliberately rejected: `handleAppResume`/
+    /// `handleAppSuspend` call this on every scenePhase transition (the common case in
+    /// production), and `FirebaseSyncManager.setWristActive` has its own internal safety net that
+    /// re-fetches telemetry when listeners are detached even if its cached flag didn't change —
+    /// a short-circuit here would silently swallow calls that safety net depends on seeing.
+    /// `evaluateListenerGate()`/`updateActiveAdvertisementTimer()` are already called redundantly
+    /// from multiple other sites in this class, so calling them unconditionally here is safe.
     public func setWristActive(_ active: Bool) {
+        isWristActive = active
         firebaseManager.setWristActive(active)
         if active {
             locationHeadingManager.exitLowPowerMode()
         } else {
             locationHeadingManager.enterLowPowerMode()
         }
+        evaluateListenerGate()
+        updateActiveAdvertisementTimer()
     }
-    
+
     public func handleAppResume() {
         locationHeadingManager.exitLowPowerMode()
         locationHeadingManager.startUpdates()
         if isTacticalSessionActive {
             healthKitManager.resumeLiveHeartRateSession()
         }
-        firebaseManager.setWristActive(true)
-        evaluateListenerGate()
+        setWristActive(true)
     }
 
 
@@ -1372,10 +1435,9 @@ public final class GameStateManager: ObservableObject {
         } else {
             healthKitManager.stopLiveHeartRateSession()
         }
-        firebaseManager.setWristActive(false)
-        evaluateListenerGate()
+        setWristActive(false)
     }
-    
+
     public func triggerWakeBurst() {
         firebaseManager.triggerWakeBurst()
     }
@@ -1448,8 +1510,16 @@ public final class GameStateManager: ObservableObject {
         }
         if let callsign = indicator.placedByCallsign, !callsign.isEmpty {
             if isSameClan(callsign: callsign) { return true }
+            if myCallsign.clanTags.isEmpty && callsign.clanTags.isEmpty { return true }
         }
-        return isSameClan(memberId: indicator.placedByMemberId)
+        if isSameClan(memberId: indicator.placedByMemberId) { return true }
+        if myCallsign.clanTags.isEmpty {
+            let placerCallsign = firebaseManager.activeRoom?.members[indicator.placedByMemberId]?.callsign ?? ""
+            if placerCallsign.clanTags.isEmpty {
+                return true
+            }
+        }
+        return false
     }
 
     /// Determines whether a squad member renders as a green icon (local player or same clan).
@@ -1490,7 +1560,7 @@ public final class GameStateManager: ObservableObject {
             if let digit = wordMapping[token] {
                 result.append(digit)
             } else {
-                result.append(String(String.UnicodeScalarView(token.unicodeScalars.filter { asciiAlphanumerics.contains($0) })))
+                result.append(String(String.UnicodeScalarView(token.unicodeScalars.filter { CharacterSet.decimalDigits.contains($0) })))
             }
         }
 
@@ -2131,7 +2201,10 @@ extension GameStateManager {
     ///   - 'P' when low-speed stream transmission is active from Phone.
     ///   - 'W' when low-speed stream transmission is active from Watch.
     ///   - '0' when no low-speed stream data.
-    /// - Characters 5..8 (indices 4..7): Reserved placeholder zeros ("0000").
+    /// - Character 5 (index 4): Sign of companion activeUntil - localdevice.time ('+' or '-')
+    /// - Character 6 (index 5): Time delta magnitude in seconds, capped at 9 ('0'..'9')
+    /// - Character 7 (index 6): WCSession activation state ('A' when .activated, '0' otherwise)
+    /// - Character 8 (index 7): WCSession reachability ('R' when isReachable, '0' otherwise)
     public var debugStatusString: String {
         let now = Date().timeIntervalSince1970
         
@@ -2144,7 +2217,7 @@ extension GameStateManager {
         let listenerChar: Character = isListenerAttached ? "D" : "0"
         
         // Character 3: HS stream transmission activity (P from phone, W from watch, 0 no data)
-        let isHSActive = watchConnectivityManager.isWatchLeaseActive || (watchConnectivityManager.latestRemoteActiveUntil > now)
+        let isHSActive = watchConnectivityManager.isWatchLeaseActive || (watchConnectivityManager.companionActiveUntil > now)
         let hsChar: Character
         if watchConnectivityManager.localRole == .phone {
             hsChar = (isHSActive || isWatchActive) ? "W" : "0"
@@ -2161,8 +2234,25 @@ extension GameStateManager {
             lsChar = (isRecentLowSpeed && lastLowSpeedPayloadSource == "P") ? "P" : "0"
         }
         
-        return "\(upstreamChar)\(listenerChar)\(hsChar)\(lsChar)0000"
+        // Characters 5 & 6: Companion activeUntil lease horizon (sign [+, -] and seconds capped at 9)
+        let diff = watchConnectivityManager.companionActiveUntil - now
+        let signChar: Character = diff >= 0 ? "+" : "-"
+        let roundedDiff = abs(diff).rounded()
+        let cappedSeconds: Int
+        if roundedDiff.isNaN || roundedDiff >= 9.0 {
+            cappedSeconds = 9
+        } else {
+            cappedSeconds = max(0, Int(roundedDiff))
+        }
+        let timeChar = Character("\(cappedSeconds)")
+        
+        // Character 7: WCSession activation state ('A' when .activated, '0' otherwise)
+        let activatedChar: Character = watchConnectivityManager.debugLiveIsActivated ? "A" : "0"
+
+        // Character 8: WCSession reachability ('R' when isReachable, '0' otherwise)
+        let reachableChar: Character = watchConnectivityManager.debugLiveIsReachable ? "R" : "0"
+        
+        return "\(upstreamChar)\(listenerChar)\(hsChar)\(lsChar)\(signChar)\(timeChar)\(activatedChar)\(reachableChar)"
     }
 }
 #endif
-

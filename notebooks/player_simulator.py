@@ -73,22 +73,42 @@ def _get_or_create_firebase_app(credentials_path: str, database_url: str):
 
 
 def resolve_firebase_credentials_path(explicit_path: Optional[str] = None) -> str:
-    """Resolves the service-account JSON key path from an explicit argument or the
-    FIREBASE_CREDENTIALS environment variable. Fails loudly rather than silently falling back
-    to Application Default Credentials, since a missing key is almost always a setup mistake."""
-    path = explicit_path or os.environ.get("FIREBASE_CREDENTIALS")
-    if not path:
-        raise RuntimeError(
-            "No Firebase service-account credentials provided. Pass --credentials <path> (CLI) "
-            "or credentials_path=... (Python), or set the FIREBASE_CREDENTIALS environment "
-            "variable, to a service-account JSON key downloaded from the Firebase Console "
-            "(Project Settings > Service Accounts > Generate new private key) for the "
-            "radarmap-8adf0 project. Keep this file out of version control — see "
-            "notebooks/README.md for the recommended location."
-        )
-    if not os.path.isfile(path):
-        raise RuntimeError(f"Firebase credentials file not found: '{path}'.")
-    return path
+    """Resolves the service-account JSON key path from an explicit argument, the
+    FIREBASE_CREDENTIALS environment variable, or local candidate directories (credentials/).
+    Fails loudly rather than silently falling back to Application Default Credentials,
+    since a missing key is almost always a setup mistake."""
+    if explicit_path and os.path.isfile(explicit_path):
+        return os.path.abspath(explicit_path)
+
+    env_path = os.environ.get("FIREBASE_CREDENTIALS")
+    if env_path and os.path.isfile(env_path):
+        return os.path.abspath(env_path)
+
+    # Search standard repository locations relative to cwd or file location
+    import glob
+    base_dirs = [
+        os.path.abspath("."),
+        os.path.abspath(os.path.dirname(__file__)),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
+    ]
+    for b in base_dirs:
+        patterns = [
+            os.path.join(b, "credentials", "*.json"),
+            os.path.join(b, "notebooks", "credentials", "*.json"),
+        ]
+        for pat in patterns:
+            for m in glob.glob(pat):
+                if os.path.isfile(m):
+                    return os.path.abspath(m)
+
+    raise RuntimeError(
+        "No Firebase service-account credentials provided. Pass --credentials <path> (CLI) "
+        "or credentials_path=... (Python), or set the FIREBASE_CREDENTIALS environment "
+        "variable, to a service-account JSON key downloaded from the Firebase Console "
+        "(Project Settings > Service Accounts > Generate new private key) for the "
+        "radarmap-8adf0 project. Keep this file out of version control — see "
+        "notebooks/README.md for the recommended location."
+    )
 
 
 # MARK: - Error Classification
@@ -1106,6 +1126,25 @@ class RadarPlayerSimulator:
                 print(f"[SUCCESS] Room '{self.room_id}' is now empty. Purged entire room and tactical nodes.")
             else:
                 print(f"[SUCCESS] Removed player '{self.callsign}' and associated team orders from room '{self.room_id}'.")
+
+        self.coordinator.reset_session()
+        self.is_connected = False
+        self.is_running = False
+
+    def disband_room(self):
+        """Clean disband of room on Firebase RTDB, purging all telemetry (p/), tactical (t/), and room (r/) nodes."""
+        if not self.room_id:
+            print("[ERROR] No room ID specified to disband.")
+            return
+
+        print(f"\n[CLEANUP] Disbanding room '{self.room_id}' on Firebase RTDB...")
+        try:
+            self._http_request("DELETE", f"p/{self.room_id}.json")
+            self._http_request("DELETE", f"t/{self.room_id}.json")
+            self._http_request("DELETE", f"r/{self.room_id}.json")
+            print(f"[SUCCESS] Disbanded room '{self.room_id}' and purged all nodes (r/, p/, t/).")
+        except Exception as e:
+            print(f"[CLEANUP ERROR] Failed to delete room nodes: {e}")
 
         self.coordinator.reset_session()
         self.is_connected = False

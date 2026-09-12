@@ -71,10 +71,10 @@ class TestStressTestSimulator(unittest.TestCase):
         self.assertEqual(specs[1].target_avg_speed_mps, 4.0)
         self.assertEqual(specs[1].network_quality, 2)
 
-    def test_default_players_table_has_10_players(self):
-        """Tests default seeded player table contains 10 squad members."""
+    def test_default_players_table_has_12_players(self):
+        """Tests default seeded player table contains 12 squad members."""
         specs = parse_players_table(None)
-        self.assertEqual(len(specs), 10)
+        self.assertEqual(len(specs), 12)
         qualities = [s.network_quality for s in specs]
         self.assertIn(5, qualities)
         self.assertIn(1, qualities)

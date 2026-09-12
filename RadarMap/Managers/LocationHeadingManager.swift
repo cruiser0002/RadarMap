@@ -207,4 +207,14 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
     public func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
         print("[LocationManager] Failed with error: \(error.localizedDescription)")
     }
+
+    /// Suppresses the system heading-calibration screen (a ring of dots that must be closed by
+    /// rotating the device, drawn full-screen over whatever the app is showing). The app has its
+    /// own compass/heading UI on the radar face, so the system prompt is just an unwanted
+    /// interruption — and on watchOS/iOS Simulator, with no real magnetometer to satisfy it, it
+    /// can never actually be dismissed by the user, leaving the app looking permanently stuck on
+    /// a "loading" screen. Returning false here stops CLLocationManager from presenting it at all.
+    public func locationManagerShouldDisplayHeadingCalibration(_ manager: CLLocationManager) -> Bool {
+        false
+    }
 }

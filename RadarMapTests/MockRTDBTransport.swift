@@ -13,6 +13,18 @@ import Foundation
 final class MockRTDBTransport: RTDBTransport {
     // MARK: - Storage
 
+    /// `FirebaseSyncManager` deliberately dispatches writes (`setValue`) onto its own background
+    /// `telemetrySchedulerQueue` while `observe`/`removeObserver` are driven synchronously from
+    /// whatever thread attaches/detaches listeners (main, in production and in tests) — mirroring
+    /// how the real `FirebaseDatabase` SDK accepts calls from any thread. Without serialization,
+    /// concurrent mutation of `root`/`observers` from two threads is undefined behavior for a
+    /// plain Swift `Dictionary` and crashes intermittently (observed as `EXC_BAD_ACCESS` inside
+    /// `Dictionary.Iterator.next()` while `notifyObservers` iterated `observers` mid-mutation).
+    /// Recursive because `notifyObservers` invokes observer handlers synchronously, and some of
+    /// those handlers (e.g. `FirebaseSyncManager.fetchMemberDetails`) call back into this same
+    /// mock (`getValue`) from within that same call stack, on the same thread.
+    private let lock = NSRecursiveLock()
+
     private var root: [String: Any] = [:]
 
     /// Paths where get/set/remove should simulate failure (nil / false completion), e.g. to
@@ -34,9 +46,13 @@ final class MockRTDBTransport: RTDBTransport {
 
     /// Count of currently-attached observers (attach/detach aware, unlike the append-only
     /// `recordedObservedPaths` log) — used by tests asserting Listener-gate attach/detach state.
-    var activeObserverCount: Int { observers.count }
+    var activeObserverCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return observers.count
+    }
 
     func reset() {
+        lock.lock(); defer { lock.unlock() }
         root.removeAll()
         failingPaths.removeAll()
         recordedGets.removeAll()
@@ -50,6 +66,7 @@ final class MockRTDBTransport: RTDBTransport {
     /// Seeds a value directly into storage without going through `setValue` (no completion, no
     /// observer notification) — useful for arranging a test's starting server state.
     func seed(_ value: Any, at path: String) {
+        lock.lock(); defer { lock.unlock() }
         setNode(value, at: path)
     }
 
@@ -110,6 +127,7 @@ final class MockRTDBTransport: RTDBTransport {
     // MARK: - RTDBTransport
 
     func getValue(at path: String, completion: @escaping (Any?) -> Void) {
+        lock.lock(); defer { lock.unlock() }
         recordedGets.append(path)
         if failingPaths.contains(path) {
             completion(nil)
@@ -119,6 +137,7 @@ final class MockRTDBTransport: RTDBTransport {
     }
 
     func setValue(_ value: Any, at path: String, completion: ((Bool) -> Void)?) {
+        lock.lock(); defer { lock.unlock() }
         recordedSets.append((path, value))
         if failingPaths.contains(path) {
             completion?(false)
@@ -130,6 +149,7 @@ final class MockRTDBTransport: RTDBTransport {
     }
 
     func removeValue(at path: String, completion: ((Bool) -> Void)?) {
+        lock.lock(); defer { lock.unlock() }
         recordedRemoves.append(path)
         if failingPaths.contains(path) {
             completion?(false)
@@ -142,6 +162,7 @@ final class MockRTDBTransport: RTDBTransport {
 
     @discardableResult
     func observe(at path: String, eventType: RTDBEventType, handler: @escaping (RTDBSnapshot) -> Void) -> RTDBObserverHandle {
+        lock.lock(); defer { lock.unlock() }
         let handle = nextHandle
         nextHandle += 1
         observers[handle] = Observer(path: path, eventType: eventType, handler: handler)
@@ -153,6 +174,7 @@ final class MockRTDBTransport: RTDBTransport {
     }
 
     func removeObserver(_ handle: RTDBObserverHandle) {
+        lock.lock(); defer { lock.unlock() }
         observers.removeValue(forKey: handle)
     }
 
@@ -160,6 +182,7 @@ final class MockRTDBTransport: RTDBTransport {
     /// this mock — for tests simulating a remote peer's write (or this device's own optimistic
     /// self-echo) arriving via a listener.
     func simulateEvent(at path: String, eventType: RTDBEventType, key: String, value: Any?) {
+        lock.lock(); defer { lock.unlock() }
         for observer in observers.values where observer.path == path && observer.eventType == eventType {
             observer.handler(MockSnapshot(key: key, value: value))
         }

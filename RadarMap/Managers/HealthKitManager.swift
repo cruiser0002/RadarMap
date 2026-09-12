@@ -21,6 +21,11 @@ public final class HealthKitManager: NSObject, ObservableObject {
     private let healthStore = HKHealthStore()
     private var workoutSession: HKWorkoutSession?
     private var workoutBuilder: HKLiveWorkoutBuilder?
+    /// Set synchronously (on main, before the async setup below even starts) so a second
+    /// `startLiveHeartRateSession()` call landing while setup is still in flight on
+    /// `workoutSetupQueue` doesn't race and start two sessions — `workoutSession` itself isn't
+    /// assigned until setup completes, so it can't serve as that guard on its own.
+    private var isStartingSession = false
     #endif
 
     public override init() {
@@ -89,46 +94,69 @@ public final class HealthKitManager: NSObject, ObservableObject {
         #endif
     }
     
+    #if os(watchOS)
+    private let workoutSetupQueue = DispatchQueue(label: "com.radarmap.healthkit.workoutsetup")
+    #endif
+
     public func startLiveHeartRateSession() {
         #if os(watchOS)
-        guard HKHealthStore.isHealthDataAvailable(), workoutSession == nil else { return }
-        
+        guard HKHealthStore.isHealthDataAvailable(), workoutSession == nil, !isStartingSession else { return }
+        isStartingSession = true
+
         let workoutConfig = HKWorkoutConfiguration()
         workoutConfig.activityType = .other
         workoutConfig.locationType = .indoor
-        
-        do {
-            workoutSession = try HKWorkoutSession(healthStore: healthStore, configuration: workoutConfig)
-            workoutBuilder = workoutSession?.associatedWorkoutBuilder()
-            
-            workoutSession?.delegate = self
-            workoutBuilder?.delegate = self
-            let liveDataSource = HKLiveWorkoutDataSource(healthStore: healthStore, workoutConfiguration: workoutConfig)
-            if let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate) {
-                liveDataSource.enableCollection(for: heartRateType, predicate: nil)
-            }
-            workoutBuilder?.dataSource = liveDataSource
-            
-            let startDate = Date()
-            workoutSession?.startActivity(with: startDate)
-            
-            if #available(watchOS 10.0, *) {
-                workoutSession?.startMirroringToCompanionDevice { success, error in
-                    if let error = error {
-                        print("[HealthKitManager] Companion mirroring error: \(error.localizedDescription)")
-                    } else {
-                        print("[HealthKitManager] Companion mirroring active: \(success)")
+
+        // `enableCollection(for:predicate:)` synchronously dispatches onto HealthKit's own serial
+        // queue, which has been observed to hang indefinitely in a synchronous XPC round-trip to
+        // healthd (starting a live workout data source appears to require an active/foreground
+        // context). Running the whole setup off main means a hang there stalls this background
+        // queue, not the UI/main thread — it can no longer freeze the app or coincide with a
+        // background-action watchdog window.
+        workoutSetupQueue.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let session = try HKWorkoutSession(healthStore: self.healthStore, configuration: workoutConfig)
+                let builder = session.associatedWorkoutBuilder()
+
+                session.delegate = self
+                builder.delegate = self
+                let liveDataSource = HKLiveWorkoutDataSource(healthStore: self.healthStore, workoutConfiguration: workoutConfig)
+                if let heartRateType = HKQuantityType.quantityType(forIdentifier: .heartRate) {
+                    liveDataSource.enableCollection(for: heartRateType, predicate: nil)
+                }
+                builder.dataSource = liveDataSource
+
+                let startDate = Date()
+                session.startActivity(with: startDate)
+
+                if #available(watchOS 10.0, *) {
+                    session.startMirroringToCompanionDevice { success, error in
+                        if let error = error {
+                            print("[HealthKitManager] Companion mirroring error: \(error.localizedDescription)")
+                        } else {
+                            print("[HealthKitManager] Companion mirroring active: \(success)")
+                        }
                     }
                 }
-            }
-            
-            workoutBuilder?.beginCollection(withStart: startDate) { [weak self] success, error in
+
+                builder.beginCollection(withStart: startDate) { [weak self] success, error in
+                    DispatchQueue.main.async {
+                        self?.isSessionActive = success
+                    }
+                }
+
                 DispatchQueue.main.async {
-                    self?.isSessionActive = success
+                    self.workoutSession = session
+                    self.workoutBuilder = builder
+                    self.isStartingSession = false
+                }
+            } catch {
+                print("[HealthKitManager] Error starting workout session: \(error.localizedDescription)")
+                DispatchQueue.main.async {
+                    self.isStartingSession = false
                 }
             }
-        } catch {
-            print("[HealthKitManager] Error starting workout session: \(error.localizedDescription)")
         }
         #else
         isSessionActive = true

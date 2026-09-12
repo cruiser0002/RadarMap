@@ -56,13 +56,7 @@ public enum FirebaseSyncError: LocalizedError, Equatable {
 }
 
 public final class FirebaseSyncManager: NSObject, ObservableObject {
-    @Published public var activeRoom: SquadRoom? {
-        didSet {
-            if oldValue?.members.count != activeRoom?.members.count {
-                recalculateAdaptivePollingInterval()
-            }
-        }
-    }
+    @Published public var activeRoom: SquadRoom?
 
     @Published public var isConnected: Bool = false
     @Published public var syncLatencyMs: Double = 0.0
@@ -72,8 +66,10 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     @Published public var errorMessage: String?
     @Published public var squadMembersArray: [SquadMember] = []
 
-    @Published public private(set) var pollingInterval: TimeInterval = AppConstants.Timing.AdaptiveRate.baselineInterval
-    @Published public var isWristActive: Bool = true
+    /// Not read outside this class — `GameStateManager.isWristActive` is the canonical, externally
+    /// read flag (see its doc comment for why). This private copy exists only so this class's own
+    /// wake-burst safety-net check below can compare against its previous value.
+    private var isWristActive: Bool = true
 
     public var onRemoteTelemetryPacketsReceived: (([TelemetryPacket]) -> Void)?
 
@@ -238,17 +234,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                 self?.setRTDBConnected(connected)
             }
             .store(in: &cancellables)
-
-        // Recalculate polling interval only when player count or connection grade changes —
-        // not on every coordinate update — preventing spurious Timer restarts.
-        Publishers.CombineLatest(
-            $activeRoom.map { $0?.members.count ?? 0 }.removeDuplicates(),
-            networkQualityMonitor.$connectionGrade
-        )
-        .sink { [weak self] _, _ in
-            self?.recalculateAdaptivePollingInterval()
-        }
-        .store(in: &cancellables)
 
         // Rebuild squadMembersArray only when member count changes (same guard as above).
         $activeRoom
@@ -785,6 +770,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         transport.getValue(at: roomPath(roomId: cleanId)) { [weak self] value in
             guard let self = self else { return }
 
+            // SquadRoom's own decoder (SquadRoom.swift) is lenient per-field and per-member, so
+            // this only fails when the node itself is absent/not an object — a genuine "no such
+            // room", not "a populated room had one odd entry" (see SquadMemberRoster).
             guard let value = value,
                   JSONSerialization.isValidJSONObject(value),
                   let data = try? JSONSerialization.data(withJSONObject: value),
@@ -1223,35 +1211,21 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     /// under it, including that unrelated heartbeat, forcing every client to redecode the entire
     /// room (including the full members dict) on every refresh cycle for no reason.
     private func applyMembersSnapshot(_ value: Any?, roomId: String) {
-        guard let value = value else { return }
+        guard let value = value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let decodedMembers = try? JSONDecoder().decode(SquadMemberRoster.self, from: data) else { return }
 
-        if JSONSerialization.isValidJSONObject(value),
-           let data = try? JSONSerialization.data(withJSONObject: value),
-           let decodedMembers = try? JSONDecoder().decode([String: SquadMember].self, from: data) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, var current = self.activeRoom else { return }
-                self.mergeRemoteMembers(decodedMembers, into: &current)
-                self.activeRoom = current
-            }
-            return
-        }
-
-        guard let membersJson = value as? [String: [String: Any]] else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, var current = self.activeRoom else { return }
-            var parsedMembers: [String: SquadMember] = [:]
-            for (memberId, memberData) in membersJson {
-                let callsign = memberData["csn"] as? String ?? ""
-                let role = MemberRole(rawValue: memberData["rol"] as? String ?? "") ?? .player
-                parsedMembers[memberId] = SquadMember(
-                    id: memberId,
-                    callsign: callsign,
-                    latitude: 0.0,
-                    longitude: 0.0,
-                    role: role
-                )
-            }
-            self.mergeRemoteMembers(parsedMembers, into: &current)
+            guard let self = self else { return }
+            // A listener re-attach (e.g. evaluateListenerGate's cold-launch reconnect via
+            // savedRoomName) can deliver this snapshot before activeRoom has ever been
+            // populated. Construct the room here instead of dropping the snapshot — mirrors
+            // applyRoomSnapshot's nil-handling — otherwise a whole room's worth of members
+            // silently vanishes and is never retried unless every member happens to send
+            // fresh telemetry afterward.
+            var current = self.activeRoom ?? SquadRoom(id: roomId, hostId: "")
+            self.mergeRemoteMembers(decodedMembers.members, into: &current)
             self.activeRoom = current
         }
     }
@@ -1259,60 +1233,22 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     /// Decodes and merges a full /r/{roomId} snapshot into activeRoom. Used only by the one-shot
     /// fetch (fetchRoomDetails, on initial connect) that needs the room's metadata (host, capacity,
     /// pinHash, expireAt) — the persistent realtime listener uses applyMembersSnapshot instead.
+    /// SquadRoom's decoder (see SquadRoom.swift/SquadMember.swift) is lenient per-field and
+    /// per-member by construction, so this fails only when the node itself is missing or isn't an
+    /// object — never because one member in a populated room had an odd shape.
     private func applyRoomSnapshot(_ value: Any?, roomId: String) {
-        guard let value = value else { return }
+        guard let value = value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let decodedRoom = try? JSONDecoder().decode(SquadRoom.self, from: data) else { return }
 
-        if JSONSerialization.isValidJSONObject(value),
-           let data = try? JSONSerialization.data(withJSONObject: value),
-           let decodedRoom = try? JSONDecoder().decode(SquadRoom.self, from: data) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                if var current = self.activeRoom {
-                    self.mergeRemoteMembers(decodedRoom.members, into: &current)
-                    self.activeRoom = current
-                } else {
-                    self.activeRoom = decodedRoom
-                }
-            }
-            return
-        }
-
-        guard let json = value as? [String: Any] else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            var parsedMembers: [String: SquadMember] = [:]
-            if let membersJson = json["m"] as? [String: [String: Any]] {
-                for (memberId, memberData) in membersJson {
-                    let callsign = memberData["csn"] as? String ?? ""
-                    let role = MemberRole(rawValue: memberData["rol"] as? String ?? "") ?? .player
-                    let member = SquadMember(
-                        id: memberId,
-                        callsign: callsign,
-                        latitude: 0.0,
-                        longitude: 0.0,
-                        role: role
-                    )
-                    parsedMembers[memberId] = member
-                }
-            }
             if var current = self.activeRoom {
-                self.mergeRemoteMembers(parsedMembers, into: &current)
+                self.mergeRemoteMembers(decodedRoom.members, into: &current)
                 self.activeRoom = current
             } else {
-                let hostId = json["hst"] as? String ?? ""
-                let capacity = json["cap"] as? Int ?? AppConstants.Subscription.freeTierMaxCapacity
-                let maxTactical = json["mti"] as? Int ?? AppConstants.Subscription.freeTierMaxTacticalIndicators
-                let pinHash = json["pin"] as? String ?? ""
-                let expireAt = json["exp"] as? Double ?? (Date().timeIntervalSince1970 + AppConstants.Timing.Inactivity.ttlDurationSeconds)
-                self.activeRoom = SquadRoom(
-                    id: roomId,
-                    hostId: hostId,
-                    maxCapacity: capacity,
-                    maxTacticalIndicators: maxTactical,
-                    pinHash: pinHash,
-                    expireAt: expireAt,
-                    members: parsedMembers
-                )
+                self.activeRoom = decodedRoom
             }
         }
     }
@@ -1332,48 +1268,26 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self.pendingMemberFetches.remove(fetchKey)
             }
-            guard let value = value else { return }
+            // SquadMember's decoder is per-field lenient (see SquadMember.swift), so this only
+            // fails when the node itself is missing or isn't an object at all.
+            guard let value = value,
+                  JSONSerialization.isValidJSONObject(value),
+                  let data = try? JSONSerialization.data(withJSONObject: value),
+                  let remoteMember = try? JSONDecoder().decode(SquadMember.self, from: data) else { return }
 
-            if JSONSerialization.isValidJSONObject(value),
-               let data = try? JSONSerialization.data(withJSONObject: value),
-               let remoteMember = try? JSONDecoder().decode(SquadMember.self, from: data) {
-                DispatchQueue.main.async {
-                    if !remoteMember.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.knownCallsigns[cleanMemberId] = remoteMember.callsign
-                    }
-                    if var currentRoom = self.activeRoom, currentRoom.id == cleanRoomId {
-                        if var existing = currentRoom.members[cleanMemberId] {
-                            existing.callsign = remoteMember.callsign
-                            existing.role = remoteMember.role
-                            currentRoom.members[cleanMemberId] = existing
-                        } else {
-                            currentRoom.members[cleanMemberId] = remoteMember
-                        }
-                        self.activeRoom = currentRoom
-                    }
+            DispatchQueue.main.async {
+                if !remoteMember.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    self.knownCallsigns[cleanMemberId] = remoteMember.callsign
                 }
-            } else if let json = value as? [String: Any], let callsign = json["csn"] as? String {
-                let role = MemberRole(rawValue: json["rol"] as? String ?? "") ?? .player
-                DispatchQueue.main.async {
-                    if !callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        self.knownCallsigns[cleanMemberId] = callsign
+                if var currentRoom = self.activeRoom, currentRoom.id == cleanRoomId {
+                    if var existing = currentRoom.members[cleanMemberId] {
+                        existing.callsign = remoteMember.callsign
+                        existing.role = remoteMember.role
+                        currentRoom.members[cleanMemberId] = existing
+                    } else {
+                        currentRoom.members[cleanMemberId] = remoteMember
                     }
-                    if var currentRoom = self.activeRoom, currentRoom.id == cleanRoomId {
-                        if var existing = currentRoom.members[cleanMemberId] {
-                            existing.callsign = callsign
-                            existing.role = role
-                            currentRoom.members[cleanMemberId] = existing
-                        } else {
-                            currentRoom.members[cleanMemberId] = SquadMember(
-                                id: cleanMemberId,
-                                callsign: callsign,
-                                latitude: 0.0,
-                                longitude: 0.0,
-                                role: role
-                            )
-                        }
-                        self.activeRoom = currentRoom
-                    }
+                    self.activeRoom = currentRoom
                 }
             }
         }
@@ -1381,40 +1295,17 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
     // MARK: - Telemetry Stream Subscription (Realtime Listeners)
 
-    public func recalculateAdaptivePollingInterval() {
-        guard isWristActive else {
-            let newInterval = AppConstants.Timing.AdaptiveRate.wristDownPollingInterval
-            if abs(self.pollingInterval - newInterval) > AppConstants.Timing.AdaptiveRate.intervalChangeEpsilon {
-                self.pollingInterval = newInterval
-            }
-            return
-        }
-
-        let memberCount = activeRoom?.members.count ?? 0
-        let grade = networkQualityMonitor.connectionGrade
-
-        // Active rate calculated from constant bandwidth player equation: R_max(P) = R_base * min(1.0, N_threshold / P)
-        let calculatedInterval = FirebaseSyncManager.solveUpdateInterval(playerCount: memberCount)
-
-        let newInterval: TimeInterval
-        if grade == .critical || grade == .offline {
-            newInterval = max(AppConstants.Timing.AdaptiveRate.criticalInterval, calculatedInterval)
-        } else if grade == .poor {
-            newInterval = max(AppConstants.Timing.AdaptiveRate.poorInterval, calculatedInterval)
-        } else {
-            newInterval = calculatedInterval
-        }
-
-        if abs(self.pollingInterval - newInterval) > AppConstants.Timing.AdaptiveRate.intervalChangeEpsilon {
-            self.pollingInterval = newInterval
-        }
-    }
-
-    /// Updates wrist viewing activity and triggers an Instant Wake Burst upon wrist raise.
-    public func setWristActive(_ active: Bool) {
+    /// Updates wrist viewing activity and triggers an Instant Wake Burst upon wrist raise. Called
+    /// only from `GameStateManager.setWristActive` — this class's `isWristActive` is a private
+    /// implementation detail used solely for the wake-burst safety-net check below, not a
+    /// canonical externally-read flag (see `GameStateManager.isWristActive`'s doc comment). Note
+    /// this does NOT gate outbound telemetry upload rate — self-location must keep uploading
+    /// (subject to the delta-gate/refresh-interval/network-quality equation) regardless of
+    /// whether this device's wrist/screen is active, since other players still need to see this
+    /// device's position while its own screen is off.
+    func setWristActive(_ active: Bool) {
         let wasActive = isWristActive
         self.isWristActive = active
-        recalculateAdaptivePollingInterval()
 
         // Instant Wake Burst: When wrist is raised, immediately fetch telemetry to eliminate visual lag.
         // Also fires if wrist was already active but listeners aren't currently attached (safety

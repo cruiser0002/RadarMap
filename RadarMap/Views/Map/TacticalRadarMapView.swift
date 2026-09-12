@@ -137,11 +137,13 @@ public struct TacticalRadarMapView: View {
                                 Text(AppConstants.Version.formattedVersionString)
                                     .font(.system(size: 9, weight: .bold, design: .monospaced))
                                     .foregroundColor(uiThemeColor.opacity(0.6))
-                                Text(gameState.debugStatusString)
-                                    .font(.system(size: 16, weight: .bold, design: .monospaced))
-                                    .foregroundColor(uiThemeColor.opacity(0.6))
-                                    .lineLimit(1)
-                                    .fixedSize(horizontal: true, vertical: false)
+                                TimelineView(.periodic(from: .now, by: 1.0)) { _ in
+                                    Text(gameState.debugStatusString)
+                                        .font(.system(size: 16, weight: .bold, design: .monospaced))
+                                        .foregroundColor(uiThemeColor.opacity(0.6))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                }
                             }
                             #endif
                         }
@@ -153,11 +155,13 @@ public struct TacticalRadarMapView: View {
                                 Text(AppConstants.Version.formattedVersionString)
                                     .font(.system(size: 6, weight: .bold, design: .monospaced))
                                     .foregroundColor(uiThemeColor.opacity(0.55))
-                                Text(gameState.debugStatusString)
-                                    .font(.system(size: 11, weight: .bold, design: .monospaced))
-                                    .foregroundColor(uiThemeColor.opacity(0.55))
-                                    .lineLimit(1)
-                                    .fixedSize(horizontal: true, vertical: false)
+                                TimelineView(.periodic(from: .now, by: 1.0)) { _ in
+                                    Text(gameState.debugStatusString)
+                                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                                        .foregroundColor(uiThemeColor.opacity(0.55))
+                                        .lineLimit(1)
+                                        .fixedSize(horizontal: true, vertical: false)
+                                }
                             }
                             #endif
                         }

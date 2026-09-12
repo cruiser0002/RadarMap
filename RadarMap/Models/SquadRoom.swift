@@ -53,16 +53,21 @@ public struct SquadRoom: Identifiable, Codable, Equatable {
         try container.encode(members, forKey: .members)
     }
 
+    /// Every field is read with `try?`, and members go through `SquadMemberRoster` rather than a
+    /// direct `[String: SquadMember]` decode — see SquadMember.swift's doc comment on
+    /// `SquadMemberRoster` for why a synthesized dictionary decode is the wrong default here.
+    /// A room read from RTDB should never fail outright just because one field or one member
+    /// doesn't match this client's exact expectations at the instant of the read.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = (try container.decodeIfPresent(String.self, forKey: .id) ?? "SQUAD").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        hostId = try container.decodeIfPresent(String.self, forKey: .hostId) ?? "HOST"
-        maxCapacity = try container.decodeIfPresent(Int.self, forKey: .maxCapacity) ?? AppConstants.Subscription.freeTierMaxCapacity
-        maxTacticalIndicators = try container.decodeIfPresent(Int.self, forKey: .maxTacticalIndicators) ?? AppConstants.Subscription.freeTierMaxTacticalIndicators
-        expireAt = try container.decodeIfPresent(TimeInterval.self, forKey: .expireAt)
+        id = ((try? container.decode(String.self, forKey: .id)) ?? "SQUAD").trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        hostId = (try? container.decode(String.self, forKey: .hostId)) ?? "HOST"
+        maxCapacity = (try? container.decode(Int.self, forKey: .maxCapacity)) ?? AppConstants.Subscription.freeTierMaxCapacity
+        maxTacticalIndicators = (try? container.decode(Int.self, forKey: .maxTacticalIndicators)) ?? AppConstants.Subscription.freeTierMaxTacticalIndicators
+        expireAt = (try? container.decode(TimeInterval.self, forKey: .expireAt))
             ?? (Date().timeIntervalSince1970 + AppConstants.Timing.Inactivity.ttlDurationSeconds)
-        pinHash = try container.decodeIfPresent(String.self, forKey: .pinHash) ?? ""
-        let rawMembers = try container.decodeIfPresent([String: SquadMember].self, forKey: .members) ?? [:]
+        pinHash = (try? container.decode(String.self, forKey: .pinHash)) ?? ""
+        let rawMembers = (try? container.decode(SquadMemberRoster.self, forKey: .members))?.members ?? [:]
         var sanitizedMembers: [String: SquadMember] = [:]
         for (memberKey, memberVal) in rawMembers {
             if memberVal.id != memberKey {

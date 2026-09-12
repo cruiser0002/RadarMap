@@ -8,6 +8,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     public static let shared = WatchConnectivityManager()
     
     @Published public var isSessionSupported: Bool = false
+    @Published public var isActivated: Bool = false
     @Published public var isReachable: Bool = false
     @Published public var isPaired: Bool = false
     @Published public var isWatchAppInstalled: Bool = false
@@ -24,12 +25,46 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     // Last-known counterpart low-speed snapshot received
     public private(set) var peerLS: LowSpeedSnapshot?
     
-    // Last-known counterpart high-speed payload
-    public private(set) var latestRemoteActiveUntil: TimeInterval = 0
-    public private(set) var latestRemoteTelemetryJson: String = "{}"
-    public private(set) var latestRemoteHeartRate: Double = 75.0
+    // High-speed payloads: single source of truth for activeUntil and live streaming.
+    // There is no other local storage of activeUntil.
+    @Published public var w2pHS: WatchToPhoneHighSpeed = WatchToPhoneHighSpeed()
+    @Published public var p2wHS: PhoneToWatchHighSpeed = PhoneToWatchHighSpeed()
     
-    /// True if the Watch's active lease is currently valid (Phone.Time <= w2p_hs.active_until)
+    // Wire aliases
+    public var w2p_hs: WatchToPhoneHighSpeed {
+        get { w2pHS }
+        set { w2pHS = newValue }
+    }
+    public var p2w_hs: PhoneToWatchHighSpeed {
+        get { p2wHS }
+        set { p2wHS = newValue }
+    }
+    
+    /// Companion's advertised lease expiration timestamp (evaluated directly from inbound HS).
+    /// Zero local storage.
+    public var companionActiveUntil: TimeInterval {
+        localRole == .phone ? w2pHS.activeUntil : p2wHS.activeUntil
+    }
+    
+    /// Backward-compatibility computed accessor for companion's activeUntil.
+    public var latestRemoteActiveUntil: TimeInterval {
+        companionActiveUntil
+    }
+    
+    public var latestAdvertisedWatchHS: WatchToPhoneHighSpeed? {
+        localRole == .watch ? w2pHS : nil
+    }
+    public var latestAdvertisedPhoneHS: PhoneToWatchHighSpeed? {
+        localRole == .phone ? p2wHS : nil
+    }
+    public var latestRemoteTelemetryJson: String {
+        localRole == .phone ? w2pHS.remotePlayerTelemetryJson : p2wHS.remotePlayerTelemetryJson
+    }
+    public var latestRemoteHeartRate: Double {
+        localRole == .phone ? w2pHS.heartRate : 75.0
+    }
+    
+    /// True if the companion's active lease is currently valid
     @Published public var isWatchLeaseActive: Bool = false
     
     // Convergence tracking
@@ -46,9 +81,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     public var onHighSpeedHeartRateReceived: ((_ hr: Double) -> Void)?
     public var onReachabilityChanged: ((Bool) -> Void)?
     public var onWatchLeaseStatusChanged: ((Bool) -> Void)?
-    public private(set) var latestAdvertisedWatchHS: WatchToPhoneHighSpeed?
     public var onWatchHighSpeedAdvertised: ((WatchToPhoneHighSpeed) -> Void)?
-    public private(set) var latestAdvertisedPhoneHS: PhoneToWatchHighSpeed?
     public var onPhoneHighSpeedAdvertised: ((PhoneToWatchHighSpeed) -> Void)?
     
     // Persistence keys
@@ -105,6 +138,8 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         if WCSession.isSupported() {
             self.isSessionSupported = true
             let session = WCSession.default
+            self.isActivated = (session.activationState == .activated)
+            self.isReachable = session.isReachable
             session.delegate = self
             session.activate()
         }
@@ -136,14 +171,32 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         leaseTimer = Timer.publish(every: 1.0, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
-                guard let self = self else { return }
-                let now = Date().timeIntervalSince1970
-                let active = (self.latestRemoteActiveUntil > now)
-                if self.isWatchLeaseActive != active {
-                    self.isWatchLeaseActive = active
-                    self.onWatchLeaseStatusChanged?(active)
-                }
+                self?.evaluateLeaseStatus()
             }
+    }
+    
+    public func evaluateLeaseStatus() {
+        let now = Date().timeIntervalSince1970
+        let active = (companionActiveUntil > now)
+        if isWatchLeaseActive != active {
+            isWatchLeaseActive = active
+            onWatchLeaseStatusChanged?(active)
+        }
+    }
+
+    /// Corrects `isWatchLeaseActive` if it's stuck `true` past the companion's actual advertised
+    /// deadline. `isWatchLeaseActive` is otherwise only refreshed by the 1Hz `leaseTimer` (or a
+    /// fresh HS payload arriving) — a one-off decision point like `evaluateListenerGate` or
+    /// `hasNetworkOwnership` that runs between timer ticks (or while the timer is suspended, e.g.
+    /// backgrounded on watchOS) can see a lease that expired moments ago but is still reported
+    /// active, which can leave listener/ownership handoff stuck. Deliberately never flips the flag
+    /// the other direction (false -> true): with no real advertised deadline yet
+    /// (`companionActiveUntil == 0`), an externally-set `true` (e.g. direct test injection) is left
+    /// alone rather than treated as expired.
+    public func correctStaleLeaseExpiry() {
+        guard isWatchLeaseActive, companionActiveUntil > 0, companionActiveUntil <= Date().timeIntervalSince1970 else { return }
+        isWatchLeaseActive = false
+        onWatchLeaseStatusChanged?(false)
     }
     
     // MARK: - State Mutation & Low-Speed Updates
@@ -204,32 +257,55 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     /// only the actual I/O (UserDefaults write, WCSession publish) is handed to `contextQueue`,
     /// operating on a captured copy so it never touches `localLS`/`peerLS` directly.
     private func persistAndPublishLocalState() {
+        checkAndTriggerConvergence(local: localLS)
         let snapshot = localLS
         saveLocalState(snapshot)
-        checkAndTriggerConvergence(local: snapshot)
         publishApplicationContext(local: snapshot)
     }
     
     // MARK: - High-Speed Outgoing Stream (Asymmetrical Routing)
     
-    /// Advertises Phone-owned high-speed payload (p2w_hs) via updateApplicationContext.
+    /// Advertises Phone-owned high-speed payload (p2w_hs) strictly via sendMessage.
     public func advertisePhoneHighSpeed(
         remotePlayerTelemetryJson: String = "{}"
     ) {
         guard localRole == .phone else { return }
         let now = Date().timeIntervalSince1970
         let lease = now + AppConstants.WatchConnectivity.activeUntilLeaseDurationSeconds
-        let hs = PhoneToWatchHighSpeed(
-            activeUntil: lease,
-            remotePlayerTelemetryJson: remotePlayerTelemetryJson
-        )
-        self.latestAdvertisedPhoneHS = hs
+        self.p2wHS.activeUntil = lease
+        self.p2wHS.remotePlayerTelemetryJson = remotePlayerTelemetryJson
+        let hs = self.p2wHS
         self.onPhoneHighSpeedAdvertised?(hs)
-        
-        publishApplicationContext(local: localLS, phoneHS: hs)
+
+        #if canImport(WatchConnectivity)
+        guard WCSession.isSupported() else { return }
+        let session = WCSession.default
+        guard session.activationState == .activated else { return }
+        guard session.isReachable else {
+            // Unreachable right when a lease needs to move — the moment this channel is most
+            // likely to matter. sendMessage has nothing to fall back on by itself, so hand the
+            // same lease to the durable context channel instead of dropping it and waiting out
+            // the full TTL (see wcsession-dual-stream-sync's channel-1 guidance).
+            publishHighSpeedFallback()
+            return
+        }
+        var envelope = ApplicationContextEnvelope()
+        envelope.p2wHS = hs
+        if let data = try? JSONEncoder().encode(envelope),
+           let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            session.sendMessage(dict, replyHandler: nil, errorHandler: { [weak self] error in
+                // sendMessage failures (OS-level throttling, delivery timeout, reachability
+                // flipping mid-send, etc.) previously failed silently here — log, and fall back
+                // to the durable context channel so the peer still gets this lease update once
+                // reachable again instead of only self-healing via TTL expiry.
+                print("[WCSession phone] advertisePhoneHighSpeed sendMessage failed: \(error)")
+                DispatchQueue.main.async { self?.publishHighSpeedFallback() }
+            })
+        }
+        #endif
     }
-    
-    /// Advertises Watch-owned high-speed stream (w2p_hs) via sendMessage (with updateApplicationContext fallback).
+
+    /// Advertises Watch-owned high-speed stream (w2p_hs) strictly via sendMessage.
     public func advertiseWatchHighSpeed(
         heartRate: Double,
         remotePlayerTelemetryJson: String = "{}"
@@ -237,35 +313,65 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         guard localRole == .watch else { return }
         let now = Date().timeIntervalSince1970
         let lease = now + AppConstants.WatchConnectivity.activeUntilLeaseDurationSeconds
-        let hs = WatchToPhoneHighSpeed(
-            activeUntil: lease,
-            heartRate: heartRate,
-            remotePlayerTelemetryJson: remotePlayerTelemetryJson
-        )
-        self.latestAdvertisedWatchHS = hs
+        self.w2pHS.activeUntil = lease
+        self.w2pHS.heartRate = heartRate
+        self.w2pHS.remotePlayerTelemetryJson = remotePlayerTelemetryJson
+        let hs = self.w2pHS
         self.onWatchHighSpeedAdvertised?(hs)
-        
-        // `localLS` is only ever touched on the main thread; capture it here (this function is
-        // called from GameStateManager on main) before handing off to the background queue.
-        let localSnapshot = localLS
 
         #if canImport(WatchConnectivity)
+        guard WCSession.isSupported() else { return }
         let session = WCSession.default
-        if session.activationState == .activated && session.isReachable {
-            var envelope = ApplicationContextEnvelope()
-            envelope.w2pHS = hs
-            if let data = try? JSONEncoder().encode(envelope),
-               let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-                session.sendMessage(dict, replyHandler: nil) { [weak self] _ in
-                    // If sendMessage drops, fallback to context update
-                    self?.publishApplicationContext(local: localSnapshot, watchHS: hs)
-                }
-                return
-            }
+        guard session.activationState == .activated else { return }
+        guard session.isReachable else {
+            publishHighSpeedFallback()
+            return
+        }
+        var envelope = ApplicationContextEnvelope()
+        envelope.w2pHS = hs
+        if let data = try? JSONEncoder().encode(envelope),
+           let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            session.sendMessage(dict, replyHandler: nil, errorHandler: { [weak self] error in
+                print("[WCSession watch] advertiseWatchHighSpeed sendMessage failed: \(error)")
+                DispatchQueue.main.async { self?.publishHighSpeedFallback() }
+            })
         }
         #endif
+    }
 
-        publishApplicationContext(local: localSnapshot, watchHS: hs)
+    /// Fallback path for the fast/ephemeral HS channel (the `activeUntil` lease + live telemetry)
+    /// when `sendMessage` isn't available (peer unreachable) or fails outright — exactly the
+    /// window where a phone<->watch active-device handoff is most likely to be in flight.
+    /// `updateApplicationContext` coalesces to "latest wins" and is delivered once the peer
+    /// wakes/reconnects, giving it a much tighter bound on seeing the updated lease than waiting
+    /// out `correctStaleLeaseExpiry`'s local TTL backstop alone. Always includes the current
+    /// `localLS` alongside the HS payload — `updateApplicationContext` replaces the whole pending
+    /// context, so a fallback that sent HS alone would silently erase the durable LS state a peer
+    /// bootstrapping from `receivedApplicationContext` depends on.
+    /// Must be called on the main thread — reads `localLS`/`p2wHS`/`w2pHS`, all main-thread-owned.
+    private func publishHighSpeedFallback() {
+        var envelope = ApplicationContextEnvelope()
+        if localRole == .phone {
+            envelope.p2wLS = localLS
+            envelope.p2wHS = p2wHS
+        } else {
+            envelope.w2pLS = localLS
+            envelope.w2pHS = w2pHS
+        }
+        contextQueue.async { [weak self] in
+            guard let self = self else { return }
+            #if canImport(WatchConnectivity)
+            guard WCSession.isSupported() else { return }
+            let session = WCSession.default
+            guard session.activationState == .activated else { return }
+            #if os(iOS)
+            guard session.isPaired && session.isWatchAppInstalled else { return }
+            #endif
+            guard let data = try? JSONEncoder().encode(envelope),
+                  let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+            try? session.updateApplicationContext(dict)
+            #endif
+        }
     }
 
     // MARK: - Convergence & Rolling sync_ts
@@ -274,18 +380,22 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     /// touched on main.
     private func checkAndTriggerConvergence(local: LowSpeedSnapshot) {
         guard let peer = peerLS else {
-            // No peer snapshot seen yet: start rolling sync_ts to announce local state
+            // No peer snapshot seen yet: roll sync_ts immediately and start rolling pump to announce local state
+            localLS.syncTs = Date().timeIntervalSince1970
             startRollingSync()
             return
         }
 
         if local.isDomainEquivalent(to: peer) {
-            // Fully converged
+            // Fully converged: discrepancy resolved
             stopRollingSync()
         } else {
             // Discrepancy exists: evaluate whether local device owns any winning structure
             let (_, localWins) = MergeEngine.merge(local: local, peer: peer, localDevice: localRole)
             if localWins {
+                // Roll sync_ts immediately whenever a change causes a discrepancy where local wins
+                localLS.syncTs = Date().timeIntervalSince1970
+                // Continue rolling until discrepancy is resolved
                 startRollingSync()
             } else {
                 stopRollingSync()
@@ -341,18 +451,10 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     
     // MARK: - Publishing to WCSession
     
-    private var lastPublishedPhoneHS: PhoneToWatchHighSpeed?
-    private var lastPublishedWatchHS: WatchToPhoneHighSpeed?
-    
     /// `local` must be captured by the caller from `localLS` on the main thread beforehand — this
-    /// function itself only touches `contextQueue`-owned state (the WCSession call + the
-    /// last-published HS caches) and never reads `localLS`/`peerLS` directly, so it's safe to
-    /// dispatch onto `contextQueue` regardless of which thread calls it.
-    private func publishApplicationContext(
-        local: LowSpeedSnapshot,
-        phoneHS: PhoneToWatchHighSpeed? = nil,
-        watchHS: WatchToPhoneHighSpeed? = nil
-    ) {
+    /// function itself only touches `contextQueue`-owned state (the WCSession call) and never reads
+    /// `localLS`/`peerLS` directly, so it's safe to dispatch onto `contextQueue` regardless of which thread calls it.
+    private func publishApplicationContext(local: LowSpeedSnapshot) {
         contextQueue.async { [weak self] in
             guard let self = self else { return }
             #if canImport(WatchConnectivity)
@@ -363,16 +465,11 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
             guard session.isPaired && session.isWatchAppInstalled else { return }
             #endif
 
-            if let phs = phoneHS { self.lastPublishedPhoneHS = phs }
-            if let whs = watchHS { self.lastPublishedWatchHS = whs }
-
             var envelope = ApplicationContextEnvelope()
             if self.localRole == .phone {
                 envelope.p2wLS = local
-                envelope.p2wHS = self.lastPublishedPhoneHS
             } else {
                 envelope.w2pLS = local
-                envelope.w2pHS = self.lastPublishedWatchHS
             }
 
             guard let data = try? JSONEncoder().encode(envelope),
@@ -393,28 +490,43 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     /// an arbitrary background queue, but `localLS`/`peerLS` are only ever touched on main, so the
     /// whole merge is dispatched there rather than to `contextQueue` (which is reserved for
     /// snapshot-parameterized I/O that doesn't need to read either property directly).
-    public func handleIncomingApplicationContext(_ dict: [String: Any]) {
+    public func handleIncomingApplicationContext(_ dict: [String: Any], isReplayedContext: Bool = false) {
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
-              let envelope = try? JSONDecoder().decode(ApplicationContextEnvelope.self, from: data) else { return }
+              var envelope = try? JSONDecoder().decode(ApplicationContextEnvelope.self, from: data) else { return }
+
+        // `session.receivedApplicationContext` is cached by the OS and redelivered verbatim on
+        // activation, even across a cold relaunch or an app that force-quit mid-session — so a
+        // stale `login_cycle` from a previous session can resurface here and get adopted as if it
+        // were a live handshake. Live pushes (didReceiveApplicationContext/didReceiveMessage) are
+        // never replayed this way, so only the activation-time replay needs sanitizing.
+        if isReplayedContext {
+            envelope.p2wLS?.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
+            envelope.w2pLS?.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
+        }
 
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
+            #if DEBUG
+            print("[WCSession \(self.localRole)] handleIncomingApplicationContext: p2wHS=\(envelope.p2wHS != nil), w2pHS=\(envelope.w2pHS != nil)")
+            #endif
 
             // 1. Process High-Speed Payloads (Unidirectional)
             if self.localRole == .watch, let p2wHS = envelope.p2wHS {
-                self.latestRemoteActiveUntil = p2wHS.activeUntil
-                self.latestRemoteTelemetryJson = p2wHS.remotePlayerTelemetryJson
+                self.p2wHS = p2wHS
+                let active = (p2wHS.activeUntil > Date().timeIntervalSince1970)
+                if self.isWatchLeaseActive != active {
+                    self.isWatchLeaseActive = active
+                    self.onWatchLeaseStatusChanged?(active)
+                }
                 self.onHighSpeedTelemetryReceived?(p2wHS.remotePlayerTelemetryJson)
             } else if self.localRole == .phone, let w2pHS = envelope.w2pHS {
-                self.latestRemoteActiveUntil = w2pHS.activeUntil
-                self.latestRemoteHeartRate = w2pHS.heartRate
+                self.w2pHS = w2pHS
                 let active = (w2pHS.activeUntil > Date().timeIntervalSince1970)
                 if self.isWatchLeaseActive != active {
                     self.isWatchLeaseActive = active
                     self.onWatchLeaseStatusChanged?(active)
                 }
                 if !w2pHS.remotePlayerTelemetryJson.isEmpty && w2pHS.remotePlayerTelemetryJson != "{}" {
-                    self.latestRemoteTelemetryJson = w2pHS.remotePlayerTelemetryJson
                     self.onHighSpeedTelemetryReceived?(w2pHS.remotePlayerTelemetryJson)
                 }
                 self.onHighSpeedHeartRateReceived?(w2pHS.heartRate)
@@ -478,6 +590,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
 extension WatchConnectivityManager: WCSessionDelegate {
     public func session(_ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState, error: Error?) {
         DispatchQueue.main.async {
+            self.isActivated = (activationState == .activated)
             self.isReachable = session.isReachable
             self.onReachabilityChanged?(session.isReachable)
             #if os(iOS)
@@ -489,7 +602,7 @@ extension WatchConnectivityManager: WCSessionDelegate {
         if activationState == .activated {
             let receivedContext = session.receivedApplicationContext
             if !receivedContext.isEmpty {
-                handleIncomingApplicationContext(receivedContext)
+                handleIncomingApplicationContext(receivedContext, isReplayedContext: true)
             } else {
                 DispatchQueue.main.async { [weak self] in
                     guard let self = self else { return }
@@ -501,6 +614,7 @@ extension WatchConnectivityManager: WCSessionDelegate {
 
     public func sessionReachabilityDidChange(_ session: WCSession) {
         DispatchQueue.main.async {
+            self.isActivated = (session.activationState == .activated)
             self.isReachable = session.isReachable
             self.onReachabilityChanged?(session.isReachable)
         }
@@ -512,9 +626,16 @@ extension WatchConnectivityManager: WCSessionDelegate {
     }
     
     #if os(iOS)
-    public func sessionDidBecomeInactive(_ session: WCSession) { }
+    public func sessionDidBecomeInactive(_ session: WCSession) {
+        DispatchQueue.main.async {
+            self.isActivated = (session.activationState == .activated)
+        }
+    }
     
     public func sessionDidDeactivate(_ session: WCSession) {
+        DispatchQueue.main.async {
+            self.isActivated = false
+        }
         WCSession.default.activate()
     }
     
@@ -532,6 +653,37 @@ extension WatchConnectivityManager: WCSessionDelegate {
     
     public func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         handleIncomingApplicationContext(message)
+    }
+}
+#endif
+
+#if DEBUG
+extension WatchConnectivityManager {
+    /// Live re-read of WCSession state for the debug HUD only. `isActivated`/`isReachable` are
+    /// cached and only updated inside WCSessionDelegate callbacks, which don't fire for
+    /// display-only transitions (e.g. Always-On dimming) — so the debug HUD can show a stale
+    /// value. These bypass the cache and read `WCSession.default` directly each time the debug
+    /// string is recomputed (every second, via the HUD's own TimelineView). Falls back to the
+    /// cached `isActivated`/`isReachable` when `WCSession.isSupported()` is false (e.g. the
+    /// `swift test` macOS host, where tests inject those directly and there is no real session to
+    /// read), preserving existing test coverage. Not used by any production logic. Deleting this
+    /// whole extension fully reverts this change.
+    public var debugLiveIsActivated: Bool {
+        #if canImport(WatchConnectivity)
+        guard WCSession.isSupported() else { return isActivated }
+        return WCSession.default.activationState == .activated
+        #else
+        return isActivated
+        #endif
+    }
+
+    public var debugLiveIsReachable: Bool {
+        #if canImport(WatchConnectivity)
+        guard WCSession.isSupported() else { return isReachable }
+        return WCSession.default.isReachable
+        #else
+        return isReachable
+        #endif
     }
 }
 #endif

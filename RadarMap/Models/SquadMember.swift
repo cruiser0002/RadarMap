@@ -126,21 +126,28 @@ public struct SquadMember: Identifiable, Codable, Equatable {
         try container.encode(role, forKey: .role)
     }
 
+    /// Every field below is read with `try?` rather than `decodeIfPresent`+`try`: RTDB is a live,
+    /// multi-writer store, so a field can be absent, mid-write, or a shape this client doesn't
+    /// expect (a different producer, a schema bump, a partial flush) at the instant this read
+    /// lands. `decodeIfPresent` still throws — aborting the whole member, and via the roster
+    /// decode below, every *other* member in the same snapshot — the moment a present field's
+    /// type doesn't match; `try?` degrades that single field to its default instead. Surviving a
+    /// malformed field is the normal path here, not a fallback bolted on afterward.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decodeIfPresent(String.self, forKey: .id) ?? GameStateManager.generateShortMemberId()
-        callsign = try container.decodeIfPresent(String.self, forKey: .callsign) ?? ""
-        latitude = try container.decodeIfPresent(Double.self, forKey: .latitude) ?? 0.0
-        longitude = try container.decodeIfPresent(Double.self, forKey: .longitude) ?? 0.0
-        altitude = try container.decodeIfPresent(Double.self, forKey: .altitude)
-        heading = try container.decodeIfPresent(Double.self, forKey: .heading) ?? 0.0
-        heartRate = try container.decodeIfPresent(Double.self, forKey: .heartRate) ?? AppConstants.Health.defaultRestingHeartRate
-        batteryLevel = try container.decodeIfPresent(Double.self, forKey: .batteryLevel) ?? AppConstants.UI.defaultBatteryLevel
-        lastUpdatedTimestamp = try container.decodeIfPresent(TimeInterval.self, forKey: .lastUpdatedTimestamp) ?? Date().timeIntervalSince1970
-        sequenceNumber = try container.decodeIfPresent(Int64.self, forKey: .sequenceNumber) ?? 0
-        status = try container.decodeIfPresent(MemberStatus.self, forKey: .status) ?? .active
-        role = try container.decodeIfPresent(MemberRole.self, forKey: .role) ?? .player
-        colorHex = try container.decodeIfPresent(String.self, forKey: .colorHex) ?? AppConstants.UI.defaultTacticalColorHex
+        id = (try? container.decode(String.self, forKey: .id)) ?? GameStateManager.generateShortMemberId()
+        callsign = (try? container.decode(String.self, forKey: .callsign)) ?? ""
+        latitude = (try? container.decode(Double.self, forKey: .latitude)) ?? 0.0
+        longitude = (try? container.decode(Double.self, forKey: .longitude)) ?? 0.0
+        altitude = try? container.decode(Double.self, forKey: .altitude)
+        heading = (try? container.decode(Double.self, forKey: .heading)) ?? 0.0
+        heartRate = (try? container.decode(Double.self, forKey: .heartRate)) ?? AppConstants.Health.defaultRestingHeartRate
+        batteryLevel = (try? container.decode(Double.self, forKey: .batteryLevel)) ?? AppConstants.UI.defaultBatteryLevel
+        lastUpdatedTimestamp = (try? container.decode(TimeInterval.self, forKey: .lastUpdatedTimestamp)) ?? Date().timeIntervalSince1970
+        sequenceNumber = (try? container.decode(Int64.self, forKey: .sequenceNumber)) ?? 0
+        status = (try? container.decode(MemberStatus.self, forKey: .status)) ?? .active
+        role = (try? container.decode(MemberRole.self, forKey: .role)) ?? .player
+        colorHex = (try? container.decode(String.self, forKey: .colorHex)) ?? AppConstants.UI.defaultTacticalColorHex
         lastAnimationDuration = 0.0
         previousLatitude = nil
         previousLongitude = nil
@@ -232,6 +239,36 @@ public struct SquadMember: Identifiable, Codable, Equatable {
     /// Determines whether the member's telemetry is stale relative to a reference date.
     public func isStale(asOf now: Date) -> Bool {
         isStale(updateInterval: SquadMember.defaultUpdateInterval, multiplier: SquadMember.staleTimeoutMultiplier, asOf: now)
+    }
+}
+
+// MARK: - Lenient Roster Decoding
+
+/// Decodes a Firebase roster node (`{memberId: SquadMember}`) one entry at a time so a single
+/// malformed entry drops only itself, never the whole roster. Swift's synthesized
+/// `Dictionary<String, SquadMember>` decoding aborts the entire dictionary the instant any one
+/// value throws — wrong for RTDB, where entries are written and removed independently by
+/// different clients and can be observed mid-flight at any time. This is the only decode path for
+/// a members roster; there is no separate strict/fallback pair to keep in sync.
+public struct SquadMemberRoster: Decodable {
+    public let members: [String: SquadMember]
+
+    private struct DynamicKey: CodingKey {
+        let stringValue: String
+        init?(stringValue: String) { self.stringValue = stringValue }
+        var intValue: Int? { nil }
+        init?(intValue: Int) { nil }
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DynamicKey.self)
+        var result: [String: SquadMember] = [:]
+        for key in container.allKeys {
+            if let member = try? container.decode(SquadMember.self, forKey: key) {
+                result[key.stringValue] = member
+            }
+        }
+        members = result
     }
 }
 

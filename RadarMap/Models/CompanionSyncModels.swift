@@ -142,6 +142,27 @@ public struct PlayerStateSnapshot: Codable, Equatable {
         self.isDeadTs = isDeadTs
     }
 
+    enum CodingKeys: String, CodingKey {
+        case isDead = "is_dead"
+        case legacyIsDead = "isDead"
+        case isDeadTs = "is_dead_ts"
+        case legacyIsDeadTs = "isDeadTs"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.isDead = (try? container.decode(Bool.self, forKey: .isDead)) ??
+                      (try? container.decode(Bool.self, forKey: .legacyIsDead)) ?? false
+        self.isDeadTs = (try? container.decode(TimeInterval.self, forKey: .isDeadTs)) ??
+                        (try? container.decode(TimeInterval.self, forKey: .legacyIsDeadTs)) ?? 0.0
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(isDead, forKey: .isDead)
+        try container.encode(isDeadTs, forKey: .isDeadTs)
+    }
+
     public func isEquivalent(to other: PlayerStateSnapshot) -> Bool {
         return isDead == other.isDead && isDeadTs == other.isDeadTs
     }
@@ -255,6 +276,41 @@ public struct LowSpeedSnapshot: Codable, Equatable {
         self.membership = membership
         self.tactical = tactical
         self.playerState = playerState
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case syncTs = "sync_ts"
+        case legacySyncTs = "syncTs"
+        case config
+        case loginCycle = "login_cycle"
+        case legacyLoginCycle = "loginCycle"
+        case membership
+        case tactical
+        case playerState = "player_state"
+        case legacyPlayerState = "playerState"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.syncTs = (try? container.decode(TimeInterval.self, forKey: .syncTs)) ??
+                      (try? container.decode(TimeInterval.self, forKey: .legacySyncTs)) ?? 0.0
+        self.config = (try? container.decode(ConfigSnapshot.self, forKey: .config)) ?? ConfigSnapshot()
+        self.loginCycle = (try? container.decode(LoginCycleSnapshot.self, forKey: .loginCycle)) ??
+                          (try? container.decode(LoginCycleSnapshot.self, forKey: .legacyLoginCycle)) ?? LoginCycleSnapshot()
+        self.membership = (try? container.decode(MembershipSnapshot.self, forKey: .membership)) ?? MembershipSnapshot()
+        self.tactical = (try? container.decode(TacticalSnapshot.self, forKey: .tactical)) ?? TacticalSnapshot()
+        self.playerState = (try? container.decode(PlayerStateSnapshot.self, forKey: .playerState)) ??
+                           (try? container.decode(PlayerStateSnapshot.self, forKey: .legacyPlayerState)) ?? PlayerStateSnapshot()
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(syncTs, forKey: .syncTs)
+        try container.encode(config, forKey: .config)
+        try container.encode(loginCycle, forKey: .loginCycle)
+        try container.encode(membership, forKey: .membership)
+        try container.encode(tactical, forKey: .tactical)
+        try container.encode(playerState, forKey: .playerState)
     }
 
     /// Checks whether all domain-state structures and their timestamps are equivalent.

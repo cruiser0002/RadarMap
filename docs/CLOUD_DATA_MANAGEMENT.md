@@ -28,6 +28,10 @@ The following centralized constants from [`AppConstants.swift`](../RadarMap/AppC
 
 ---
 
+> [!CAUTION]
+> **Cardinal Invariant: WCSession Purpose & Firebase Decoupling**
+> `WCSession` is strictly and exclusively for local **Phone-to-Watch** companion transport. It must **NEVER** be conflated with or gated upon Firebase cloud connectivity or room sessions. Companion presence leasing (`active_until`) and state sync run continuously whenever the companion devices are active, offline or online.
+
 ## 1. Cloud Data Management Matrix
 
 | | **From: Local Data** | **From: Cloud (Firebase RTDB)** |
@@ -130,6 +134,7 @@ $$R(P) = \begin{cases} R_{\text{base}} & P \le N_{\text{threshold}} \\ R_{\text{
 * **Stale Timeout ($Y \times T$):** Timeout after which associated player graphics turn gray, indicating staleness.
 * **Why linear, not squared:** $R(P)$ must fall off as $1/P$ — not $1/P^2$ — for aggregate bandwidth $P \times R(P)$ to stay constant rather than continue shrinking as the room grows past the threshold. A squared falloff is a *stricter, decreasing* aggregate-bandwidth policy, not an *identical* one; it was evaluated and rejected in favor of the equation above, which is the plan of record.
 * **Tier Boundary:** Pro tier is capped to **12 players** for production sessions today. The equation itself is general and well-defined for any $P > N_{\text{threshold}}$ — the 12-player cap is a current product decision, not a limitation of the equation, and is expected to lift for a future Extended tier.
+* **Network-quality floor:** the $P$-based interval above is additionally floored (never sped up, only ever slowed down) by connection quality — `AppConstants.Timing.AdaptiveRate.criticalInterval` (5.0s) and `.poorInterval` (4.0s) — via `max(floorInterval, calculatedInterval)` in `GameStateManager.recalculateAdaptiveUploadInterval()`. A `critical`/`offline` grade floors to 5.0s, `poor` floors to 4.0s, and `good`/`excellent` pass the $P$-based interval through unmodified. This floor applies only to the outbound upload interval — never to whether this device is wrist-active (see §4 note in COMPANION_DATA_SYNC_MODEL.md: upload rate is independent of `isWristActive`).
 
 | Player Count ($P$) | Tier | Peak Allowed Rate ($R(P)$) | Min Update Interval ($T$) | Refresh Interval ($10 \times T$) | Stale Timeout ($15 \times T$) |
 | :---: | :---: | :---: | :---: | :---: | :---: |

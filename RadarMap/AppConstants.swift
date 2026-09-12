@@ -249,8 +249,7 @@ public enum AppConstants {
             public static let criticalInterval: TimeInterval = 5.0
             public static let poorInterval: TimeInterval = 4.0
             public static let baselineInterval: TimeInterval = 1.0
-            public static let wristDownPollingInterval: TimeInterval = 10.0 // Low power throttle when wrist is down
-            
+
             // Threshold for triggering interval update
             public static let intervalChangeEpsilon: Double = 0.01
         }
@@ -278,7 +277,7 @@ public enum AppConstants {
             /// of this flag — this only controls whether a >= minHeartRateDeltaBpm swing is allowed
             /// to force an early telemetry emit. Flip to false to send HR passively (still gated by
             /// the position delta and 10*T heartbeat fallback) without HR jitter causing extra uploads.
-            public static let heartRateDeltaGatingEnabled: Bool = false
+            public static var heartRateDeltaGatingEnabled: Bool = false
         }
         
         /// Theoretical aggregate bandwidth rate adaptation equation constants & schedule
@@ -309,7 +308,7 @@ public enum AppConstants {
                 return 1.0 / rate
             }
             
-            /// Computes the fallback refresh heartbeat interval (7 * T).
+            /// Computes the fallback refresh heartbeat interval (10 * T).
             public static func refreshInterval(forPlayerCount playerCount: Int) -> TimeInterval {
                 return refreshIntervalMultiplier * updateInterval(forPlayerCount: playerCount)
             }

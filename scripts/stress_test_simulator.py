@@ -203,18 +203,23 @@ class PlayerSpec:
     tactical_payload_bytes: int = 200  # Default tactical marker payload size in bytes
 
 
-DEFAULT_10_PLAYERS: List[Tuple[str, float, int, bool]] = [
-    ("VIPER-1",  4.5, 5, False),   # Point Scout: Fast runner, rock-solid network (★★★★★)
-    ("VIPER-2",  3.0, 5, False),   # Squad Leader: Tactical pacing, rock-solid network (★★★★★)
-    ("GHOST-1",  1.8, 4, False),   # Recon / Sniper: Slow stalker, good cellular (★★★★☆)
-    ("GHOST-2",  2.2, 4, False),   # Spotter: Moderate pace, good cellular (★★★★☆)
-    ("COBRA-1",  5.0, 3, False),   # Assault: High-speed bounding, moderate link (★★★☆☆)
-    ("COBRA-2",  3.5, 3, False),   # Support: Sustained pace, occasional drops (★★★☆☆)
-    ("COBRA-3",  2.8, 3, False),   # Breacher: Medium pace, occasional drops (★★★☆☆)
-    ("EAGLE-1",  4.0, 2, False),   # Flanker 1: Fast movement, poor edge cellular (★★☆☆☆)
-    ("EAGLE-2",  3.2, 2, False),   # Flanker 2: Medium movement, high packet loss (★★☆☆☆)
-    ("WOLF-1",   5.5, 1, False),   # Rear Guard: Fast runner, severe degradation (★☆☆☆☆)
+DEFAULT_12_PLAYERS: List[Tuple[str, float, int, bool]] = [
+    ("VIPER-1",  4.5, 5, False),   # Lead Scout: 4.5 m/s, ~98% uptime, rock-solid (★★★★★)
+    ("VIPER-2",  3.0, 5, False),   # Squad Leader: 3.0 m/s, ~98% uptime, rock-solid (★★★★★)
+    ("GHOST-1",  1.5, 4, False),   # Sniper / Recon: 1.5 m/s, ~92% uptime, occasional drop (★★★★☆)
+    ("GHOST-2",  2.0, 4, False),   # Spotter: 2.0 m/s, ~92% uptime, occasional drop (★★★★☆)
+    ("COBRA-1",  5.0, 3, False),   # Point Assault: 5.0 m/s, ~80% uptime, moderate dropouts (★★★☆☆)
+    ("COBRA-2",  3.5, 3, False),   # Support Gunner: 3.5 m/s, ~80% uptime, moderate dropouts (★★★☆☆)
+    ("COBRA-3",  2.5, 3, False),   # Breacher: 2.5 m/s, ~80% uptime, moderate dropouts (★★★☆☆)
+    ("EAGLE-1",  4.0, 2, False),   # Flanker 1: 4.0 m/s, ~60% uptime, poor cell edge (★★☆☆☆)
+    ("EAGLE-2",  3.0, 2, False),   # Flanker 2: 3.0 m/s, ~60% uptime, high packet loss (★★☆☆☆)
+    ("WOLF-1",   6.0, 2, False),   # Fast Runner: 6.0 m/s, ~60% uptime, frequent outages (★★☆☆☆)
+    ("WOLF-2",   2.0, 1, False),   # Heavy Weapons: 2.0 m/s, ~38% uptime, severe blackouts (★☆☆☆☆)
+    ("WOLF-3",   3.5, 1, False),   # Rear Guard: 3.5 m/s, ~38% uptime, harsh terrain drops (★☆☆☆☆)
 ]
+
+# Backward compatibility alias
+DEFAULT_10_PLAYERS = DEFAULT_12_PLAYERS
 
 
 # MARK: - Network Quality Simulator
@@ -475,7 +480,7 @@ class SimulatedPlayer:
         self.enable_delta_gating = enable_delta_gating
         self.refresh_heartbeat_sec = refresh_heartbeat_sec
         # AES-256-GCM key for this player's telemetry/tactical writes, or None to write plaintext
-        # compact arrays — set per-player from PlayerSpec.encrypted (see DEFAULT_10_PLAYERS).
+        # compact arrays — set per-player from PlayerSpec.encrypted (see DEFAULT_12_PLAYERS).
         self.encryption_key = encryption_key
 
         start_lat = spec.start_lat if spec.start_lat is not None else center_lat
@@ -742,11 +747,12 @@ class StressTestCoordinator:
         self.cleanup_on_stop = cleanup_on_stop
 
         # Constant Bandwidth Rate Adaptation (CLOUD_DATA_MANAGEMENT.md §4)
+        base_rate = (1.0 / tick_interval_sec) if tick_interval_sec > 0 else BASELINE_UPDATE_RATE_HZ
         num_players = max(1, len(players))
         if num_players <= PLAYER_BANDWIDTH_THRESHOLD:
-            self.target_rate_hz = BASELINE_UPDATE_RATE_HZ
+            self.target_rate_hz = base_rate
         else:
-            self.target_rate_hz = BASELINE_UPDATE_RATE_HZ * (float(PLAYER_BANDWIDTH_THRESHOLD) / float(num_players))
+            self.target_rate_hz = base_rate * (float(PLAYER_BANDWIDTH_THRESHOLD) / float(num_players))
 
         self.tick_interval = 1.0 / self.target_rate_hz
         self.refresh_heartbeat_sec = self.tick_interval * REFRESH_HEARTBEAT_MULTIPLIER
@@ -911,6 +917,10 @@ class StressTestCoordinator:
     def disband_room(self):
         """Clean disband of room on Firebase, purging telemetry, tactical markers, and room info."""
         self.teardown_room()
+
+    def leave_room(self):
+        """Alias for disband_room / teardown_room to cleanly exit and purge room."""
+        self.disband_room()
 
     def run(self, duration_sec: Optional[float] = None):
         """Main synchronous multi-player simulation loop."""
@@ -1266,7 +1276,7 @@ def parse_players_table(table_json_str: Optional[str]) -> List[PlayerSpec]:
     if not table_json_str:
         return [
             PlayerSpec(callsign=c, target_avg_speed_mps=s, network_quality=q, encrypted=e)
-            for (c, s, q, e) in DEFAULT_10_PLAYERS
+            for (c, s, q, e) in DEFAULT_12_PLAYERS
         ]
 
     raw = json.loads(table_json_str)
@@ -1303,8 +1313,8 @@ def main():
     parser.add_argument("--num-players", "-n", type=int, default=None, help="Simulate N players (e.g. 60) automatically generating rosters")
     parser.add_argument("--benchmark", choices=["free", "pro"], default=None, help="Preset benchmark tier ('free' = 4 players, 'pro' = 12 players)")
     parser.add_argument("--cost-analysis", action="store_true", help="Print analytical cloud bandwidth and financial report for Blaze plan")
-    parser.add_argument("--lat", type=float, default=37.332331, help="Starting anchor latitude")
-    parser.add_argument("--lon", type=float, default=-122.031219, help="Starting anchor longitude")
+    parser.add_argument("--lat", type=float, default=37.785834, help="Starting anchor latitude")
+    parser.add_argument("--lon", type=float, default=-122.406417, help="Starting anchor longitude")
     parser.add_argument("--room", default="STRESS", help="Squad room name (max 12 alphanumeric chars)")
     parser.add_argument("--pin", default="7788", help="Room PIN (4-16 alphanumeric chars)")
     parser.add_argument("--players", type=str, default=None, help="JSON list of players [[callsign, speed_mps, quality_1_to_5, encrypted], ...] (encrypted is optional, defaults to false)")
@@ -1313,6 +1323,12 @@ def main():
         type=float,
         default=DEFAULT_SIMULATION_DURATION_SEC,
         help="Simulation duration limit in seconds (default 600s = 10 mins; pass 0 or negative for unlimited)",
+    )
+    parser.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="Telemetry broadcast tick interval in seconds (default 1 Hz)",
     )
     parser.add_argument("--marker-prob", type=float, default=0.50, help="Probability (0.0 - 1.0) of placing a marker on stop")
     parser.add_argument("--min-leg-dist", type=float, default=15.0, help="Minimum distance (meters) before direction change (airsoft bound)")
@@ -1348,6 +1364,7 @@ def main():
         database_url=args.database_url,
         credentials_path=args.credentials,
         dry_run=args.dry_run,
+        tick_interval_sec=args.interval,
         marker_probability=args.marker_prob,
         min_leg_dist=args.min_leg_dist,
         max_leg_dist=args.max_leg_dist,

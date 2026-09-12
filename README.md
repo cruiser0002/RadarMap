@@ -21,6 +21,7 @@
   * One-touch Tag Out / Downed status reporting with visual cross-out indicators across the squad map.
   * *Details:* [**`PRIVACY_AND_COMPLIANCE.md`**](docs/PRIVACY_AND_COMPLIANCE.md)
 * ⚡ **WatchConnectivity Companion Synchronization**:
+  * **Completely Decoupled from Web Connections**: ALL WCSession variables and synchronization channels operate continuously offline between Phone and Watch, entirely independent of internet, cellular connection, or Firebase squad room state.
   * Immediate local rendering with persistent context staging in `WCSession`.
   * Dual-stream pipeline: high-speed stream for live sensor data (Phone GPS priority & Watch biometrics) and low-speed snapshot sync for markers, room lifecycle, and configuration.
   * Ephemeral room lifecycle state: login lifecycle state starts as inactive by default and is never saved across sessions, preventing stale session resumption on app launch.

@@ -1,6 +1,46 @@
 # Local Companion Data Sync Architecture
 
-This document formalizes the **Watch-Centric Local Companion Data Sync Model** between iPhone (iOS) and Apple Watch (watchOS) apps via `WatchConnectivity` (`WCSession.updateApplicationContext`).
+This document formalizes the **Watch-Centric Local Companion Data Sync Model** between iPhone (iOS) and Apple Watch (watchOS) apps via `WatchConnectivity` (`WCSession.sendMessage` and `WCSession.updateApplicationContext`).
+
+---
+
+> [!CAUTION]
+> # CARDINAL ARCHITECTURAL INVARIANT: WCSESSION PURPOSE
+> **ALL `WCSession` variables are strictly and exclusively for PHONE-TO-WATCH transport. ALL OF THEM must continue sync transport regardless of ANY web or internet connection. They are entirely unrelated items.**
+>
+> 1. **Zero Web/Firebase Coupling**: `WCSession` is a local peer-to-peer radio transport between iOS and watchOS over Bluetooth / peer-to-peer Wi-Fi. It has **nothing** to do with Firebase, web connectivity, internet access, cell service, or server squad rooms.
+> 2. **Continuous Offline Operation for ALL Variables**: Every single variable carried over `WCSession` continues bidirectional or directional sync whenever either companion device is active (`isWristActive`), whether online, offline, airplane mode, or entirely outside any squad room session.
+> 3. **Exhaustive Roster of WCSession Variables (ALL Decoupled from Web Connections)**:
+>
+> | Transport Channel | WCSession Variable | Direction | Sync Mechanism | Web Connection Dependency |
+> | :--- | :--- | :---: | :--- | :--- |
+> | **High-Speed (`*_hs`)** | `p2w_hs.active_until` | Phone ➔ Watch | `sendMessage` (1 Hz) | **NONE (Zero)**. Advertises Phone presence continuously. |
+> | **High-Speed (`*_hs`)** | `p2w_hs.remote_telemetry` | Phone ➔ Watch | `sendMessage` (1 Hz) | **NONE (Zero)**. Relays cached/local teammate telemetry. |
+> | **High-Speed (`*_hs`)** | `w2p_hs.active_until` | Watch ➔ Phone | `sendMessage` (1 Hz) | **NONE (Zero)**. Advertises Watch presence continuously. |
+> | **High-Speed (`*_hs`)** | `w2p_hs.hr` | Watch ➔ Phone | `sendMessage` (1 Hz) | **NONE (Zero)**. Streams live optical heart rate from sensor. |
+> | **High-Speed (`*_hs`)** | `w2p_hs.remote_telemetry` | Watch ➔ Phone | `sendMessage` (1 Hz) | **NONE (Zero)**. Relays cached/local squad telemetry. |
+> | **Low-Speed (`*_ls`)** | `config.callsign` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Edits sync immediately between devices. |
+> | **Low-Speed (`*_ls`)** | `config.roomName` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Edits sync immediately between devices. |
+> | **Low-Speed (`*_ls`)** | `config.pin` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Edits sync immediately between devices. |
+> | **Low-Speed (`*_ls`)** | `config.databaseURL` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Edits sync immediately between devices. |
+> | **Low-Speed (`*_ls`)** | `config.theme` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Edits sync immediately between devices. |
+> | **Low-Speed (`*_ls`)** | `config.role` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Edits sync immediately between devices. |
+> | **Low-Speed (`*_ls`)** | `config.isPro` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. StoreKit / debug unlock syncs between devices. |
+> | **Low-Speed (`*_ls`)** | `config.isUploadHeartRateEnabled` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Preference toggle syncs between devices. |
+> | **Low-Speed (`*_ls`)** | `config.isUploadLocationEnabled` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. Preference toggle syncs between devices. |
+> | **Low-Speed (`*_ls`)** | `config.isEncryptionEnabled` | Phone ⮂ Watch | CRDT LWW (`configTs`) | **NONE (Zero)**. AES crypto alignment syncs between devices. |
+> | **Low-Speed (`*_ls`)** | `player_state.is_dead` | Phone ⮂ Watch | CRDT LWW (`is_dead_ts`) | **NONE (Zero)**. Tag-out status syncs between devices immediately. |
+> | **Low-Speed (`*_ls`)** | `tactical.tacticalJson` | Phone ⮂ Watch | CRDT LWW (`tacticalTs`) | **NONE (Zero)**. Local markers/orders sync between devices offline. |
+> | **Low-Speed (`*_ls`)** | `membership.membersJson` | Phone ⮂ Watch | CRDT LWW (`memberTs`) | **NONE (Zero)**. Cached squad roster syncs between devices. |
+> | **Low-Speed (`*_ls`)** | `login_cycle.loginCycle` | Phone ⮂ Watch | CRDT LWW (`loginCycleTs`) | **NONE (Zero)**. Host/Join intent converges between devices. |
+> | **Transport Control** | `sync_ts` | Phone ⮂ Watch | Rolling Pump (1 Hz) | **NONE (Zero)**. Retransmission token for context convergence. |
+>
+> 4. **Forbidden Anti-Patterns**:
+>    - ❌ **NEVER** check `isTacticalSessionActive`, `firebaseManager.isConnected`, or `firebaseManager.activeRoom` anywhere in `WatchConnectivityManager` or in WCSession sync triggers.
+>    - ❌ **NEVER** cancel `activeAdvertisementTimer` or `rollingTimer` on Firebase session disconnect or logout.
+> 5. **One-Way Dependency Rule**: Firebase cloud adapters read WCSession presence (`active_until`) to decide who writes/listens to Firebase. Firebase never, under any circumstances, gates or controls WCSession transport.
+
+---
 
 ## 0. Two Structurally Different Channels — Do Not Cross the Streams
 
@@ -8,6 +48,19 @@ This document formalizes the **Watch-Centric Local Companion Data Sync Model** b
 
 * **`*_ls` (Low-Speed) — a bidirectionally-shared variable.** Both devices can independently edit the same logical fields (callsign, `is_dead`, room lifecycle, …), and each field has to converge to one agreed value. That requires a per-field timestamp (`*_ts`) and a merge/winner rule (§3). **`WatchConnectivityManager.localLS` is the single source of truth on each device** — `GameStateManager` holds no shadow copy of any `*_ls` field; every synced property (`isDead`, `myCallsign`, `savedRoomName`, `savedPin`, `customDatabaseURL`, `radarColorTheme`, `myRole`, `isUploadHeartRateEnabled`, `isUploadLocationEnabled`, `isEncryptionEnabled`, `isHosting`) is a plain computed get/set directly onto `localLS`, and a remote merge landing in `localLS` *is* those properties changing — there's no separate "adopt the remote value" step for these fields to fall out of sync in. See `WatchConnectivityManager.mutateLocalConfig`/`mutateLocalPlayerState`/`mutateLocalLoginCycle`.
 * **`*_hs` (High-Speed) — two independent one-way streams, not a shared variable.** `p2w_hs` has exactly one writer (Phone) and one reader (Watch); `w2p_hs` has exactly one writer (Watch) and one reader (Phone). There is no merge, no winner-decision, and no field is ever "shared" between them — each side just overwrites its own struct wholesale on every tick, and the reader trusts whatever's currently there as-is (subject to the lease/staleness rules in §4). Any code that merges, diffs, or reconciles `*_hs` data against a local copy is solving a problem this channel doesn't have.
+
+### Architectural Invariant: Zero Redundant Storage for `activeUntil`
+
+There must **never** be any other local storage or shadow copies of `activeUntil` (e.g., `latestRemoteActiveUntil`, cached `lastPublishedWatchHS`, `lastPublishedPhoneHS`).
+* **Direct Outbound Assignment:**
+  * **Watch:** `w2p_hs.activeUntil = watch.time + leaseTime (5s)` is directly written into this variable.
+  * **Phone:** `p2w_hs.activeUntil = phone.time + leaseTime (5s)` is directly written into this variable.
+* **Direct Inbound Consumption:**
+  * **Watch:** `p2w_hs.activeUntil` is directly used for companion presence evaluation and lease horizon calculation.
+  * **Phone:** `w2p_hs.activeUntil` is directly used for companion presence evaluation and lease horizon calculation.
+* **Channel Isolation in Context Publishing:**
+  * Low-speed context updates (`updateApplicationContext` for `*_ls`) must **never** bundle stale cached high-speed payloads.
+  * Re-transmitting an unrefreshed high-speed struct inside low-speed sync cycles transmits expired timestamps, corrupting the receiver's companion lease calculation and causing UI indicators (such as debug menu digits 5 & 6) to oscillate between valid (`+3`) and expired (`-9`). Low-speed publishing must leave high-speed fields `nil`.
 
 ---
 
@@ -92,9 +145,11 @@ Applies to `*_ls` only (see §0) — `*_hs` has no merge step at all.
 3. **Equivalence & sync_ts:**
    * `sync_ts` is control metadata only: it is not compared to choose a state winner and is excluded from state-equivalence checks.
 4. **Rolling sync_ts Retransmission:**
-   * A device rolls its local `sync_ts` (e.g. 1 Hz) while it advertises any structure that wins against the counterpart's last advertised structure, causing periodic re-advertisement of its latest low-speed snapshot.
-   * Stop rolling `sync_ts` after the counterpart advertises an equivalent versioned state for all mergeable structures.
+   * `sync_ts` rolls **immediately** whenever any of the `*_ls` transported variables change in a way that causes a discrepancy between `p2w` and `w2p` (or when no peer state is known yet), ensuring the initial outbound context snapshot carries the latest timestamp with zero delay.
+   * It **continues to roll** periodically (1 Hz) via the rolling timer pump while and only while the local device advertises any structure that wins against the counterpart's last advertised structure.
+   * Stop rolling `sync_ts` immediately after the counterpart advertises an equivalent versioned state (`isDomainEquivalent == true`) for all mergeable structures, resolving the discrepancy.
    * **Deliberately NOT gated on `WCSession.isReachable`.** `isReachable` reflects live two-way *messaging* availability (foreground, or high-priority background such as an active workout session) — it is not a reliable signal for "can this data ever reach the counterpart." It is documented, and reported in practice, to read `false` even while a companion is genuinely alive and running in the background (e.g. a Watch mid-workout with the screen off) — this app's primary operating posture. `updateApplicationContext` is explicitly designed to keep working through the system WatchConnectivity daemon regardless of reachability, so gating retransmission on it risks silently stalling convergence to a backgrounded-but-active companion, to save nothing more than a skipped local encode + context-store write. **An earlier revision added this gate and it was reverted for exactly this reason — do not reintroduce it.**
+   * **Is gated, however, on basic WCSession viability**, distinct from the `isReachable` exclusion above: `WatchConnectivityManager.publishApplicationContext(local:)` and `startRollingSync()` both require `WCSession.isSupported()`, `session.activationState == .activated`, and (iOS only) `session.isPaired && session.isWatchAppInstalled` before publishing or rolling at all. This is a one-time "can this device's WCSession ever reach a paired/installed Watch app" check, not a per-tick liveness check — it doesn't reintroduce the `isReachable` gating rejected above.
 5. **Losing Side Adoption:** The losing device replaces its full local structure with the winner's value and `*_ts`.
 6. **Startup Sync & Ephemeral Lifecycle:** Upon companion startup, `login_cycle` always defaults to `inactive` with `login_cycle_ts = 0` (unconditionally cleared from persistence), ensuring that a booting device cleanly adopts any active peer's live session (`peer.login_cycle_ts > 0` wins over `0`) without mistakenly reviving a stale session. Persistent user preferences (`config`) and player state (`player_state`) preserve their persisted values.
 
@@ -102,7 +157,9 @@ Applies to `*_ls` only (see §0) — `*_hs` has no merge step at all.
 
 ## 4. Activity Advertisement & Cloud Access Policy
 
-Each active device refreshes its `active_until = device.time + 5 seconds` every 1 second.
+Each active device refreshes its `active_until = device.time + 5 seconds` every 1 second while active (`isWristActive = true`).
+* **Transport Independence:** This advertisement travels strictly over local `WCSession` transport (`sendMessage` with `updateApplicationContext` fallback) and runs continuously whenever the app is open/active, **completely independent of whether a Firebase squad room is joined or whether the device is offline**.
+* **Lease Reception:** On the counterpart device, receiving `active_until` continuously establishes companion presence (e.g. producing `00P0+300` on the Watch or `00W0+300` on the iPhone when offline).
 
 * **Watch Cloud Client Role:**
   * While active in a room session (backed by `HKWorkoutSession`), the Watch is the **primary cloud client** maintaining active Firebase SDK realtime listener / upload updates — independent of the Phone's state entirely; the Phone's activity never affects the Watch's role.
@@ -118,5 +175,9 @@ The role decision above governs **uplink ownership** (`GameStateManager.hasNetwo
 * **Watch:** `app_active OR (watch.Time < p2w_hs.active_until)` — attach if the wearer is actively looking at the Watch, *or* the Phone's lease says it still needs the Watch working (e.g. Watch mid-workout, wrist down, but Phone was recently active).
 * **Phone:** `app_active AND (phone.Time > w2p_hs.active_until)` — attach only if the user is actively looking at the Phone **and** the Watch has stepped down (lease expired). Unlike the Watch, the Phone does *not* attach merely because the Watch's lease happens to be active — the two clauses are AND'd, not OR'd, deliberately asymmetric from the Watch's rule.
 
+`app_active` is always evaluated as *this device's own* activity — the Watch clause reads the Watch's own `isWristActive`, the Phone clause reads the Phone's own — never the counterpart's. It's one symbol reused per-device-context, not two separately-named variables, matching `GameStateManager.isWristActive`'s single-flag implementation on each device.
+
 Both devices' listener gate additionally requires an active tactical session regardless of the above.
+
+**Upload rate is independent of `app_active`/`isWristActive`.** Unlike listener attachment and uplink *ownership* above, the outbound telemetry *upload rate* itself (delta-gate + adaptive refresh interval, see CLOUD_DATA_MANAGEMENT.md §4) is never throttled by whether this device's wrist/screen is currently active. Self-location must keep reaching teammates as long as it meets delta-gate criteria even while this device's own screen is off — a wrist-down/backgrounded device is still visible to its squad, it just isn't the one deciding to attach listeners or claim cloud-write ownership.
 
