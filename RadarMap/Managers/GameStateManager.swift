@@ -455,7 +455,7 @@ public final class GameStateManager: ObservableObject {
                 trimmedPlacedBy.caseInsensitiveCompare(trimmedLocalId) == .orderedSame ||
                 (!trimmedLocalCallsign.isEmpty && trimmedPlacedBy.caseInsensitiveCompare(trimmedLocalCallsign) == .orderedSame)
             ))
-            
+
             if let member = resolvedMember, !member.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 updated.placedByCallsign = member.callsign
             } else if isLocalPlayer, !trimmedLocalCallsign.isEmpty {
@@ -483,13 +483,27 @@ public final class GameStateManager: ObservableObject {
         pruneSelectionIfStale()
     }
     
+    private var isEnforcingTacticalIndicatorMaintenance = false
+
     /// Sweep of expired non-order indicators plus `mti` cap enforcement, run by every member.
     /// Operates via deterministic oldest-first eviction so the cap holds across all squad peers
     /// without requiring a per-write Cloud Function trigger. Every member computes the same
     /// oldest-first overflow from the same merged `allTacticalIndicators` view, so their deletes
     /// target the same IDs; a delete on an already-deleted path is an idempotent no-op, so redundant
     /// deletes from multiple members are harmless rather than a race.
+    ///
+    /// Re-entrancy guarded: `removeTacticalIndicator` writes `firebaseManager.activeRoom`, which
+    /// `bindManagers()`'s `$activeRoom` sink reacts to by calling this function again,
+    /// synchronously, before the original call returns. Without this guard, evicting N over-cap
+    /// indicators recurses N stack frames deep (one nested re-entry per eviction) instead of
+    /// iterating — under heavy marker volume this recursion can run deep enough to overflow the
+    /// stack (observed as an EXC_BAD_ACCESS at an unrelated line once the stack pointer passed its
+    /// guard page). Mirrors the identical guard already on `updateAllTacticalIndicators`.
     public func enforceTacticalIndicatorMaintenance(room: SquadRoom? = nil) {
+        guard !isEnforcingTacticalIndicatorMaintenance else { return }
+        isEnforcingTacticalIndicatorMaintenance = true
+        defer { isEnforcingTacticalIndicatorMaintenance = false }
+
         let expiredIds = localIndicators.values.filter { $0.category != .squadOrder && $0.isExpired }.map { $0.id }
         for id in expiredIds {
             localIndicators.removeValue(forKey: id)
@@ -757,7 +771,14 @@ public final class GameStateManager: ObservableObject {
             SquadMember(id: member.id, callsign: member.callsign, latitude: 0.0, longitude: 0.0, role: member.role)
         }.sorted { $0.id < $1.id }
 
-        if let data = try? JSONEncoder().encode(roster), let json = String(data: data, encoding: .utf8) {
+        // .sortedKeys: JSONEncoder's per-object key order is otherwise unspecified and can differ
+        // between two encode() calls for byte-identical content (a Foundation quirk, not an
+        // insertion-order guarantee) — without it, this string can spuriously compare unequal to
+        // its own prior value below, registering a fake "change" that restarts the rolling-sync
+        // pump on every tick even though nothing actually changed.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        if let data = try? encoder.encode(roster), let json = String(data: data, encoding: .utf8) {
             if watchConnectivityManager.localLS.membership.membersJson == json {
                 return
             }
@@ -769,7 +790,11 @@ public final class GameStateManager: ObservableObject {
     public func syncTacticalToWatchConnectivity(timestamp: TimeInterval? = nil) {
         guard !isApplyingRemoteSync else { return }
         let indicators = allTacticalIndicators
-        if let data = try? JSONEncoder().encode(indicators), let json = String(data: data, encoding: .utf8) {
+        // .sortedKeys — see syncMembershipToWatchConnectivity's comment above; same instability,
+        // same fix.
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        if let data = try? encoder.encode(indicators), let json = String(data: data, encoding: .utf8) {
             if watchConnectivityManager.localLS.tactical.tacticalJson == json {
                 return
             }

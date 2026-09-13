@@ -57,6 +57,13 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     public private(set) var isRollingSync: Bool = false
     private var rollingTimer: AnyCancellable?
     private var leaseTimer: AnyCancellable?
+
+    // Debug-only: call-rate instrumentation for diagnosing the transmission-storm hypothesis.
+    // Remove once diagnosed.
+    private var publishApplicationContextCallCount = 0
+    private var lastPublishApplicationContextTime: TimeInterval = 0
+    private var handleIncomingApplicationContextCallCount = 0
+    private var lastHandleIncomingApplicationContextTime: TimeInterval = 0
     
     // Serialization queue for WCSession context updates to prevent concurrent partially-merged publishes
     private let contextQueue = DispatchQueue(label: "com.radarmap.watchconnectivity.queue")
@@ -231,6 +238,13 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         persistAndPublishLocalState()
     }
 
+    /// Debug-only: renders a `LowSpeedSnapshot` as JSON for the content-on-change logging below.
+    private func debugDescribe(_ snapshot: LowSpeedSnapshot) -> String {
+        guard let data = try? JSONEncoder().encode(snapshot),
+              let json = String(data: data, encoding: .utf8) else { return "<unencodable>" }
+        return json
+    }
+
     /// Local mutations above always originate on the main thread (UI-driven) and assign into
     /// `localLS` synchronously for instant UI feedback. `checkAndTriggerConvergence` also runs
     /// here on main (it reads `peerLS`, which — like `localLS` — is only ever touched on main);
@@ -239,13 +253,17 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     private func persistAndPublishLocalState() {
         checkAndTriggerConvergence(local: localLS)
         let snapshot = localLS
+        print("[WCSession \(localRole)] localLS changed: \(debugDescribe(snapshot))")
         saveLocalState(snapshot)
         publishApplicationContext(local: snapshot)
     }
     
     // MARK: - High-Speed Outgoing Stream (Asymmetrical Routing)
-    
-    /// Advertises Phone-owned high-speed payload (p2w_hs) strictly via sendMessage.
+
+    /// Advertises Phone-owned high-speed payload (p2w_hs) strictly via sendMessage. No fallback
+    /// channel on failure/unreachability by design — see docs/CLOUD_DATA_MANAGEMENT.md and
+    /// CLAUDE.md's "no fallback-as-design" rule. A missed tick self-heals via the next tick once
+    /// reachable again, or via `correctStaleLeaseExpiry`'s TTL backstop.
     public func advertisePhoneHighSpeed(
         remotePlayerTelemetryJson: String = "{}"
     ) {
@@ -259,32 +277,28 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         #if canImport(WatchConnectivity)
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
-        guard session.activationState == .activated else { return }
-        guard session.isReachable else {
-            // Unreachable right when a lease needs to move — the moment this channel is most
-            // likely to matter. sendMessage has nothing to fall back on by itself, so hand the
-            // same lease to the durable context channel instead of dropping it and waiting out
-            // the full TTL (see wcsession-dual-stream-sync's channel-1 guidance).
-            publishHighSpeedFallback()
+        guard session.activationState == .activated, session.isReachable else {
+            print("[WCSession phone] advertisePhoneHighSpeed: NOT REACHABLE, skipping tick. remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
             return
         }
         var envelope = ApplicationContextEnvelope()
         envelope.p2wHS = hs
         if let data = try? JSONEncoder().encode(envelope),
            let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            session.sendMessage(dict, replyHandler: nil, errorHandler: { [weak self] error in
-                // sendMessage failures (OS-level throttling, delivery timeout, reachability
-                // flipping mid-send, etc.) previously failed silently here — log, and fall back
-                // to the durable context channel so the peer still gets this lease update once
-                // reachable again instead of only self-healing via TTL expiry.
-                print("[WCSession phone] advertisePhoneHighSpeed sendMessage failed: \(error)")
-                DispatchQueue.main.async { self?.publishHighSpeedFallback() }
+            print("[WCSession phone] advertisePhoneHighSpeed sendMessage: bytes=\(data.count) remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
+            session.sendMessage(dict, replyHandler: nil, errorHandler: { error in
+                print("[WCSession phone] advertisePhoneHighSpeed sendMessage FAILED (payload bytes=\(data.count)): \(error)")
             })
+        } else {
+            print("[WCSession phone] advertisePhoneHighSpeed: FAILED TO ENCODE envelope, remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count)")
         }
         #endif
     }
 
-    /// Advertises Watch-owned high-speed stream (w2p_hs) strictly via sendMessage.
+    /// Advertises Watch-owned high-speed stream (w2p_hs) strictly via sendMessage. No fallback
+    /// channel on failure/unreachability by design — see docs/CLOUD_DATA_MANAGEMENT.md and
+    /// CLAUDE.md's "no fallback-as-design" rule. A missed tick self-heals via the next tick once
+    /// reachable again, or via `correctStaleLeaseExpiry`'s TTL backstop.
     public func advertiseWatchHighSpeed(
         heartRate: Double,
         remotePlayerTelemetryJson: String = "{}"
@@ -300,56 +314,22 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         #if canImport(WatchConnectivity)
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
-        guard session.activationState == .activated else { return }
-        guard session.isReachable else {
-            publishHighSpeedFallback()
+        guard session.activationState == .activated, session.isReachable else {
+            print("[WCSession watch] advertiseWatchHighSpeed: NOT REACHABLE, skipping tick. remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
             return
         }
         var envelope = ApplicationContextEnvelope()
         envelope.w2pHS = hs
         if let data = try? JSONEncoder().encode(envelope),
            let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            session.sendMessage(dict, replyHandler: nil, errorHandler: { [weak self] error in
-                print("[WCSession watch] advertiseWatchHighSpeed sendMessage failed: \(error)")
-                DispatchQueue.main.async { self?.publishHighSpeedFallback() }
+            print("[WCSession watch] advertiseWatchHighSpeed sendMessage: bytes=\(data.count) remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
+            session.sendMessage(dict, replyHandler: nil, errorHandler: { error in
+                print("[WCSession watch] advertiseWatchHighSpeed sendMessage FAILED (payload bytes=\(data.count)): \(error)")
             })
+        } else {
+            print("[WCSession watch] advertiseWatchHighSpeed: FAILED TO ENCODE envelope, remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count)")
         }
         #endif
-    }
-
-    /// Fallback path for the fast/ephemeral HS channel (the `activeUntil` lease + live telemetry)
-    /// when `sendMessage` isn't available (peer unreachable) or fails outright — exactly the
-    /// window where a phone<->watch active-device handoff is most likely to be in flight.
-    /// `updateApplicationContext` coalesces to "latest wins" and is delivered once the peer
-    /// wakes/reconnects, giving it a much tighter bound on seeing the updated lease than waiting
-    /// out `correctStaleLeaseExpiry`'s local TTL backstop alone. Always includes the current
-    /// `localLS` alongside the HS payload — `updateApplicationContext` replaces the whole pending
-    /// context, so a fallback that sent HS alone would silently erase the durable LS state a peer
-    /// bootstrapping from `receivedApplicationContext` depends on.
-    /// Must be called on the main thread — reads `localLS`/`p2wHS`/`w2pHS`, all main-thread-owned.
-    private func publishHighSpeedFallback() {
-        var envelope = ApplicationContextEnvelope()
-        if localRole == .phone {
-            envelope.p2wLS = localLS
-            envelope.p2wHS = p2wHS
-        } else {
-            envelope.w2pLS = localLS
-            envelope.w2pHS = w2pHS
-        }
-        contextQueue.async { [weak self] in
-            guard let self = self else { return }
-            #if canImport(WatchConnectivity)
-            guard WCSession.isSupported() else { return }
-            let session = WCSession.default
-            guard session.activationState == .activated else { return }
-            #if os(iOS)
-            guard session.isPaired && session.isWatchAppInstalled else { return }
-            #endif
-            guard let data = try? JSONEncoder().encode(envelope),
-                  let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
-            try? session.updateApplicationContext(dict)
-            #endif
-        }
     }
 
     // MARK: - Convergence & Rolling sync_ts
@@ -413,7 +393,20 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     /// Must be called on the main thread (`localLS` is only ever touched there). Its callers —
     /// the rolling `Timer` (scheduled `on: .main`) and `sessionReachabilityDidChange` below — are
     /// responsible for that.
+    ///
+    /// Re-checks convergence against `peerLS` on every tick before republishing, rather than
+    /// blindly republishing forever. `stopRollingSync()` was previously only ever called reactively
+    /// from `handleIncomingApplicationContext` (i.e. only when a peer's push happened to arrive) —
+    /// once both sides genuinely converged, the peer correctly stops echoing back (nothing new to
+    /// adopt), which meant this device never received another incoming message to react to and so
+    /// never got the chance to notice convergence and stop. The pump then ran at 1Hz forever,
+    /// republishing identical already-converged state with no path back to `stopRollingSync()`.
     private func rollSyncTimestampAndPublish() {
+        if let peer = peerLS, localLS.isDomainEquivalent(to: peer) {
+            stopRollingSync()
+            return
+        }
+
         // Deliberately NOT gated on isReachable: that reflects live two-way messaging
         // availability (foreground/high-priority-background), which is known to unreliably read
         // false even while a companion is genuinely alive and running in the background (e.g. a
@@ -433,6 +426,11 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     /// function itself only touches `contextQueue`-owned state (the WCSession call) and never reads
     /// `localLS`/`peerLS` directly, so it's safe to dispatch onto `contextQueue` regardless of which thread calls it.
     private func publishApplicationContext(local: LowSpeedSnapshot) {
+        publishApplicationContextCallCount += 1
+        let now = Date().timeIntervalSince1970
+        let deltaMs = lastPublishApplicationContextTime == 0 ? 0 : (now - lastPublishApplicationContextTime) * 1000
+        lastPublishApplicationContextTime = now
+        print("[WCSession \(localRole)] publishApplicationContext call #\(publishApplicationContextCallCount), \(String(format: "%.1f", deltaMs))ms since last call")
         contextQueue.async { [weak self] in
             guard let self = self else { return }
             #if canImport(WatchConnectivity)
@@ -469,6 +467,12 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     /// whole merge is dispatched there rather than to `contextQueue` (which is reserved for
     /// snapshot-parameterized I/O that doesn't need to read either property directly).
     public func handleIncomingApplicationContext(_ dict: [String: Any], isReplayedContext: Bool = false) {
+        handleIncomingApplicationContextCallCount += 1
+        let callNow = Date().timeIntervalSince1970
+        let callDeltaMs = lastHandleIncomingApplicationContextTime == 0 ? 0 : (callNow - lastHandleIncomingApplicationContextTime) * 1000
+        lastHandleIncomingApplicationContextTime = callNow
+        print("[WCSession \(localRole)] handleIncomingApplicationContext call #\(handleIncomingApplicationContextCallCount), \(String(format: "%.1f", callDeltaMs))ms since last call, replayed=\(isReplayedContext)")
+
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
               var envelope = try? JSONDecoder().decode(ApplicationContextEnvelope.self, from: data) else { return }
 
@@ -490,6 +494,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
 
             // 1. Process High-Speed Payloads (Unidirectional)
             if self.localRole == .watch, let p2wHS = envelope.p2wHS {
+                print("[WCSession watch] p2wHS received: activeUntil=\(p2wHS.activeUntil) remotePlayerTelemetryJson=\(p2wHS.remotePlayerTelemetryJson)")
                 self.p2wHS = p2wHS
                 let active = (p2wHS.activeUntil > Date().timeIntervalSince1970)
                 if self.isWatchLeaseActive != active {
@@ -498,6 +503,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 }
                 self.onHighSpeedTelemetryReceived?(p2wHS.remotePlayerTelemetryJson)
             } else if self.localRole == .phone, let w2pHS = envelope.w2pHS {
+                print("[WCSession phone] w2pHS received: activeUntil=\(w2pHS.activeUntil) heartRate=\(w2pHS.heartRate) remotePlayerTelemetryJson=\(w2pHS.remotePlayerTelemetryJson)")
                 self.w2pHS = w2pHS
                 let active = (w2pHS.activeUntil > Date().timeIntervalSince1970)
                 if self.isWatchLeaseActive != active {
@@ -513,6 +519,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
             // 2. Process Low-Speed Payloads (Bidirectional Merge)
             let peerSnapshot = (self.localRole == .phone) ? envelope.w2pLS : envelope.p2wLS
             if let peer = peerSnapshot {
+                print("[WCSession \(self.localRole)] peerLS received (replayed=\(isReplayedContext)): \(self.debugDescribe(peer))")
                 self.peerLS = peer
                 self.savePeerState(peer)
 
@@ -521,6 +528,9 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 let (mergedLocal, localWins) = MergeEngine.merge(local: self.localLS, peer: peer, localDevice: self.localRole)
                 let localChanged = !self.localLS.isDomainEquivalent(to: mergedLocal)
                 self.localLS = mergedLocal
+                if localChanged {
+                    print("[WCSession \(self.localRole)] localLS merged (localWins=\(localWins)): \(self.debugDescribe(mergedLocal))")
+                }
 
                 // Roll sync_ts whenever there's a reason for the peer to still be watching this
                 // device: either this device holds data the peer hasn't caught up to (localWins),

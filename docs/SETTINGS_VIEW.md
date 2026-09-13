@@ -1,5 +1,7 @@
 # Config View
 
+> **No unauthorized architecture. Simple is reliable.** Any new fallback, degrade-path, or "if the primary approach fails, patch with X" branch — in code or in this doc — requires the user's explicit, affirmative approval given in the conversation before it is written, every single time, even if a similar one was approved before. Never introduce a stub/placeholder value meant to be corrected later unless that correction is guaranteed to run first — when two code paths compute the same information, delete one rather than adding reconciliation/self-heal/validation logic to let both keep existing. See `CLAUDE.md` rules 2 and 3.
+
 The single "Config" screen, opened via the gear icon in the upper-left of the map HUD. Implemented in [`SettingsView.swift`](../RadarMap/Views/Settings/SettingsView.swift), navigation title `"Config"`. It handles callsign, hosting/joining a squad, custom Firebase database URL, radar color, data-sharing toggles, the paywall, and roster display. Shared subcomponents: [`JoinQRBox.swift`](../RadarMap/Views/Room/JoinQRBox.swift) and [`DatabaseURLField.swift`](../RadarMap/Views/Room/DatabaseURLField.swift). Related: [BRING_YOUR_OWN_FIREBASE.md](BRING_YOUR_OWN_FIREBASE.md) for the custom-Firebase setup flow this UI supports, and [TACTICAL_UI_SPECIFICATION.md](TACTICAL_UI_SPECIFICATION.md) §6 for the HUD entry point.
 
 ---

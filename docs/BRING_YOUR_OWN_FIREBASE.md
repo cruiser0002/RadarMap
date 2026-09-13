@@ -1,5 +1,7 @@
 # Bring Your Own Firebase (BYO-Firebase) Guide
 
+> **No unauthorized architecture. Simple is reliable.** Any new fallback, degrade-path, or "if the primary approach fails, patch with X" branch — in code or in this doc — requires the user's explicit, affirmative approval given in the conversation before it is written, every single time, even if a similar one was approved before. Never introduce a stub/placeholder value meant to be corrected later unless that correction is guaranteed to run first — when two code paths compute the same information, delete one rather than adding reconciliation/self-heal/validation logic to let both keep existing. See `CLAUDE.md` rules 2 and 3.
+
 RadarMap allows squad leaders to host tactical rooms on their own dedicated **Google Firebase Realtime Database** project rather than the shared default project. 
 
 This guide provides step-by-step instructions for provisioning, configuring, and connecting your own Firebase instance in under five minutes using Google's free **Spark Plan** (no credit card required).

@@ -209,10 +209,10 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     private var telemetryChildRemovedHandle: RTDBObserverHandle?
     private var tacticalValueHandle: RTDBObserverHandle?
     private var roomValueHandle: RTDBObserverHandle?
+    /// Debug-only: counts `roomMembersPath` `.value` listener fires, to see how listener churn
+    /// scales with room player count (temporary instrumentation, remove once diagnosed).
+    private var membersValueFireCount: Int = 0
     public private(set) var attachedTelemetryRoomId: String?
-    /// Survives member prune/re-add cycles (reconcile, reconnect) so a member rebuilt from a
-    /// fresh telemetry packet doesn't momentarily lose its known callsign — see updateMember(with:).
-    private var knownCallsigns: [String: String] = [:]
 
     /// Member IDs currently present under /p/{roomId}, maintained incrementally from
     /// childAdded/childRemoved events so reconcileRemoteMembers keeps its original
@@ -470,41 +470,31 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         return (degrees + AppConstants.Location.fullCircleDegrees).truncatingRemainder(dividingBy: AppConstants.Location.fullCircleDegrees)
     }
 
+    /// Telemetry carries no callsign/role — it's incomplete data for establishing who a member
+    /// is. A member must already exist (created by the roster channel: `mergeRemoteMembers`/
+    /// `applyMembersSnapshot`, which decodes real callsign/role from Firebase) before telemetry
+    /// may update their position; telemetry for an unrecognized member is rejected outright
+    /// rather than used to fabricate a stub entry with a placeholder callsign. See CLAUDE.md rule
+    /// 3, "simple is reliable — no stubs, no stacked patches."
     private func updateMember(with packet: TelemetryPacket, in members: inout [String: SquadMember]) {
-        let isExistingMember = members[packet.memberId] != nil
-        var member = members[packet.memberId] ?? SquadMember(
-            id: packet.memberId,
-            callsign: knownCallsigns[packet.memberId] ?? "",
-            latitude: packet.latitude,
-            longitude: packet.longitude,
-            altitude: packet.altitude,
-            heading: packet.heading,
-            heartRate: packet.heartRate,
-            lastUpdatedTimestamp: packet.timestamp,
-            sequenceNumber: packet.sequenceNumber,
-            status: packet.heartRate == AppConstants.Health.flatlineHeartRate ? .downed : .active
-        )
+        guard var member = members[packet.memberId] else { return }
 
-        if isExistingMember {
-            let prevCoord = CLLocationCoordinate2D(latitude: member.latitude, longitude: member.longitude)
-            let newCoord = CLLocationCoordinate2D(latitude: packet.latitude, longitude: packet.longitude)
-            let prevLoc = CLLocation(latitude: member.latitude, longitude: member.longitude)
-            let newLoc = CLLocation(latitude: packet.latitude, longitude: packet.longitude)
-            let distanceMoved = prevLoc.distance(from: newLoc)
-            let isInitialPlaceholder = (abs(member.latitude) < 1e-5 && abs(member.longitude) < 1e-5)
+        let prevCoord = CLLocationCoordinate2D(latitude: member.latitude, longitude: member.longitude)
+        let newCoord = CLLocationCoordinate2D(latitude: packet.latitude, longitude: packet.longitude)
+        let prevLoc = CLLocation(latitude: member.latitude, longitude: member.longitude)
+        let newLoc = CLLocation(latitude: packet.latitude, longitude: packet.longitude)
+        let distanceMoved = prevLoc.distance(from: newLoc)
+        let isInitialPlaceholder = (abs(member.latitude) < 1e-5 && abs(member.longitude) < 1e-5)
 
-            if packet.heading > 0.0 {
-                member.heading = packet.heading
-            } else if !isInitialPlaceholder && distanceMoved > AppConstants.Location.minDisplacementForCourseOverGroundMeters {
-                let cogHeading = FirebaseSyncManager.calculateBearing(from: prevCoord, to: newCoord)
-                member.heading = cogHeading
-            }
-            // If distanceMoved <= threshold and packet.heading == 0, retain previous heading
-        } else if packet.heading > 0.0 {
+        if packet.heading > 0.0 {
             member.heading = packet.heading
+        } else if !isInitialPlaceholder && distanceMoved > AppConstants.Location.minDisplacementForCourseOverGroundMeters {
+            let cogHeading = FirebaseSyncManager.calculateBearing(from: prevCoord, to: newCoord)
+            member.heading = cogHeading
         }
+        // If distanceMoved <= threshold and packet.heading == 0, retain previous heading
 
-        if isExistingMember && member.lastUpdatedTimestamp > 0 {
+        if member.lastUpdatedTimestamp > 0 {
             member.lastAnimationDuration = 0.0
 
             // Retain the pre-update sample for dead-reckoning extrapolation (DEAD_RECKONING.md),
@@ -535,7 +525,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
         let effectiveRoomId = !packet.roomId.isEmpty ? packet.roomId : (activeRoom?.id ?? "")
         let needsCallsign = member.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || member.callsign == packet.memberId
-        if (!isExistingMember || needsCallsign) && !effectiveRoomId.isEmpty {
+        if needsCallsign && !effectiveRoomId.isEmpty {
             fetchMemberDetails(roomId: effectiveRoomId, memberId: packet.memberId)
         }
     }
@@ -1241,9 +1231,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             } else {
                 updatedMembers[id] = remoteMember
             }
-            if !remoteMember.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                knownCallsigns[id] = remoteMember.callsign
-            }
         }
         if let localId = self.localMemberId, let localMember = current.members[localId] {
             updatedMembers[localId] = localMember
@@ -1331,9 +1318,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                   let remoteMember = try? JSONDecoder().decode(SquadMember.self, from: data) else { return }
 
             DispatchQueue.main.async {
-                if !remoteMember.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    self.knownCallsigns[cleanMemberId] = remoteMember.callsign
-                }
                 // The node decoded successfully, so the roster row exists server-side —
                 // independent confirmation alongside mergeRemoteMembers' wholesale replace.
                 self.observedRosterMemberIds.insert(cleanMemberId)
@@ -1443,7 +1427,17 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
         // Scoped to the members subtree, not the whole room node — see applyMembersSnapshot.
         roomValueHandle = transport.observe(at: roomMembersPath(roomId: roomId), eventType: .value) { [weak self] snapshot in
-            self?.applyMembersSnapshot(snapshot.value, roomId: roomId)
+            guard let self = self else { return }
+            self.membersValueFireCount += 1
+            let dict = snapshot.value as? [String: Any]
+            let memberCount = dict?.count ?? 0
+            if let data = try? JSONSerialization.data(withJSONObject: dict ?? [:]),
+               let json = String(data: data, encoding: .utf8) {
+                print("[Firebase] roomMembersPath .value fire #\(self.membersValueFireCount) roomId=\(roomId) memberCount=\(memberCount) bytes=\(data.count) content=\(json)")
+            } else {
+                print("[Firebase] roomMembersPath .value fire #\(self.membersValueFireCount) roomId=\(roomId) memberCount=\(memberCount) (unencodable snapshot)")
+            }
+            self.applyMembersSnapshot(snapshot.value, roomId: roomId)
         }
     }
 

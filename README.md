@@ -1,5 +1,7 @@
 # Radar Map: Tactical Radar & Field Companion (watchOS & iOS)
 
+> **No unauthorized architecture. Simple is reliable.** Any new fallback, degrade-path, or "if the primary approach fails, patch with X" branch — in code or in this doc — requires the user's explicit, affirmative approval given in the conversation before it is written, every single time, even if a similar one was approved before. Never introduce a stub/placeholder value meant to be corrected later unless that correction is guaranteed to run first — when two code paths compute the same information, delete one rather than adding reconciliation/self-heal/validation logic to let both keep existing. See `CLAUDE.md` rules 2 and 3.
+
 [![watchOS 10.0+](https://img.shields.io/badge/watchOS-10.0%2B-black?style=flat&logo=apple)](https://developer.apple.com/watchos/)
 [![iOS 17.0+](https://img.shields.io/badge/iOS-17.0%2B-black?style=flat&logo=apple)](https://developer.apple.com/ios/)
 [![Swift 5.9](https://img.shields.io/badge/Swift-5.9-orange?style=flat&logo=swift)](https://swift.org)

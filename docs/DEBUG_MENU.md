@@ -1,5 +1,7 @@
 # Debug Menu Specification
 
+> **No unauthorized architecture. Simple is reliable.** Any new fallback, degrade-path, or "if the primary approach fails, patch with X" branch — in code or in this doc — requires the user's explicit, affirmative approval given in the conversation before it is written, every single time, even if a similar one was approved before. Never introduce a stub/placeholder value meant to be corrected later unless that correction is guaranteed to run first — when two code paths compute the same information, delete one rather than adding reconciliation/self-heal/validation logic to let both keep existing. See `CLAUDE.md` rules 2 and 3.
+
 This document defines the architecture, access mechanics, authentication, and controls provided by the hidden **Debug Menu** ([`DebugUnlockView.swift`](../RadarMap/Views/Settings/DebugUnlockView.swift)).
 
 ---
