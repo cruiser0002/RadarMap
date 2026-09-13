@@ -218,10 +218,30 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     /// childAdded/childRemoved events so reconcileRemoteMembers keeps its original
     /// whole-snapshot-based pruning behavior without re-fetching the full node on every event.
     private var observedTelemetryMemberIds: Set<String> = []
+
+    /// Member IDs currently present under /r/{roomId}/m (i.e. actually have a roster row),
+    /// independent of `observedTelemetryMemberIds`. Replaced wholesale from each authoritative
+    /// roster snapshot in `mergeRemoteMembers`, and unioned with a single id on a successful
+    /// one-shot `fetchMemberDetails` resolution. This is deliberately a separate set rather than
+    /// being inferred from `activeRoom.members` — that dict is written by telemetry too (see
+    /// `updateMember(with:in:)`), so its keys alone can't distinguish "has a roster row" from
+    /// "we invented a placeholder because telemetry arrived first." See `isMemberConfirmed(_:)`.
+    private var observedRosterMemberIds: Set<String> = []
     /// Guards reconcileRemoteMembers against pruning real members during the childAdded replay
     /// burst that fires on every listener (re)attach: RTDB replays childAdded once per existing
     /// child sequentially, so observedTelemetryMemberIds is incomplete until this flips true.
     private var initialTelemetryLoadComplete = false
+
+    /// Single source of truth for "do we actually know this player well enough to classify and
+    /// display them" — true only once `id` has been confirmed independently via BOTH the
+    /// roster/membership channel and the telemetry channel (see CLOUD_DATA_MANAGEMENT.md
+    /// §"Display Players"). A member present in only one of the two (e.g. telemetry arrived
+    /// before their roster row did) must fail this, not fall back to a guessed classification —
+    /// callers should exclude such members from display entirely rather than rendering them with
+    /// a default team color.
+    public func isMemberConfirmed(_ id: String) -> Bool {
+        observedRosterMemberIds.contains(id) && observedTelemetryMemberIds.contains(id)
+    }
 
     private static let telemetryMetadataKeys: Set<String> = ["exp"]
 
@@ -303,15 +323,35 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         return SymmetricKey(data: Data(digest))
     }
 
+    /// Plain Crockford Base32 (32 symbols, excludes `0`/`O`, `1`/`I`/`L` for readability) — the
+    /// one alphabet shared by every SHA256-digest-to-id derivation in the app (room-id padding,
+    /// member ids, indicator ids). Defined once here so a future alphabet change can't be applied
+    /// to one derivation and missed on another.
+    public static let crockfordAlphabet: [Character] = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
+
+    /// Maps the first `length` bytes of a SHA256 digest onto `crockfordAlphabet` — the shared
+    /// tail end of `deriveRoomPadding` and `GameStateManager.deriveMemberId`, which differ only
+    /// in their domain-separation prefix and digest input.
+    public static func crockfordEncode(digest: SHA256Digest, length: Int) -> String {
+        String(Array(digest).prefix(length).map { crockfordAlphabet[Int($0) % crockfordAlphabet.count] })
+    }
+
     /// Derives a deterministic room-id padding suffix from (name, PIN), domain-separated from
     /// `hashPin`'s own combined-string format via the "roompad:" prefix so the two derivations
     /// never share identical input despite hashing the same PIN. See CLOUD_DATA_MANAGEMENT.md.
     public static func deriveRoomPadding(pin: String, name: String, length: Int? = nil) -> String {
-        let alphabet = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
         let padLength = length ?? max(0, AppConstants.UI.maxRoomNameLength - name.count)
         let combined = "roompad:\(name):\(pin)"
-        let digest = Array(SHA256.hash(data: Data(combined.utf8)))
-        return String(digest.prefix(padLength).map { alphabet[Int($0) % alphabet.count] })
+        return crockfordEncode(digest: SHA256.hash(data: Data(combined.utf8)), length: padLength)
+    }
+
+    /// The single derivation of a room's full Firebase id from its (already-sanitized) plain
+    /// name and PIN. Every caller that owns a plain room name — hosting, joining, and a
+    /// companion device adopting a peer-relayed name — must go through this one function rather
+    /// than inlining `name + deriveRoomPadding(...)` themselves, so the id (and everything salted
+    /// from it: `pinHash`, `deriveTelemetryKey`) can never drift between call sites.
+    public static func deriveRoomId(name: String, pin: String) -> String {
+        name + deriveRoomPadding(pin: pin, name: name)
     }
 
     // MARK: - Late Packet Rejection Engine
@@ -360,13 +400,20 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     }
 
     /// Validates and applies a batch of telemetry packets, updating activeRoom in a single
-    /// pass to avoid redundant @Published view re-evaluations.
+    /// pass to avoid redundant @Published view re-evaluations. Also the entry point for
+    /// WCSession-relayed telemetry (a device without its own `/p/{roomId}` listener attached,
+    /// e.g. the Phone while the Watch holds network ownership) — so a packet's mere presence
+    /// here marks its member "observed" in `observedTelemetryMemberIds` exactly like the direct
+    /// listener does in `handleTelemetryChildUpsert`, regardless of whether the packet itself
+    /// passes freshness. Both paths write into the same `activeRoom.members`, so `isMemberConfirmed`
+    /// must recognize both as equally valid confirmation, not just the direct-listener source.
     @discardableResult
     public func validateAndProcessPackets(_ packets: [TelemetryPacket]) -> Int {
         guard !packets.isEmpty else { return 0 }
 
         var acceptedPackets: [TelemetryPacket] = []
         for packet in packets {
+            observedTelemetryMemberIds.insert(packet.memberId)
             if checkAndTrackPacketFreshness(packet) {
                 acceptedPackets.append(packet)
             }
@@ -1202,6 +1249,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             updatedMembers[localId] = localMember
         }
         current.members = updatedMembers
+        // Authoritative: this snapshot is the full current roster, so replace rather than union —
+        // a member whose roster row disappears (leave/kick) must drop out of this set too.
+        observedRosterMemberIds = Set(remoteMembers.keys)
     }
 
     /// Decodes and merges a /r/{roomId}/m (members-only) snapshot into activeRoom. This is the
@@ -1245,6 +1295,11 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             if var current = self.activeRoom {
+                current.hostId = decodedRoom.hostId
+                current.maxCapacity = decodedRoom.maxCapacity
+                current.maxTacticalIndicators = decodedRoom.maxTacticalIndicators
+                current.pinHash = decodedRoom.pinHash
+                current.expireAt = decodedRoom.expireAt
                 self.mergeRemoteMembers(decodedRoom.members, into: &current)
                 self.activeRoom = current
             } else {
@@ -1279,6 +1334,9 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                 if !remoteMember.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     self.knownCallsigns[cleanMemberId] = remoteMember.callsign
                 }
+                // The node decoded successfully, so the roster row exists server-side —
+                // independent confirmation alongside mergeRemoteMembers' wholesale replace.
+                self.observedRosterMemberIds.insert(cleanMemberId)
                 if var currentRoom = self.activeRoom, currentRoom.id == cleanRoomId {
                     if var existing = currentRoom.members[cleanMemberId] {
                         existing.callsign = remoteMember.callsign

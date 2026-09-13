@@ -59,7 +59,12 @@ public final class GameStateManager: ObservableObject {
     /// see docs/CLOUD_DATA_MANAGEMENT.md §5.E.
     public var isEncryptionEnabled: Bool {
         get { watchConnectivityManager.localLS.config.isEncryptionEnabled }
-        set { watchConnectivityManager.mutateLocalConfig { $0.isEncryptionEnabled = newValue } }
+        set {
+            watchConnectivityManager.mutateLocalConfig { $0.isEncryptionEnabled = newValue }
+            if let roomId = firebaseManager.activeRoom?.id, !roomId.isEmpty {
+                firebaseManager.setEncryptionContext(pin: savedPin, roomId: roomId, isEncryptionEnabled: newValue)
+            }
+        }
     }
     public var myRole: MemberRole {
         get {
@@ -303,9 +308,20 @@ public final class GameStateManager: ObservableObject {
         }
     }
     
-    public func sendSessionAction(_ action: SessionAction) {
+    /// - Parameter republishLoginCycle: Whether this call should also write/publish
+    ///   `loginCycle` from the resulting state machine state. True for every locally-initiated
+    ///   action (pressing Join/Host — the peer needs to learn about *our own* new state). False
+    ///   when called from `adoptCompanionSession`, where `loginCycle` was already set correctly
+    ///   by the peer's own publish that triggered the adoption in the first place — re-deriving
+    ///   and republishing it here would only be reflecting our own peer's state back at it, and
+    ///   `isHosting`'s setter can't distinguish "not hosting because inactive" from "not hosting
+    ///   because joined," so doing so overwrites a live `.joinActive`/`.hostActive` with a
+    ///   spurious `.inactive` until the corrective branch below fires moments later.
+    public func sendSessionAction(_ action: SessionAction, republishLoginCycle: Bool = true) {
         sessionStateMachine.handle(action)
-        isHosting = sessionStateMachine.state.isHosting
+        if republishLoginCycle {
+            isHosting = sessionStateMachine.state.isHosting
+        }
         isInitiatingHost = sessionStateMachine.state.isInitiatingHost
         isJoining = sessionStateMachine.state.isJoining
         // `isHosting`'s setter is the only writer of `loginCycle`, and it only ever
@@ -314,7 +330,7 @@ public final class GameStateManager: ObservableObject {
         // peer device's LWW merge actually learns "this device joined a room"; without
         // this, `loginCycle` never leaves .inactive on a successful join and the peer
         // never converges on the joined session.
-        if case .joined = sessionStateMachine.state {
+        if republishLoginCycle, case .joined = sessionStateMachine.state {
             watchConnectivityManager.mutateLocalLoginCycle { $0.loginCycle = .joinActive }
         }
         if let err = sessionStateMachine.state.errorMessage {
@@ -388,22 +404,14 @@ public final class GameStateManager: ObservableObject {
         defer { isUpdatingTacticalIndicators = false }
         
         let currentRoom = room ?? firebaseManager.activeRoom
-        let now = Date().timeIntervalSince1970
-        deletedIndicatorTombstones = deletedIndicatorTombstones.filter { now - $0.value < 600 }
-        
+
         var mergedMap = localIndicators
         if let currentRoom = currentRoom {
             for (id, ind) in currentRoom.indicators {
-                if deletedIndicatorTombstones[id] == nil {
-                    mergedMap[id] = ind
-                }
+                mergedMap[id] = ind
             }
         }
-        
-        for tombstoneId in deletedIndicatorTombstones.keys {
-            mergedMap.removeValue(forKey: tombstoneId)
-        }
-        
+
         let rawIndicators = Array(mergedMap.values)
         if rawIndicators.isEmpty {
             if !allTacticalIndicators.isEmpty { allTacticalIndicators = [] }
@@ -483,10 +491,8 @@ public final class GameStateManager: ObservableObject {
     /// deletes from multiple members are harmless rather than a race.
     public func enforceTacticalIndicatorMaintenance(room: SquadRoom? = nil) {
         let expiredIds = localIndicators.values.filter { $0.category != .squadOrder && $0.isExpired }.map { $0.id }
-        let now = Date().timeIntervalSince1970
         for id in expiredIds {
             localIndicators.removeValue(forKey: id)
-            deletedIndicatorTombstones[id] = now
         }
 
         let currentRoom = room ?? firebaseManager.activeRoom
@@ -513,7 +519,13 @@ public final class GameStateManager: ObservableObject {
             pruneSelectionIfStale()
             return
         }
-        let filtered = currentRoom.members.values.filter { $0.id != myMemberId }.sorted { $0.id < $1.id }
+        // A member must be confirmed via BOTH the roster/membership channel and the telemetry
+        // channel before we display or classify them — see FirebaseSyncManager.isMemberConfirmed
+        // and CLOUD_DATA_MANAGEMENT.md. Failing either check excludes the member entirely rather
+        // than rendering a guessed team color that later flips once the missing side resolves.
+        let filtered = currentRoom.members.values
+            .filter { $0.id != myMemberId && firebaseManager.isMemberConfirmed($0.id) }
+            .sorted { $0.id < $1.id }
         if otherSquadMembers != filtered {
             otherSquadMembers = filtered
         }
@@ -635,7 +647,12 @@ public final class GameStateManager: ObservableObject {
     public let watchConnectivityManager: WatchConnectivityManager
     
     // PRD Network Ownership and Activity Tokens
+    /// Single uplink gate for every write to `firebaseManager` (telemetry, member metadata,
+    /// isDead, etc.) — `(host_active OR join_active) AND` the per-platform device condition.
+    /// Requiring `loginCycle` here too (not just the device condition) means a device that
+    /// hasn't actually joined/hosted a session never writes, regardless of lease state.
     public var hasNetworkOwnership: Bool {
+        guard watchConnectivityManager.localLS.loginCycle.loginCycle != .inactive else { return false }
         #if os(watchOS)
         // Watch is primary cloud client
         return true
@@ -680,7 +697,6 @@ public final class GameStateManager: ObservableObject {
     private var timer: AnyCancellable?
     private var freshnessExpiryTimer: AnyCancellable?
     private var activeAdvertisementTimer: AnyCancellable?
-    private var deletedIndicatorTombstones: [String: TimeInterval] = [:]
     internal private(set) var persistentRemoteTelemetry: [String: [Any]] = [:]
     
     public init(watchConnectivityManager: WatchConnectivityManager = WatchConnectivityManager.shared) {
@@ -971,13 +987,19 @@ public final class GameStateManager: ObservableObject {
     /// (`hasNetworkOwnership`) — a device can be gated off writes while still needing listeners
     /// attached (or vice versa).
     ///
+    /// Gated on `(host_active OR join_active) AND` the per-platform device condition below —
+    /// `loginCycle` (not `isTacticalSessionActive`) is the session-active signal, since it's the
+    /// single synced source of truth for "did we actually choose to host/join," rather than a
+    /// second, locally-derived flag that could drift from it.
+    ///
     /// Differentiated per platform per architecture specification:
     /// - Watch: appActive || peerLeaseActive
     ///   i.e. app_active OR (watch.Time < p2w_hs.active_until)
     /// - Phone: appActive && !peerLeaseActive
     ///   i.e. app_active AND (phone.time > w2p_hs.active_until)
     public func evaluateListenerGate() {
-        guard isTacticalSessionActive,
+        let loginActive = watchConnectivityManager.localLS.loginCycle.loginCycle != .inactive
+        guard loginActive,
               let roomId = firebaseManager.activeRoom?.id ?? (!savedRoomName.isEmpty ? savedRoomName : nil) else {
             firebaseManager.stopTelemetryPolling()
             return
@@ -1200,7 +1222,7 @@ public final class GameStateManager: ObservableObject {
     
     // MARK: - Adaptive Rate Control
     
-    public func currentHeartbeatFallbackInterval() -> TimeInterval {
+    public func currentHeartbeatRefreshInterval() -> TimeInterval {
         let memberCount = firebaseManager.activeRoom?.members.count ?? 0
         return AppConstants.Timing.ConstantBandwidth.refreshInterval(forPlayerCount: memberCount)
     }
@@ -1234,7 +1256,7 @@ public final class GameStateManager: ObservableObject {
     
     private func restartHeartbeatTimer() {
         timer?.cancel()
-        let interval = currentHeartbeatFallbackInterval()
+        let interval = currentHeartbeatRefreshInterval()
         timer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -1308,15 +1330,23 @@ public final class GameStateManager: ObservableObject {
     }
 
     /// Guarantees this device's own `active_until` lease (`p2w_hs` on Phone, `w2p_hs` on Watch)
-    /// refreshes at least once per `activeAdvertisementCadenceSeconds` while genuinely active, so
-    /// a gap in incidental traffic (no HR sample, no telemetry to relay) can't let the 5s lease
-    /// lapse. WCSession transport is strictly for Phone-to-Watch companion communication and is
-    /// completely decoupled from Firebase/server room connection. Gated solely on `isWristActive`
-    /// (whether the user has the app open/active on this device) — owned by `GameStateManager`
-    /// itself, not `FirebaseSyncManager`, precisely so this timer's lifecycle never depends on the
-    /// Firebase manager's own lifecycle.
+    /// refreshes at least once per `activeAdvertisementCadenceSeconds`, so a gap in incidental
+    /// traffic (no HR sample, no telemetry to relay) can't let the 5s lease lapse. WCSession
+    /// transport is strictly for Phone-to-Watch companion communication and is completely
+    /// decoupled from Firebase/server room connection. Runs unconditionally at 1Hz once started —
+    /// owned by `GameStateManager` itself, not `FirebaseSyncManager`, precisely so this timer's
+    /// lifecycle never depends on the Firebase manager's own lifecycle.
     ///
-    /// Deliberately NOT gated on `isReachable`: that property reflects live two-way messaging
+    /// Deliberately NOT gated on `isWristActive`: Always-On display dims the screen
+    /// (`isLuminanceReduced` -> `isWristActive == false`) without suspending the process, and this
+    /// loop must keep ticking through that — the only qualifier for whether a tick actually reaches
+    /// the peer is `isReachable`, checked downstream inside `advertiseWatchHighSpeed`/
+    /// `advertisePhoneHighSpeed` (session activation + reachability), never up here. Gating the loop
+    /// itself on wrist activity is exactly what stopped the Watch's lease from refreshing while
+    /// dimmed, even though `isReachable` alone would have handled the send-vs-fallback decision
+    /// correctly.
+    ///
+    /// Also NOT gated on `isReachable` directly: that property reflects live two-way messaging
     /// availability (foreground/high-priority-background), which is known to unreliably read
     /// `false` even while a companion is genuinely alive and running (e.g. a watch mid-workout
     /// with the screen off) — exactly this app's primary posture. `updateApplicationContext`
@@ -1328,11 +1358,6 @@ public final class GameStateManager: ObservableObject {
     /// below) — `*_hs` is one Codable struct sent as one atomic unit at this single 1Hz rate,
     /// regardless of which underlying source (HR, telemetry, lease) actually changed.
     private func updateActiveAdvertisementTimer() {
-        guard isWristActive else {
-            activeAdvertisementTimer?.cancel()
-            activeAdvertisementTimer = nil
-            return
-        }
         guard activeAdvertisementTimer == nil else { return }
         advertiseActiveLease()
         activeAdvertisementTimer = Timer.publish(every: AppConstants.WatchConnectivity.activeAdvertisementCadenceSeconds, on: .main, in: .common)
@@ -1349,6 +1374,9 @@ public final class GameStateManager: ObservableObject {
     var onActiveLeaseAdvertised: (() -> Void)?
 
     private func advertiseActiveLease() {
+        // Same 1Hz tick also advances the sim_hr speed SMA (see LocationHeadingManager.sampleSpeedForSMA) —
+        // sim_hr and the w2p_hs/p2w_hs lease refresh share one "Local refresh rate (1Hz)" clock by design.
+        locationHeadingManager.sampleSpeedForSMA()
         #if os(watchOS)
         advertiseWatchHighSpeedState()
         #else
@@ -1386,7 +1414,6 @@ public final class GameStateManager: ObservableObject {
     
     public func purgeLocalSessionAndIcons() {
         persistentRemoteTelemetry.removeAll()
-        deletedIndicatorTombstones.removeAll()
         localIndicators.removeAll()
         allTacticalIndicators.removeAll()
         otherSquadMembers.removeAll()
@@ -1459,24 +1486,22 @@ public final class GameStateManager: ObservableObject {
     public static let shortMemberIdLength = 8
 
     public static func generateShortMemberId(length: Int = shortMemberIdLength) -> String {
-        let alphabet = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
         var generator = SystemRandomNumberGenerator()
-        return String((0..<length).map { _ in alphabet.randomElement(using: &generator)! })
+        return String((0..<length).map { _ in FirebaseSyncManager.crockfordAlphabet.randomElement(using: &generator)! })
     }
 
     /// Deterministically derives the local device's `myMemberId` from its callsign, so the
     /// phone and watch companion apps — which each run an independent `GameStateManager` with
     /// no shared `UserDefaults` (no App Group entitlement) — converge on the same member id for
-    /// the same callsign without depending on a WatchConnectivity sync round-trip. Mirrors
-    /// `FirebaseSyncManager.deriveRoomPadding`'s SHA256-into-Crockford-alphabet pattern, always
-    /// emitting exactly `shortMemberIdLength` characters to satisfy the server-side
-    /// `$memberId.length == 8` validation in database.rules.json regardless of callsign content.
+    /// the same callsign without depending on a WatchConnectivity sync round-trip. Shares
+    /// `FirebaseSyncManager.crockfordEncode`'s SHA256-into-Crockford-alphabet primitive with
+    /// `deriveRoomPadding`, always emitting exactly `shortMemberIdLength` characters to satisfy
+    /// the server-side `$memberId.length == 8` validation in database.rules.json regardless of
+    /// callsign content.
     public static func deriveMemberId(fromCallsign callsign: String) -> String {
-        let alphabet = Array("23456789ABCDEFGHJKLMNPQRSTUVWXYZ")
         let normalized = callsign.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         let combined = "memberid:\(normalized)"
-        let digest = Array(SHA256.hash(data: Data(combined.utf8)))
-        return String(digest.prefix(shortMemberIdLength).map { alphabet[Int($0) % alphabet.count] })
+        return FirebaseSyncManager.crockfordEncode(digest: SHA256.hash(data: Data(combined.utf8)), length: shortMemberIdLength)
     }
 
     // MARK: - Clan Affiliation Helpers
@@ -1663,7 +1688,7 @@ public final class GameStateManager: ObservableObject {
             return false
         }
 
-        let squadId = cleanedName + FirebaseSyncManager.deriveRoomPadding(pin: cleanedPin, name: cleanedName)
+        let squadId = FirebaseSyncManager.deriveRoomId(name: cleanedName, pin: cleanedPin)
         let hostMember = makeCurrentSquadMember(role: myRole)
         let passHash = FirebaseSyncManager.hashPin(cleanedPin, salt: squadId)
 
@@ -1770,7 +1795,7 @@ public final class GameStateManager: ObservableObject {
             return
         }
 
-        let cleanId = isPreDerivedId ? truncatedName : (truncatedName + FirebaseSyncManager.deriveRoomPadding(pin: cleanedPin, name: truncatedName))
+        let cleanId = isPreDerivedId ? truncatedName : FirebaseSyncManager.deriveRoomId(name: truncatedName, pin: cleanedPin)
 
         sendSessionAction(.startJoin(id: cleanId, pin: cleanedPin))
         errorMessage = nil
@@ -1833,20 +1858,32 @@ public final class GameStateManager: ObservableObject {
     }
     
     public func adoptCompanionSession(roomName: String, isHosting: Bool, pin: String? = nil) {
-        let cleanId = roomName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        guard !cleanId.isEmpty else { return }
+        let cleanName = roomName.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !cleanName.isEmpty else { return }
 
-        if self.savedRoomName != cleanId {
-            self.savedRoomName = cleanId
+        if self.savedRoomName != cleanName {
+            self.savedRoomName = cleanName
         }
         if let pin = pin, !pin.isEmpty {
             self.savedPin = pin
         }
-        self.isHosting = isHosting
+        // `loginCycle` is already correct here — it's what the peer just published to trigger
+        // this adoption in the first place. Don't write `self.isHosting` (it isn't local
+        // bookkeeping despite the name; its setter mutates and republishes `loginCycle` over
+        // WCSession) — doing so would overwrite a live `.joinActive`/`.hostActive` with a
+        // spurious `.inactive`, since that setter has no way to represent "joined." See
+        // sendSessionAction's `republishLoginCycle` parameter below.
         self.isInitiatingHost = false
         self.isJoining = false
         self.clearFieldErrors()
         self.errorMessage = nil
+
+        guard !self.savedPin.isEmpty else { return }
+
+        // Same FirebaseSyncManager.deriveRoomId call hostRoom/joinRoom use — the peer's
+        // roomName/pin already carry everything needed (§ConfigSnapshot), so the full room id
+        // is derived here rather than tracked as separate synced state.
+        let cleanId = FirebaseSyncManager.deriveRoomId(name: cleanName, pin: self.savedPin)
 
         firebaseManager.setEncryptionContext(pin: self.savedPin, roomId: cleanId, isEncryptionEnabled: isEncryptionEnabled)
 
@@ -1861,7 +1898,7 @@ public final class GameStateManager: ObservableObject {
                 // leaves the state machine stuck on `.disconnected`, diverging from a
                 // locally-initiated session for any consumer that reads `sessionStateMachine.state`.
                 if let room = self.firebaseManager.activeRoom {
-                    self.sendSessionAction(isHosting ? .hostSuccess(room: room) : .joinSuccess(room: room))
+                    self.sendSessionAction(isHosting ? .hostSuccess(room: room) : .joinSuccess(room: room), republishLoginCycle: false)
                 }
                 self.startTacticalSession()
             }
@@ -1911,7 +1948,7 @@ public final class GameStateManager: ObservableObject {
     public func setDead(_ dead: Bool) {
         isDead = dead
         let now = Date().timeIntervalSince1970
-        if var room = firebaseManager.activeRoom, var member = room.members[myMemberId] {
+        if hasNetworkOwnership, var room = firebaseManager.activeRoom, var member = room.members[myMemberId] {
             member.status = dead ? .downed : .active
             member.heartRate = effectiveHeartRate
             member.lastUpdatedTimestamp = now
@@ -1948,14 +1985,14 @@ public final class GameStateManager: ObservableObject {
     }
 
     private func updateLocalMember(oldId: String? = nil) {
-        guard let room = firebaseManager.activeRoom else { return }
+        guard hasNetworkOwnership, let room = firebaseManager.activeRoom else { return }
         let lookupId = oldId ?? myMemberId
         guard var member = room.members[lookupId] ?? room.members[myMemberId] else { return }
-        
+
         if let oldId = oldId, oldId != myMemberId {
             firebaseManager.removeMember(id: oldId)
         }
-        
+
         member.callsign = myCallsign
         member.heading = locationHeadingManager.blendedHeading
         member.lastUpdatedTimestamp = Date().timeIntervalSince1970
@@ -1982,8 +2019,8 @@ public final class GameStateManager: ObservableObject {
             return true
         }
         
-        let heartbeatFallback = currentHeartbeatFallbackInterval()
-        if (currentTime - lastSentTimestamp) >= heartbeatFallback {
+        let heartbeatRefresh = currentHeartbeatRefreshInterval()
+        if (currentTime - lastSentTimestamp) >= heartbeatRefresh {
             return true
         }
 
@@ -2159,7 +2196,6 @@ public final class GameStateManager: ObservableObject {
             }
         }
 
-        deletedIndicatorTombstones.removeValue(forKey: newIndicator.id)
         localIndicators[newIndicator.id] = newIndicator
 
         if let roomId = roomId {
@@ -2170,7 +2206,6 @@ public final class GameStateManager: ObservableObject {
     }
     
     public func removeTacticalIndicator(id: String) {
-        deletedIndicatorTombstones[id] = Date().timeIntervalSince1970
         localIndicators.removeValue(forKey: id)
         if var room = firebaseManager.activeRoom {
             room.indicators.removeValue(forKey: id)

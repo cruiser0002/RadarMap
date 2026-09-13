@@ -359,6 +359,31 @@ public enum DeviceRole {
     case watch
 }
 
+/// A `*_ls` mergeable structure: carries its own last-change timestamp and can be compared for
+/// equality (all five conforming snapshot types below are already `Equatable`, and their
+/// `isEquivalent(to:)` methods compare the same fields `==` does — so plain `Equatable` is enough
+/// for merge purposes; `isEquivalent(to:)` stays in place for its other call sites in
+/// `WatchConnectivityManager`'s `mutateLocal*` guards and `LowSpeedSnapshot.isDomainEquivalent`).
+public protocol MergeableLSStructure: Equatable {
+    var ts: TimeInterval { get }
+}
+
+extension ConfigSnapshot: MergeableLSStructure {
+    public var ts: TimeInterval { configTs }
+}
+extension LoginCycleSnapshot: MergeableLSStructure {
+    public var ts: TimeInterval { loginCycleTs }
+}
+extension MembershipSnapshot: MergeableLSStructure {
+    public var ts: TimeInterval { memberTs }
+}
+extension TacticalSnapshot: MergeableLSStructure {
+    public var ts: TimeInterval { tacticalTs }
+}
+extension PlayerStateSnapshot: MergeableLSStructure {
+    public var ts: TimeInterval { isDeadTs }
+}
+
 public struct MergeEngine {
 
     /// Determines the winner between a Phone version and a Watch version of a structure.
@@ -382,6 +407,28 @@ public struct MergeEngine {
         }
     }
 
+    /// Merges one `*_ls` structure: resolves the winner via `resolveWinner` (mapping local/peer
+    /// onto phone/watch by role) and reports whether *this* device's own value is the one that
+    /// won a genuine discrepancy — the single per-structure step every mergeable field in
+    /// `LowSpeedSnapshot` shares, so `merge(local:peer:localDevice:)` below doesn't need one
+    /// hand-written copy of this logic per field (see docs/COMPANION_DATA_SYNC_MODEL.md §3).
+    private static func mergeStructure<T: MergeableLSStructure>(
+        local: T,
+        peer: T,
+        isPhone: Bool
+    ) -> (winner: T, localWon: Bool) {
+        let phoneValue = isPhone ? local : peer
+        let watchValue = isPhone ? peer : local
+        let result = resolveWinner(
+            phoneValue: phoneValue,
+            phoneTs: phoneValue.ts,
+            watchValue: watchValue,
+            watchTs: watchValue.ts
+        )
+        let localWon = isPhone ? result.phoneWon : !result.phoneWon
+        return (result.winnerValue, local != peer && localWon)
+    }
+
     /// Merges an incoming counterpart LowSpeedSnapshot into the local LowSpeedSnapshot.
     /// Returns the updated local snapshot and whether the local device advertises any structure that wins against peer.
     public static func merge(
@@ -391,113 +438,27 @@ public struct MergeEngine {
     ) -> (mergedLocal: LowSpeedSnapshot, localHasWinningStructure: Bool) {
         var merged = local
         var localHasWinningStructure = false
-
         let isPhone = (localDevice == .phone)
 
-        // 1. Config merge
-        let phoneConfig = isPhone ? local.config : peer.config
-        let watchConfig = isPhone ? peer.config : local.config
-        let configRes = resolveWinner(
-            phoneValue: phoneConfig,
-            phoneTs: phoneConfig.configTs,
-            watchValue: watchConfig,
-            watchTs: watchConfig.configTs
-        )
-        if isPhone {
-            if !local.config.isEquivalent(to: peer.config) && configRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.config = configRes.winnerValue
-        } else {
-            if !local.config.isEquivalent(to: peer.config) && !configRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.config = configRes.winnerValue
-        }
+        let config = mergeStructure(local: local.config, peer: peer.config, isPhone: isPhone)
+        merged.config = config.winner
+        localHasWinningStructure = localHasWinningStructure || config.localWon
 
-        // 2. Login Cycle merge
-        let phoneCycle = isPhone ? local.loginCycle : peer.loginCycle
-        let watchCycle = isPhone ? peer.loginCycle : local.loginCycle
-        let cycleRes = resolveWinner(
-            phoneValue: phoneCycle,
-            phoneTs: phoneCycle.loginCycleTs,
-            watchValue: watchCycle,
-            watchTs: watchCycle.loginCycleTs
-        )
-        if isPhone {
-            if !local.loginCycle.isEquivalent(to: peer.loginCycle) && cycleRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.loginCycle = cycleRes.winnerValue
-        } else {
-            if !local.loginCycle.isEquivalent(to: peer.loginCycle) && !cycleRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.loginCycle = cycleRes.winnerValue
-        }
+        let loginCycle = mergeStructure(local: local.loginCycle, peer: peer.loginCycle, isPhone: isPhone)
+        merged.loginCycle = loginCycle.winner
+        localHasWinningStructure = localHasWinningStructure || loginCycle.localWon
 
-        // 3. Membership merge
-        let phoneMem = isPhone ? local.membership : peer.membership
-        let watchMem = isPhone ? peer.membership : local.membership
-        let memRes = resolveWinner(
-            phoneValue: phoneMem,
-            phoneTs: phoneMem.memberTs,
-            watchValue: watchMem,
-            watchTs: watchMem.memberTs
-        )
-        if isPhone {
-            if !local.membership.isEquivalent(to: peer.membership) && memRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.membership = memRes.winnerValue
-        } else {
-            if !local.membership.isEquivalent(to: peer.membership) && !memRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.membership = memRes.winnerValue
-        }
+        let membership = mergeStructure(local: local.membership, peer: peer.membership, isPhone: isPhone)
+        merged.membership = membership.winner
+        localHasWinningStructure = localHasWinningStructure || membership.localWon
 
-        // 4. Tactical merge
-        let phoneTac = isPhone ? local.tactical : peer.tactical
-        let watchTac = isPhone ? peer.tactical : local.tactical
-        let tacRes = resolveWinner(
-            phoneValue: phoneTac,
-            phoneTs: phoneTac.tacticalTs,
-            watchValue: watchTac,
-            watchTs: watchTac.tacticalTs
-        )
-        if isPhone {
-            if !local.tactical.isEquivalent(to: peer.tactical) && tacRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.tactical = tacRes.winnerValue
-        } else {
-            if !local.tactical.isEquivalent(to: peer.tactical) && !tacRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.tactical = tacRes.winnerValue
-        }
+        let tactical = mergeStructure(local: local.tactical, peer: peer.tactical, isPhone: isPhone)
+        merged.tactical = tactical.winner
+        localHasWinningStructure = localHasWinningStructure || tactical.localWon
 
-        // 5. Player State merge
-        let phonePlayer = isPhone ? local.playerState : peer.playerState
-        let watchPlayer = isPhone ? peer.playerState : local.playerState
-        let playerRes = resolveWinner(
-            phoneValue: phonePlayer,
-            phoneTs: phonePlayer.isDeadTs,
-            watchValue: watchPlayer,
-            watchTs: watchPlayer.isDeadTs
-        )
-        if isPhone {
-            if !local.playerState.isEquivalent(to: peer.playerState) && playerRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.playerState = playerRes.winnerValue
-        } else {
-            if !local.playerState.isEquivalent(to: peer.playerState) && !playerRes.phoneWon {
-                localHasWinningStructure = true
-            }
-            merged.playerState = playerRes.winnerValue
-        }
+        let playerState = mergeStructure(local: local.playerState, peer: peer.playerState, isPhone: isPhone)
+        merged.playerState = playerState.winner
+        localHasWinningStructure = localHasWinningStructure || playerState.localWon
 
         return (merged, localHasWinningStructure)
     }

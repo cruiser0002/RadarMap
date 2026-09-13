@@ -31,12 +31,20 @@ from stress_test_simulator import (
 class TestStressTestSimulator(unittest.TestCase):
 
     def test_room_name_and_pin_sanitization(self):
-        """Tests that room name and PIN match RadarMap constraints."""
+        """Tests that room name and PIN match RadarMap constraints. No silent fallback default:
+        an empty/all-invalid input sanitizes to "" here, matching GameStateManager.sanitizeRoomNameInput/
+        sanitizePinInput exactly rather than substituting a placeholder value that could mismatch
+        another client's expectations."""
         self.assertEqual(sanitize_room_name("alpha-room!"), "ALPHAROOM")
         self.assertEqual(sanitize_room_name("VeryLongRoomNameExceeding12Chars"), "VERYLONGROOM")
-        self.assertEqual(sanitize_pin("pin 1234 #"), "pin1234")
+        self.assertEqual(sanitize_room_name(""), "")
+        # "pin" isn't a recognized spoken-digit word (see PIN_WORD_MAPPING), so — matching
+        # GameStateManager.sanitizePinInput bug-for-bug — its letters are dropped, not kept.
+        self.assertEqual(sanitize_pin("pin 1234 #"), "1234")
         self.assertEqual(sanitize_pin("1234 #"), "1234")
-        self.assertEqual(sanitize_pin(""), "1234")
+        self.assertEqual(sanitize_pin(""), "")
+        # Spoken-word dictation maps whole tokens to digits (PIN_WORD_MAPPING).
+        self.assertEqual(sanitize_pin("four two three one"), "4231")
 
     def test_member_id_deterministic_derivation(self):
         """Tests deterministic Crockford Base32 8-char member ID derivation."""
@@ -366,6 +374,18 @@ class TestStressTestSimulator(unittest.TestCase):
         self.assertAlmostEqual(coordinator.target_rate_hz, 0.20, places=3)
         self.assertAlmostEqual(coordinator.tick_interval, 5.0, places=3)
         self.assertAlmostEqual(coordinator.refresh_heartbeat_sec, 50.0, places=3)
+
+    def test_duration_zero_treated_as_unlimited(self):
+        """Verifies duration_sec=0 is normalized to None (unlimited)."""
+        from stress_test_simulator import StressTestCoordinator
+        coord = StressTestCoordinator(
+            center_lat=37.7858,
+            center_lon=-122.4064,
+            players=[],
+            duration_sec=0,
+            dry_run=True,
+        )
+        self.assertIsNone(coord.duration_sec)
 
 
 if __name__ == "__main__":

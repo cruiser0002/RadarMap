@@ -7,6 +7,7 @@ Matches the Swift WatchOS/iOS client schema and communication protocol.
 
 import math
 import os
+import re
 import time
 import random
 import hashlib
@@ -575,8 +576,24 @@ class RadarPlayerSimulator:
     MAX_ROOM_NAME_LENGTH = 16
     MAX_ROOM_NAME_ENTRY_LENGTH = 12
     MIN_ROOM_NAME_ENTRY_LENGTH = 4
+    # Matches AppConstants.Timing.ConstantBandwidth.refreshIntervalMultiplier: fallback
+    # heartbeat = 10 x T, not a flat constant — see heartbeat_interval_sec default below.
+    REFRESH_HEARTBEAT_MULTIPLIER = 10.0
     ROOM_TTL_SECONDS = 12.0 * 3600.0  # 12-hour idle cutoff (see CLOUD_DATA_MANAGEMENT.md)
     ROOM_PADDING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+    # Matches AppConstants.UI.pinWordMapping exactly — see sanitize_pin.
+    PIN_WORD_MAPPING = {
+        "zero": "0", "oh": "0",
+        "one": "1", "won": "1",
+        "two": "2", "to": "2", "too": "2",
+        "three": "3",
+        "four": "4", "for": "4", "fore": "4",
+        "five": "5",
+        "six": "6",
+        "seven": "7",
+        "eight": "8", "ate": "8",
+        "nine": "9",
+    }
     # Squad-order 3-letter codes — these self-prune under /t/{roomId}/o and never share the
     # enemy+environment cap under /t/{roomId}/i (see CLOUD_DATA_MANAGEMENT.md).
     SQUAD_ORDER_CODES = frozenset({
@@ -609,7 +626,7 @@ class RadarPlayerSimulator:
         enable_delta_gating: bool = False,
         min_movement_delta_meters: float = 3.5,
         min_hr_delta_bpm: float = 12.0,
-        heartbeat_interval_sec: float = 10.0,
+        heartbeat_interval_sec: Optional[float] = None,
         coordinator: Optional[FirebaseUploadCoordinator] = None,
     ):
         self.callsign = callsign.strip()
@@ -623,7 +640,7 @@ class RadarPlayerSimulator:
                 "(see CLOUD_DATA_MANAGEMENT.md) — pass pin=... with >= 4 alphanumeric characters."
             )
         self.max_tactical_indicators = self.PRO_TIER_MAX_TACTICAL_INDICATORS
-        self.room_id = self.room_name + self.derive_room_padding(self.pin, self.room_name)
+        self.room_id = self.derive_room_id(self.room_name, self.pin)
         self.center_lat = latitude
         self.center_lon = longitude
         self.altitude = altitude
@@ -667,7 +684,14 @@ class RadarPlayerSimulator:
         self.enable_delta_gating = enable_delta_gating
         self.min_movement_delta_meters = min_movement_delta_meters
         self.min_hr_delta_bpm = min_hr_delta_bpm
-        self.heartbeat_interval_sec = heartbeat_interval_sec
+        # Fallback heartbeat = 10 x T (AppConstants.Timing.ConstantBandwidth.refreshInterval),
+        # not a flat constant, so it scales alongside update_interval the same way the app's
+        # currentHeartbeatRefreshInterval() and stress_test_simulator's refresh_heartbeat_sec do.
+        self.heartbeat_interval_sec = (
+            heartbeat_interval_sec
+            if heartbeat_interval_sec is not None
+            else self.update_interval * self.REFRESH_HEARTBEAT_MULTIPLIER
+        )
 
         # 3-letter tactical type codes mapping
         self.type_codes = {
@@ -689,19 +713,31 @@ class RadarPlayerSimulator:
 
     @staticmethod
     def sanitize_pin(pin: str) -> str:
-        """Sanitizes PIN input to ASCII alphanumerics up to MAX_PIN_LENGTH characters, matching
-        GameStateManager.sanitizePinInput. Must stay alphanumeric (not digits-only) so a PIN typed
-        into the Swift app hashes identically here — see CLOUD_DATA_MANAGEMENT.md §6.A."""
-        alphanumeric = [c for c in pin if c.isascii() and c.isalnum()]
-        return "".join(alphanumeric[:RadarPlayerSimulator.MAX_PIN_LENGTH])
+        """Sanitizes PIN input matching GameStateManager.sanitizePinInput bug-for-bug: lowercases,
+        splits on non-alphanumeric boundaries, maps a whole token to a digit via
+        PIN_WORD_MAPPING (spoken-word dictation, e.g. "four" -> "4"), and otherwise keeps only
+        the decimal digits within that token — a token with letters that isn't a recognized word
+        has those letters dropped, not kept, matching the Swift implementation exactly so a
+        dictated or typed PIN hashes identically in both. See CLOUD_DATA_MANAGEMENT.md §6.A."""
+        lowered = pin.lower()
+        tokens = re.split(r"[^a-z0-9]+", lowered)
+        result_parts: List[str] = []
+        for token in tokens:
+            mapped = RadarPlayerSimulator.PIN_WORD_MAPPING.get(token)
+            if mapped is not None:
+                result_parts.append(mapped)
+            else:
+                result_parts.append("".join(c for c in token if c.isdigit()))
+        return "".join(result_parts)[:RadarPlayerSimulator.MAX_PIN_LENGTH]
 
     @staticmethod
     def hash_pin(pin: str, salt: str) -> str:
-        """Computes SHA-256 hash matching FirebaseSyncManager: salt:pin"""
-        sanitized = RadarPlayerSimulator.sanitize_pin(pin)
-        if not sanitized:
+        """Matches FirebaseSyncManager.hashPin: hashes the PIN as given (already-sanitized by
+        the caller), not re-sanitized here — see CLOUD_DATA_MANAGEMENT.md §6.B."""
+        trimmed = pin.strip()
+        if not trimmed:
             return ""
-        combined = f"{salt}:{sanitized}"
+        combined = f"{salt}:{trimmed}"
         return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
     @staticmethod
@@ -715,6 +751,15 @@ class RadarPlayerSimulator:
         combined = f"roompad:{name}:{pin}"
         digest = hashlib.sha256(combined.encode("utf-8")).digest()
         return "".join(alphabet[b % len(alphabet)] for b in digest[:pad_length])
+
+    @staticmethod
+    def derive_room_id(name: str, pin: str) -> str:
+        """The single combining function for the room id — matching
+        FirebaseSyncManager.deriveRoomId(name:pin:). Every call site that owns a plain room name
+        must go through this rather than inlining `name + derive_room_padding(...)`, so the id
+        (and everything salted from it: pin_hash, derive_telemetry_key) can't drift between call
+        sites. See CLOUD_DATA_MANAGEMENT.md §7.A."""
+        return name + RadarPlayerSimulator.derive_room_padding(pin, name)
 
     @staticmethod
     def derive_telemetry_key(pin: str, room_id: str) -> bytes:
@@ -1131,24 +1176,35 @@ class RadarPlayerSimulator:
         self.is_connected = False
         self.is_running = False
 
-    def disband_room(self):
+    def disband_room(self, room_id: Optional[str] = None):
         """Clean disband of room on Firebase RTDB, purging all telemetry (p/), tactical (t/), and room (r/) nodes."""
-        if not self.room_id:
+        target_id = room_id or self.room_id
+        if not target_id:
             print("[ERROR] No room ID specified to disband.")
             return
 
-        print(f"\n[CLEANUP] Disbanding room '{self.room_id}' on Firebase RTDB...")
+        print(f"\n[CLEANUP] Disbanding room '{target_id}' on Firebase RTDB...")
         try:
-            self._http_request("DELETE", f"p/{self.room_id}.json")
-            self._http_request("DELETE", f"t/{self.room_id}.json")
-            self._http_request("DELETE", f"r/{self.room_id}.json")
-            print(f"[SUCCESS] Disbanded room '{self.room_id}' and purged all nodes (r/, p/, t/).")
+            self._http_request("DELETE", f"p/{target_id}.json")
+            self._http_request("DELETE", f"t/{target_id}.json")
+            self._http_request("DELETE", f"r/{target_id}.json")
+            print(f"[SUCCESS] Disbanded room '{target_id}' and purged all nodes (r/, p/, t/).")
         except Exception as e:
             print(f"[CLEANUP ERROR] Failed to delete room nodes: {e}")
 
-        self.coordinator.reset_session()
-        self.is_connected = False
-        self.is_running = False
+        if not room_id or room_id == self.room_id:
+            self.coordinator.reset_session()
+            self.is_connected = False
+            self.is_running = False
+
+    @classmethod
+    def purge_all_rooms(cls, credentials_path: Optional[str] = None, database_url: str = DEFAULT_DATABASE_URL):
+        """Administrative helper: purges all rooms across r/, p/, and t/ from Firebase RTDB."""
+        creds = resolve_firebase_credentials_path(credentials_path)
+        app = _get_or_create_firebase_app(creds, database_url)
+        for branch in ["r", "p", "t"]:
+            firebase_db.reference(f"/{branch}", app=app).delete()
+        print(f"[CLEANUP] Purged all nodes under /r, /p, and /t on {database_url}.")
 
     def shutdown(self):
         """Clean shutdown of coordinator and resources."""
@@ -1161,10 +1217,13 @@ class RadarPlayerSimulator:
         Starts circular telemetry simulation loop.
         Updates position in a circle at `speed` m/s with `radius` meters,
         broadcasting telemetry every `update_interval` seconds.
+        Pass duration_sec=0 or None to run forever until interrupted.
         """
         if not self.is_connected:
             print("[ERROR] Must host or join a room before running simulation.")
             return
+
+        effective_duration = duration_sec if (duration_sec is not None and duration_sec > 0) else None
 
         self.is_running = True
         start_time = time.time()
@@ -1175,14 +1234,16 @@ class RadarPlayerSimulator:
         print(f"📍 Center: ({self.center_lat:.6f}, {self.center_lon:.6f})")
         print(f"🔄 Radius: {self.radius:.1f} m | Speed: {self.speed:.1f} m/s | Interval: {self.update_interval:.1f}s")
         print(f"❤️ Heart Rate: {self.heart_rate:.0f} BPM | Format: {self.telemetry_format}")
+        limit_str = f"{effective_duration:.1f}s" if effective_duration is not None else "Unlimited (Ctrl+C or Interrupt Kernel to stop)"
+        print(f"⏱️ Duration: {limit_str}")
         print("Press Ctrl+C or Interrupt Kernel to stop...\n")
 
         try:
             while self.is_running:
                 now = time.time()
                 elapsed = now - start_time
-                if duration_sec is not None and elapsed >= duration_sec:
-                    print(f"\n⏱️ Reached duration limit ({duration_sec}s). Stopping simulation.")
+                if effective_duration is not None and elapsed >= effective_duration:
+                    print(f"\n⏱️ Reached duration limit ({effective_duration}s). Stopping simulation.")
                     break
 
                 dt = now - last_tick
@@ -1232,7 +1293,7 @@ def main():
     parser.add_argument("--interval", type=float, default=1.0, help="Update interval in seconds")
     parser.add_argument("--format", choices=["compact4", "compact6", "compact7", "dict"], default="compact4", help="Telemetry format")
     parser.add_argument("--encrypted", action="store_true", help="Encrypt telemetry/tactical compact arrays with AES-256-GCM (requires an array-based --format, not dict)")
-    parser.add_argument("--duration", type=float, default=None, help="Run duration in seconds (optional)")
+    parser.add_argument("--duration", type=float, default=None, help="Run duration in seconds (pass 0 or omit for unlimited)")
     parser.add_argument(
         "--credentials",
         default=None,

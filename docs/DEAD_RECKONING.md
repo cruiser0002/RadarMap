@@ -13,7 +13,7 @@ The following centralized constants from [`AppConstants.swift`](../RadarMap/AppC
 | **Extrapolation Math**| `degreesToRadiansFactor` | `.pi / 180.0` | Angular conversion factor for longitudinal latitude cosine scaling |
 | **Course Over Ground**| `minDisplacementForCourseOverGroundMeters` | `2.0m` | Displacement threshold to filter stationary GPS heading jitter (`Location`) |
 | **Upload Scheduling** | `baselineMaxUpdateRateHz` | `1.0 Hz` ($T = 1.0\text{s}$) | Maximum per-client telemetry upload rate ($P \le 12$) (`ConstantBandwidth`) |
-| **Upload Scheduling** | Fallback Heartbeat | `10.0 × T` ($10.0\text{s}$ at $1\text{Hz}$) | Maximum time without send before forced refresh heartbeat (`refreshIntervalMultiplier`) |
+| **Upload Scheduling** | Refresh Heartbeat | `10.0 × T` ($10.0\text{s}$ at $1\text{Hz}$) | Maximum time without send before forced refresh heartbeat (`refreshIntervalMultiplier`) |
 | **Receiver Rendering**| `remotePlayerDeadReckoningHz` | `1.0 Hz` (1.0s interval) | Cadence for locally recomputing remote squad positions (`DisplayRefresh`) |
 | **Receiver Rendering**| `radarUIHz` | `20.0 Hz` (50ms interval) | Vector CRT sweep and target rendering refresh frequency (`DisplayRefresh`) |
 | **Peer Stale Cutoff** | `staleTimeoutMultiplier` | `15.0 × T` ($15.0\text{s}$ at $1\text{Hz}$) | Network timeout before marking remote member as stale (gray) |
@@ -91,7 +91,7 @@ send (`broadcastLocalTelemetry`).
 1. `force` → always send.
 2. No prior sent sample at all → always send (first-ever packet).
 3. `isDead` transition → always send (state change, not a position matter).
-4. Heartbeat fallback interval elapsed (`currentHeartbeatFallbackInterval()`) → always send. This
+4. Refresh heartbeat interval elapsed (`currentHeartbeatRefreshInterval()`) → always send. This
    is the **sole staleness backstop** — it bounds worst-case correction time independent of whether
    the prediction model is behaving, so no separate absolute-distance backstop is needed alongside
    it.

@@ -3363,18 +3363,18 @@ final class RadarMapTests: XCTestCase {
         XCTAssertEqual(gameState.totalTelemetryUploadsEmitted, emittedBefore + 1, "Heart rate shift >= 12 BPM must emit new packet")
     }
     
-    func testHeartbeatFallbackTriggersWhenStationary() {
+    func testHeartbeatRefreshTriggersWhenStationary() {
         let gameState = createMockGameState()
         let room = SquadRoom(id: "HEARTBEAT_ROOM", hostId: gameState.myMemberId)
         gameState.firebaseManager.activeRoom = room
-        
+
         let loc = CLLocation(latitude: 37.785834, longitude: -122.406417)
         gameState.locationHeadingManager.userLocation = loc
         gameState.locationHeadingManager.blendedHeading = 0.0
         gameState.healthKitManager.currentHeartRate = 75.0
-        
+
         // Empty room (0 members): refreshInterval = 10 * updateInterval(0) = 10 * 1.0 = 10.0s
-        XCTAssertEqual(gameState.currentHeartbeatFallbackInterval(), 10.0, accuracy: 0.01)
+        XCTAssertEqual(gameState.currentHeartbeatRefreshInterval(), 10.0, accuracy: 0.01)
 
         // Stationary for 5.0 seconds (< 10.0s) -> should be suppressed
         let now = Date().timeIntervalSince1970
@@ -3386,9 +3386,9 @@ final class RadarMapTests: XCTestCase {
             currentTime: now + 5.0,
             force: false
         )
-        XCTAssertFalse(shouldNotEmit, "Stationary before 10s fallback must be gated")
+        XCTAssertFalse(shouldNotEmit, "Stationary before 10s refresh heartbeat must be gated")
 
-        // Simulate stationary in cover for 12.0 seconds (> 10.0s fallback threshold)
+        // Simulate stationary in cover for 12.0 seconds (> 10.0s refresh threshold)
         let shouldEmit = gameState.shouldEmitTelemetry(
             currentLocation: loc,
             currentHeading: 0.0,
@@ -3397,10 +3397,10 @@ final class RadarMapTests: XCTestCase {
             currentTime: now + 12.0,
             force: false
         )
-        XCTAssertTrue(shouldEmit, "Stationary heartbeat fallback (10.0s) must emit to prevent teammate icons from turning gray")
+        XCTAssertTrue(shouldEmit, "Stationary refresh heartbeat (10.0s) must emit to prevent teammate icons from turning gray")
     }
 
-    func testLargeServerHeartbeatFallbackScaling() {
+    func testLargeServerHeartbeatRefreshScaling() {
         let gameState = createMockGameState()
         var members: [String: SquadMember] = [:]
         for i in 1...30 {
@@ -3413,9 +3413,9 @@ final class RadarMapTests: XCTestCase {
         gameState.recalculateAdaptiveUploadInterval()
         XCTAssertEqual(gameState.adaptiveUploadInterval, 2.5, accuracy: 0.01)
 
-        // Heartbeat fallback now scales with room size too: 10 * T = 10 * 2.5 = 25.0s
-        let fallbackInterval = gameState.currentHeartbeatFallbackInterval()
-        XCTAssertEqual(fallbackInterval, 25.0, accuracy: 0.01, "Upload fallback scales with room size (10 * T)")
+        // Refresh heartbeat now scales with room size too: 10 * T = 10 * 2.5 = 25.0s
+        let refreshInterval = gameState.currentHeartbeatRefreshInterval()
+        XCTAssertEqual(refreshInterval, 25.0, accuracy: 0.01, "Upload refresh heartbeat scales with room size (10 * T)")
 
         // Display-side stale threshold stays in sync with the same T for Y * T staleness
         XCTAssertEqual(SquadMember.defaultUpdateInterval, 2.5, accuracy: 0.01)

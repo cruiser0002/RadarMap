@@ -18,6 +18,12 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
     /// simulate HR from motion when no optical sensor reading is present — see `AppConstants.Health`.
     @Published public private(set) var smoothedSpeedMps: Double = 0.0
     private var speedSamples: [Double] = []
+    /// Latest raw speed (m/s) reported by CoreLocation. Sampled into the SMA once per second by
+    /// `sampleSpeedForSMA()`, called from `GameStateManager`'s 1Hz `activeAdvertisementTimer` tick
+    /// (the same "Local refresh rate (1Hz)" clock that drives the w2p_hs/p2w_hs lease refresh) —
+    /// not on every GPS/compass delegate callback, whose cadence is bursty while turning and silent
+    /// while stationary rather than a steady per-second clock.
+    private var latestRawSpeedMps: Double = 0.0
     @Published public var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published public var isUpdating: Bool = false
     
@@ -87,12 +93,19 @@ public final class LocationHeadingManager: NSObject, ObservableObject, CLLocatio
         smoothedSpeedMps = speedSamples.reduce(0, +) / Double(speedSamples.count)
     }
 
+    /// Pushes the latest raw speed sample into the SMA. Called once per second from
+    /// `GameStateManager`'s `activeAdvertisementTimer` tick — see `latestRawSpeedMps`.
+    public func sampleSpeedForSMA() {
+        updateSmoothedSpeed(withRawSample: latestRawSpeedMps)
+    }
+
     private func recalculateBlendedHeading() {
         let compass = userHeading != nil && userHeading!.headingAccuracy >= 0 ? (userHeading!.trueHeading >= 0 ? userHeading!.trueHeading : userHeading!.magneticHeading) : nil
         let loc = userLocation
         let course = loc != nil && loc!.course >= 0 ? loc!.course : nil
         let speed = max(0.0, loc?.speed ?? 0.0)
-        updateSmoothedSpeed(withRawSample: speed)
+        latestRawSpeedMps = speed
+        // Note: this does not itself advance smoothedSpeedMps — see sampleSpeedForSMA().
 
         let hasValidCompass = compass != nil
         let hasValidCourse = course != nil

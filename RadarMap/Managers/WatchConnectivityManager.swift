@@ -46,22 +46,8 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         localRole == .phone ? w2pHS.activeUntil : p2wHS.activeUntil
     }
     
-    /// Backward-compatibility computed accessor for companion's activeUntil.
-    public var latestRemoteActiveUntil: TimeInterval {
-        companionActiveUntil
-    }
-    
     public var latestAdvertisedWatchHS: WatchToPhoneHighSpeed? {
         localRole == .watch ? w2pHS : nil
-    }
-    public var latestAdvertisedPhoneHS: PhoneToWatchHighSpeed? {
-        localRole == .phone ? p2wHS : nil
-    }
-    public var latestRemoteTelemetryJson: String {
-        localRole == .phone ? w2pHS.remotePlayerTelemetryJson : p2wHS.remotePlayerTelemetryJson
-    }
-    public var latestRemoteHeartRate: Double {
-        localRole == .phone ? w2pHS.heartRate : 75.0
     }
     
     /// True if the companion's active lease is currently valid
@@ -81,8 +67,6 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     public var onHighSpeedHeartRateReceived: ((_ hr: Double) -> Void)?
     public var onReachabilityChanged: ((Bool) -> Void)?
     public var onWatchLeaseStatusChanged: ((Bool) -> Void)?
-    public var onWatchHighSpeedAdvertised: ((WatchToPhoneHighSpeed) -> Void)?
-    public var onPhoneHighSpeedAdvertised: ((PhoneToWatchHighSpeed) -> Void)?
     
     // Persistence keys
     private let localLSPersistenceKey = "wc_local_ls_snapshot"
@@ -148,14 +132,6 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         startLeaseMonitoring()
     }
     
-    public func activate() {
-        #if canImport(WatchConnectivity)
-        if WCSession.isSupported() && WCSession.default.activationState == .notActivated {
-            WCSession.default.activate()
-        }
-        #endif
-    }
-
     /// Test-only: seeds `localLS` directly with an arbitrary snapshot, including caller-chosen
     /// timestamps — simulating state already persisted from a previous session, as opposed to a
     /// live local edit (which the `mutateLocal*` methods always stamp with the current time).
@@ -204,7 +180,11 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     /// Updates the membership/tactical domain structures (serialized views of Firebase room state
     /// / local tactical indicators, not user-editable leaf fields) and evaluates whether
     /// convergence retransmission is needed. Must be called on the main thread, same as the
-    /// mutateLocal* methods below.
+    /// mutateLocal* methods below. The caller (`GameStateManager.syncTacticalToWatchConnectivity`/
+    /// `syncMembershipToWatchConnectivity`) owns the "did my view actually change" equality check
+    /// and constructs the stamped snapshot itself — this setter trusts what it's given, same as
+    /// `MergeEngine.merge`'s direct `localLS = mergedLocal` assignment does for convergence
+    /// adoption (see `handleIncomingApplicationContext`).
     public func updateLocalStructures(
         membership: MembershipSnapshot? = nil,
         tactical: TacticalSnapshot? = nil
@@ -275,7 +255,6 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         self.p2wHS.activeUntil = lease
         self.p2wHS.remotePlayerTelemetryJson = remotePlayerTelemetryJson
         let hs = self.p2wHS
-        self.onPhoneHighSpeedAdvertised?(hs)
 
         #if canImport(WatchConnectivity)
         guard WCSession.isSupported() else { return }
@@ -317,7 +296,6 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         self.w2pHS.heartRate = heartRate
         self.w2pHS.remotePlayerTelemetryJson = remotePlayerTelemetryJson
         let hs = self.w2pHS
-        self.onWatchHighSpeedAdvertised?(hs)
 
         #if canImport(WatchConnectivity)
         guard WCSession.isSupported() else { return }
@@ -543,22 +521,31 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 let (mergedLocal, localWins) = MergeEngine.merge(local: self.localLS, peer: peer, localDevice: self.localRole)
                 let localChanged = !self.localLS.isDomainEquivalent(to: mergedLocal)
                 self.localLS = mergedLocal
-                self.saveLocalState(mergedLocal)
 
-                if localWins {
+                // Roll sync_ts whenever there's a reason for the peer to still be watching this
+                // device: either this device holds data the peer hasn't caught up to (localWins),
+                // or this device's own advertised copy just changed via the copy-in above
+                // (localChanged) — the peer's cached view of *this device's* structure is still
+                // the pre-copy value until a fresh push lands, even though the copied-in content
+                // originated from the peer itself. Only stop once neither holds (true
+                // convergence: nothing of ours to give, nothing just adopted to announce).
+                if localWins || localChanged {
+                    self.localLS.syncTs = Date().timeIntervalSince1970
                     self.startRollingSync()
                 } else {
-                    // Either fully converged or local lost all discrepancies — either way, stop
-                    // retrying.
                     self.stopRollingSync()
                 }
 
-                // If local state adopted winning peer structures or changed, publish updated local snapshot
+                self.saveLocalState(self.localLS)
+
+                // If local state adopted winning peer structures or changed, publish updated local
+                // snapshot immediately (zero-delay initial push — see rollSyncTimestampAndPublish's
+                // rolling retries for the ongoing retry path).
                 if localChanged {
-                    self.publishApplicationContext(local: mergedLocal)
+                    self.publishApplicationContext(local: self.localLS)
                 }
 
-                self.onLowSpeedConvergenceStateChanged?(mergedLocal)
+                self.onLowSpeedConvergenceStateChanged?(self.localLS)
             }
         }
     }

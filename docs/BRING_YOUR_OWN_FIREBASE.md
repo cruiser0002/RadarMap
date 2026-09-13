@@ -23,7 +23,7 @@ The following centralized constants from [`AppConstants.swift`](../RadarMap/AppC
 
 | Section & Context | Constant / Property | Value / Limit | Purpose & Architectural Scope |
 | :--- | :--- | :--- | :--- |
-| **Overview** | `defaultDatabaseURL` | `"https://radarmap-8adf0-default-rtdb.firebaseio.com"` | Shared fallback RTDB endpoint (`Network.defaultDatabaseURL`) |
+| **Overview** | `defaultDatabaseURL` | `"https://radarmap-8adf0-default-rtdb.firebaseio.com"` | Shared default RTDB endpoint (`Network.defaultDatabaseURL`) |
 | **Overview** | Spark Simultaneous Connections | `100` connections | Free Firebase Realtime Database concurrent client limit |
 | **Overview** | Spark Storage / Transfer | `1 GB` storage / `10 GB/mo` egress | Free Firebase monthly data quotas |
 | **Step 3 Rules** | Security Rules Mode | Open (`.read: true`, `.write: true`) | Allows peer synchronization without Firebase Auth accounts |

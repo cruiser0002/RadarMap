@@ -308,7 +308,7 @@ public enum AppConstants {
                 return 1.0 / rate
             }
             
-            /// Computes the fallback refresh heartbeat interval (10 * T).
+            /// Computes the refresh heartbeat interval (10 * T).
             public static func refreshInterval(forPlayerCount playerCount: Int) -> TimeInterval {
                 return refreshIntervalMultiplier * updateInterval(forPlayerCount: playerCount)
             }

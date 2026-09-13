@@ -23,6 +23,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import threading
 import time
@@ -53,8 +54,22 @@ METERS_PER_DEG_LAT = 111139.0
 DEFAULT_DATABASE_URL = "https://radarmap-8adf0-default-rtdb.firebaseio.com"
 MAX_ROOM_NAME_ENTRY_LENGTH = 12
 MAX_ROOM_NAME_LENGTH = 16
+MAX_PIN_LENGTH = 16
 ROOM_PADDING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 MEMBER_ID_LENGTH = 8
+# Matches AppConstants.UI.pinWordMapping exactly — see sanitize_pin.
+PIN_WORD_MAPPING = {
+    "zero": "0", "oh": "0",
+    "one": "1", "won": "1",
+    "two": "2", "to": "2", "too": "2",
+    "three": "3",
+    "four": "4", "for": "4", "fore": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8", "ate": "8",
+    "nine": "9",
+}
 IDLE_CUTOFF_HOURS = 12.0
 ROOM_TTL_SECONDS = IDLE_CUTOFF_HOURS * 3600.0  # 12-hour idle cutoff
 MAX_TACTICAL_INDICATORS_CAP = 20  # Pro tier cap on /t/{roomId}/i
@@ -129,13 +144,31 @@ def resolve_firebase_credentials_path(explicit_path: Optional[str] = None) -> Op
 
 # MARK: - Cryptographic & Formatting Helpers
 def sanitize_room_name(name: str) -> str:
+    """Matches GameStateManager.sanitizeRoomNameInput: ASCII alphanumerics only, uppercased,
+    truncated. No fallback default — an empty result after sanitizing means the caller passed
+    an empty/all-invalid name, and should surface that rather than silently substituting a
+    placeholder room name that would mismatch every other client's expectations."""
     cleaned = "".join([c for c in name if c.isascii() and c.isalnum()]).upper()
-    return cleaned[:MAX_ROOM_NAME_ENTRY_LENGTH] or "STRESS"
+    return cleaned[:MAX_ROOM_NAME_ENTRY_LENGTH]
 
 
 def sanitize_pin(pin: str) -> str:
-    cleaned = "".join([c for c in pin if c.isascii() and c.isalnum()])
-    return cleaned[:16] or "1234"
+    """Sanitizes PIN input matching GameStateManager.sanitizePinInput bug-for-bug: lowercases,
+    splits on non-alphanumeric boundaries, maps a whole token to a digit via PIN_WORD_MAPPING
+    (spoken-word dictation, e.g. "four" -> "4"), and otherwise keeps only the decimal digits
+    within that token — a token with letters that isn't a recognized word has those letters
+    dropped, not kept, matching the Swift implementation exactly so a dictated or typed PIN
+    hashes identically in both. No fallback default — see sanitize_room_name."""
+    lowered = pin.lower()
+    tokens = re.split(r"[^a-z0-9]+", lowered)
+    result_parts = []
+    for token in tokens:
+        mapped = PIN_WORD_MAPPING.get(token)
+        if mapped is not None:
+            result_parts.append(mapped)
+        else:
+            result_parts.append("".join(c for c in token if c.isdigit()))
+    return "".join(result_parts)[:MAX_PIN_LENGTH]
 
 
 def derive_room_padding(pin: str, name: str, length: Optional[int] = None) -> str:
@@ -145,11 +178,22 @@ def derive_room_padding(pin: str, name: str, length: Optional[int] = None) -> st
     return "".join(ROOM_PADDING_ALPHABET[b % len(ROOM_PADDING_ALPHABET)] for b in digest[:pad_length])
 
 
+def derive_room_id(name: str, pin: str) -> str:
+    """The single combining function for the room id — matching
+    FirebaseSyncManager.deriveRoomId(name:pin:). Every call site that owns a plain room name
+    must go through this rather than inlining `name + derive_room_padding(...)`, so the id (and
+    everything salted from it: pin_hash, derive_telemetry_key) can't drift between call sites.
+    See CLOUD_DATA_MANAGEMENT.md §7.A."""
+    return name + derive_room_padding(pin, name)
+
+
 def hash_pin(pin: str, salt: str) -> str:
-    sanitized = sanitize_pin(pin)
-    if not sanitized:
+    """Matches FirebaseSyncManager.hashPin: hashes the PIN as given (already-sanitized by the
+    caller), not re-sanitized here — see CLOUD_DATA_MANAGEMENT.md §6.B."""
+    trimmed = pin.strip()
+    if not trimmed:
         return ""
-    combined = f"{salt}:{sanitized}"
+    combined = f"{salt}:{trimmed}"
     return hashlib.sha256(combined.encode("utf-8")).hexdigest()
 
 
@@ -734,7 +778,7 @@ class StressTestCoordinator:
         self.center_lon = center_lon
         self.raw_room_name = sanitize_room_name(room_name)
         self.pin = sanitize_pin(pin)
-        self.room_id = self.raw_room_name + derive_room_padding(self.pin, self.raw_room_name)
+        self.room_id = derive_room_id(self.raw_room_name, self.pin)
         self.database_url = database_url.rstrip("/")
         self.credentials_path = resolve_firebase_credentials_path(credentials_path)
         self.dry_run = dry_run
@@ -742,7 +786,7 @@ class StressTestCoordinator:
         self.min_leg_dist = min_leg_dist
         self.max_leg_dist = max_leg_dist
         self.enable_delta_gating = enable_delta_gating
-        self.duration_sec = duration_sec
+        self.duration_sec = duration_sec if (duration_sec is not None and duration_sec > 0) else None
         self.on_tick = on_tick
         self.cleanup_on_stop = cleanup_on_stop
 
@@ -922,9 +966,28 @@ class StressTestCoordinator:
         """Alias for disband_room / teardown_room to cleanly exit and purge room."""
         self.disband_room()
 
+    @classmethod
+    def purge_all_rooms(cls, credentials_path: Optional[str] = None, database_url: str = DEFAULT_DATABASE_URL):
+        """Administrative helper: purges all rooms across r/, p/, and t/ from Firebase RTDB."""
+        creds = resolve_firebase_credentials_path(credentials_path)
+        if not creds:
+            print("[ERROR] No credentials found to purge rooms.")
+            return
+        if not firebase_admin._apps:
+            cred = firebase_credentials.Certificate(creds)
+            app = firebase_admin.initialize_app(cred, {"databaseURL": database_url})
+        else:
+            app = firebase_admin.get_app()
+        for branch in ["r", "p", "t"]:
+            firebase_db.reference(f"/{branch}", app=app).delete()
+        print(f"[CLEANUP] Purged all nodes under /r, /p, and /t on {database_url}.")
+
     def run(self, duration_sec: Optional[float] = None):
         """Main synchronous multi-player simulation loop."""
-        effective_duration = duration_sec if duration_sec is not None else self.duration_sec
+        if duration_sec is not None:
+            effective_duration = duration_sec if duration_sec > 0 else None
+        else:
+            effective_duration = self.duration_sec
 
         if not self.init_firebase_if_needed():
             return

@@ -403,6 +403,29 @@ class TestRadarPlayerSimulatorIntegration(unittest.TestCase):
         self.assertNotIn("lightVehicle", RadarPlayerSimulator.ENEMY_INDICATORS)
         self.assertNotIn("heavyVehicle", RadarPlayerSimulator.ENEMY_INDICATORS)
 
+    def test_run_simulation_duration_zero_runs_forever_until_stopped(self):
+        """Verifies duration_sec=0 treats effective duration as unlimited/None and runs until is_running=False."""
+        with patch("player_simulator._get_or_create_firebase_app", return_value=MagicMock(name="FakeFirebaseApp")):
+            coordinator = FirebaseUploadCoordinator(
+                "https://test-rtdb.firebaseio.com", credentials_path="/fake/credentials.json"
+            )
+        sim = RadarPlayerSimulator(room_name="ALPHA", pin="1234", coordinator=coordinator)
+        sim.is_connected = True
+        sim.send_telemetry = MagicMock(return_value=True)
+
+        ticks = 0
+        def fake_calc_pos(dt):
+            nonlocal ticks
+            ticks += 1
+            if ticks >= 2:
+                sim.is_running = False
+            return (37.785834, -122.406417, 0.0)
+
+        sim.calculate_position = fake_calc_pos
+        sim.run_simulation(duration_sec=0)
+        self.assertGreaterEqual(ticks, 2)
+        coordinator.close()
+
 
 if __name__ == "__main__":
     unittest.main()
