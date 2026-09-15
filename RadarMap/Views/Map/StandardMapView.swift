@@ -7,21 +7,25 @@ public struct StandardMapView: View {
     @ObservedObject var gameState: GameStateManager
     @Binding var lastCameraCenterCoordinate: CLLocationCoordinate2D?
     let onRequestCrownFocus: () -> Void
-    
+    var isVisible: Bool = true
+
     public init(
         gameState: GameStateManager,
         lastCameraCenterCoordinate: Binding<CLLocationCoordinate2D?>,
+        isVisible: Bool = true,
         onRequestCrownFocus: @escaping () -> Void = {}
     ) {
         self.gameState = gameState
         self._lastCameraCenterCoordinate = lastCameraCenterCoordinate
+        self.isVisible = isVisible
         self.onRequestCrownFocus = onRequestCrownFocus
     }
-    
+
     public var body: some View {
         #if os(iOS)
         TacticalMKMapView(
             gameState: gameState,
+            isVisible: isVisible,
             onMapTapped: { coordinate in
                 if gameState.pendingIndicatorPlacementType != nil {
                     gameState.placeTacticalIndicator(at: coordinate)

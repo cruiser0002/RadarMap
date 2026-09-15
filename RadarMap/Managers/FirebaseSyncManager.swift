@@ -56,7 +56,26 @@ public enum FirebaseSyncError: LocalizedError, Equatable {
 }
 
 public final class FirebaseSyncManager: NSObject, ObservableObject {
-    @Published public var activeRoom: SquadRoom?
+    /// The Room/Tactical `LS_data` instances this manager's Observer pipelines write into
+    /// directly — see the implementation plan §1/§3. `Set()` (`roomSet`/`tacticalSet`) is the
+    /// only door into those stores; nothing in this class keeps its own independent roster/
+    /// indicator cache anymore (that was `activeRoom`, now deleted — see CLAUDE.md rule 3 and
+    /// the `fetchMemberDetails` incident this whole refactor traces back to). One-directional
+    /// dependency only: `WatchConnectivityManager` never depends back on this class (see
+    /// docs/COMPANION_DATA_SYNC_MODEL.md's "Zero Web/Firebase Coupling" invariant) — wired once
+    /// by `GameStateManager.init`. Strong, not `weak`: `WatchConnectivityManager` holds no
+    /// reference back to this class, so there is no retain cycle to guard against, and a `weak`
+    /// reference here would leave a standalone `FirebaseSyncManager` (no owning
+    /// `GameStateManager` keeping the peer instance alive, e.g. in tests) silently unable to
+    /// reach Room/Tactical the moment nothing else retained the `WatchConnectivityManager` it was
+    /// given.
+    public var watchConnectivityManager: WatchConnectivityManager?
+
+    /// The room id this manager's RTDB calls are currently scoped to — plain local bookkeeping
+    /// for path construction (mirrors `attachedTelemetryRoomId`'s role for listener attachment),
+    /// not a second copy of Room's actual content. The content itself lives only in
+    /// `watchConnectivityManager.localRoom`.
+    public private(set) var currentRoomId: String?
 
     @Published public var isConnected: Bool = false
     @Published public var syncLatencyMs: Double = 0.0
@@ -64,7 +83,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     @Published public var totalPacketsRejected: Int = 0
     @Published public var latestRejection: RejectionEvent?
     @Published public var errorMessage: String?
-    @Published public var squadMembersArray: [SquadMember] = []
 
     /// Not read outside this class — `GameStateManager.isWristActive` is the canonical, externally
     /// read flag (see its doc comment for why). This private copy exists only so this class's own
@@ -187,10 +205,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     // Per-member telemetry state tracking for Late Packet Rejection
     private var memberLatestTimestamps: [String: TimeInterval] = [:]
     private var memberLatestSequences: [String: Int64] = [:]
-    private var pendingMemberFetches: Set<String> = []
-
-    /// Unacknowledged tactical indicators awaiting server ACK (maps indicatorId -> local placement timestamp)
-    public private(set) var unacknowledgedIndicators: [String: TimeInterval] = [:]
 
     // MARK: - Realtime Database Transport
     // See RTDBTransport.swift and CLOUD_DATA_MANAGEMENT.md §5.B/§5.C: production talks to the
@@ -214,35 +228,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     private var membersValueFireCount: Int = 0
     public private(set) var attachedTelemetryRoomId: String?
 
-    /// Member IDs currently present under /p/{roomId}, maintained incrementally from
-    /// childAdded/childRemoved events so reconcileRemoteMembers keeps its original
-    /// whole-snapshot-based pruning behavior without re-fetching the full node on every event.
-    private var observedTelemetryMemberIds: Set<String> = []
-
-    /// Member IDs currently present under /r/{roomId}/m (i.e. actually have a roster row),
-    /// independent of `observedTelemetryMemberIds`. Replaced wholesale from each authoritative
-    /// roster snapshot in `mergeRemoteMembers`, and unioned with a single id on a successful
-    /// one-shot `fetchMemberDetails` resolution. This is deliberately a separate set rather than
-    /// being inferred from `activeRoom.members` — that dict is written by telemetry too (see
-    /// `updateMember(with:in:)`), so its keys alone can't distinguish "has a roster row" from
-    /// "we invented a placeholder because telemetry arrived first." See `isMemberConfirmed(_:)`.
-    private var observedRosterMemberIds: Set<String> = []
-    /// Guards reconcileRemoteMembers against pruning real members during the childAdded replay
-    /// burst that fires on every listener (re)attach: RTDB replays childAdded once per existing
-    /// child sequentially, so observedTelemetryMemberIds is incomplete until this flips true.
-    private var initialTelemetryLoadComplete = false
-
-    /// Single source of truth for "do we actually know this player well enough to classify and
-    /// display them" — true only once `id` has been confirmed independently via BOTH the
-    /// roster/membership channel and the telemetry channel (see CLOUD_DATA_MANAGEMENT.md
-    /// §"Display Players"). A member present in only one of the two (e.g. telemetry arrived
-    /// before their roster row did) must fail this, not fall back to a guessed classification —
-    /// callers should exclude such members from display entirely rather than rendering them with
-    /// a default team color.
-    public func isMemberConfirmed(_ id: String) -> Bool {
-        observedRosterMemberIds.contains(id) && observedTelemetryMemberIds.contains(id)
-    }
-
     private static let telemetryMetadataKeys: Set<String> = ["exp"]
 
     override public init() {
@@ -252,21 +237,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         networkQualityMonitor.$isConnected
             .sink { [weak self] connected in
                 self?.setRTDBConnected(connected)
-            }
-            .store(in: &cancellables)
-
-        // Rebuild squadMembersArray only when member count changes (same guard as above).
-        $activeRoom
-            .map { (room: SquadRoom?) -> [SquadMember] in
-                guard let room = room else { return [] }
-                return Array(room.members.values)
-            }
-            .removeDuplicates { (prev: [SquadMember], next: [SquadMember]) -> Bool in
-                guard prev.count == next.count else { return false }
-                return zip(prev, next).allSatisfy { $0.id == $1.id }
-            }
-            .sink { [weak self] (members: [SquadMember]) in
-                self?.squadMembersArray = members
             }
             .store(in: &cancellables)
     }
@@ -379,8 +349,12 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         return true
     }
 
-    /// Validates whether an incoming telemetry packet is fresh or should be rejected.
-    /// Returns true if accepted and updates tracking state, false if rejected.
+    /// Validates whether an incoming telemetry packet is fresh or should be rejected. On success,
+    /// forwards it to `onRemoteTelemetryPacketsReceived` — this is the sole path a remote
+    /// player's position reaches `GameStateManager`'s `persistentRemoteTelemetry` ("w2p
+    /// Telemetry" in the architecture diagram). Deliberately does not write into any room/roster
+    /// structure — Telemetry and Room are independent memory elements with independent single
+    /// writers (see the implementation plan §3).
     @discardableResult
     public func validateAndProcessPacket(_ packet: TelemetryPacket) -> Bool {
         guard checkAndTrackPacketFreshness(packet) else { return false }
@@ -388,7 +362,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         let apply = { [weak self] in
             guard let self = self else { return }
             self.totalPacketsProcessed += 1
-            self.applyTelemetryToActiveRoom(packet)
+            self.onRemoteTelemetryPacketsReceived?([packet])
         }
 
         if Thread.isMainThread {
@@ -399,21 +373,15 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         return true
     }
 
-    /// Validates and applies a batch of telemetry packets, updating activeRoom in a single
-    /// pass to avoid redundant @Published view re-evaluations. Also the entry point for
+    /// Validates and forwards a batch of telemetry packets. Also the entry point for
     /// WCSession-relayed telemetry (a device without its own `/p/{roomId}` listener attached,
-    /// e.g. the Phone while the Watch holds network ownership) — so a packet's mere presence
-    /// here marks its member "observed" in `observedTelemetryMemberIds` exactly like the direct
-    /// listener does in `handleTelemetryChildUpsert`, regardless of whether the packet itself
-    /// passes freshness. Both paths write into the same `activeRoom.members`, so `isMemberConfirmed`
-    /// must recognize both as equally valid confirmation, not just the direct-listener source.
+    /// e.g. the Phone while the Watch holds network ownership).
     @discardableResult
     public func validateAndProcessPackets(_ packets: [TelemetryPacket]) -> Int {
         guard !packets.isEmpty else { return 0 }
 
         var acceptedPackets: [TelemetryPacket] = []
         for packet in packets {
-            observedTelemetryMemberIds.insert(packet.memberId)
             if checkAndTrackPacketFreshness(packet) {
                 acceptedPackets.append(packet)
             }
@@ -423,13 +391,8 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
 
         let apply = { [weak self] in
             guard let self = self else { return }
-            let roomId = self.activeRoom?.id ?? acceptedPackets.first?.roomId ?? ""
-            var room = self.activeRoom ?? SquadRoom(id: roomId, hostId: "")
-            for packet in acceptedPackets {
-                self.updateMember(with: packet, in: &room.members)
-            }
             self.totalPacketsProcessed += acceptedPackets.count
-            self.activeRoom = room
+            self.onRemoteTelemetryPacketsReceived?(acceptedPackets)
         }
 
         if Thread.isMainThread {
@@ -470,86 +433,14 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         return (degrees + AppConstants.Location.fullCircleDegrees).truncatingRemainder(dividingBy: AppConstants.Location.fullCircleDegrees)
     }
 
-    /// Telemetry carries no callsign/role — it's incomplete data for establishing who a member
-    /// is. A member must already exist (created by the roster channel: `mergeRemoteMembers`/
-    /// `applyMembersSnapshot`, which decodes real callsign/role from Firebase) before telemetry
-    /// may update their position; telemetry for an unrecognized member is rejected outright
-    /// rather than used to fabricate a stub entry with a placeholder callsign. See CLAUDE.md rule
-    /// 3, "simple is reliable — no stubs, no stacked patches."
-    private func updateMember(with packet: TelemetryPacket, in members: inout [String: SquadMember]) {
-        guard var member = members[packet.memberId] else { return }
-
-        let prevCoord = CLLocationCoordinate2D(latitude: member.latitude, longitude: member.longitude)
-        let newCoord = CLLocationCoordinate2D(latitude: packet.latitude, longitude: packet.longitude)
-        let prevLoc = CLLocation(latitude: member.latitude, longitude: member.longitude)
-        let newLoc = CLLocation(latitude: packet.latitude, longitude: packet.longitude)
-        let distanceMoved = prevLoc.distance(from: newLoc)
-        let isInitialPlaceholder = (abs(member.latitude) < 1e-5 && abs(member.longitude) < 1e-5)
-
-        if packet.heading > 0.0 {
-            member.heading = packet.heading
-        } else if !isInitialPlaceholder && distanceMoved > AppConstants.Location.minDisplacementForCourseOverGroundMeters {
-            let cogHeading = FirebaseSyncManager.calculateBearing(from: prevCoord, to: newCoord)
-            member.heading = cogHeading
-        }
-        // If distanceMoved <= threshold and packet.heading == 0, retain previous heading
-
-        if member.lastUpdatedTimestamp > 0 {
-            member.lastAnimationDuration = 0.0
-
-            // Retain the pre-update sample for dead-reckoning extrapolation (DEAD_RECKONING.md),
-            // unless it's still the (0,0) initial placeholder rather than a real prior position.
-            let isPlaceholder = abs(member.latitude) < 1e-5 && abs(member.longitude) < 1e-5
-            if !isPlaceholder {
-                member.previousLatitude = member.latitude
-                member.previousLongitude = member.longitude
-                member.previousUpdatedTimestamp = member.lastUpdatedTimestamp
-            }
-        }
-
-        member.latitude = packet.latitude
-        member.longitude = packet.longitude
-        member.altitude = packet.altitude
-        member.heartRate = packet.heartRate
-        member.lastUpdatedTimestamp = packet.timestamp
-        member.sequenceNumber = packet.sequenceNumber
-
-        // If heart rate is flatline (0.0), mark status as downed (KIA)
-        if packet.heartRate == AppConstants.Health.flatlineHeartRate {
-            member.status = .downed
-        } else if member.status == .downed && packet.heartRate > AppConstants.Health.flatlineHeartRate {
-            member.status = .active
-        }
-
-        members[packet.memberId] = member
-
-        let effectiveRoomId = !packet.roomId.isEmpty ? packet.roomId : (activeRoom?.id ?? "")
-        let needsCallsign = member.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || member.callsign == packet.memberId
-        if needsCallsign && !effectiveRoomId.isEmpty {
-            fetchMemberDetails(roomId: effectiveRoomId, memberId: packet.memberId)
-        }
-    }
-
-    private func applyTelemetryToActiveRoom(_ packet: TelemetryPacket) {
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self] in
-                self?.applyTelemetryToActiveRoom(packet)
-            }
-            return
-        }
-        let roomId = activeRoom?.id ?? packet.roomId
-        var room = activeRoom ?? SquadRoom(id: roomId, hostId: "")
-        updateMember(with: packet, in: &room.members)
-        self.activeRoom = room
-    }
-
     // MARK: - Telemetry Dispatch
 
     public func sendTelemetryPacket(_ packet: TelemetryPacket) {
-        // Local packet is always fresh — apply directly and update tracking state
+        // Local packet is always fresh — update tracking state directly (no room/roster write:
+        // the local player's own display state is sourced straight from GPS by "local player
+        // management" in GameStateManager, never round-tripped through Firebase).
         let apply = { [weak self] in
             guard let self = self else { return }
-            self.applyTelemetryToActiveRoom(packet)
             self.totalPacketsProcessed += 1
             if packet.sequenceNumber > 0 {
                 self.memberLatestSequences[packet.memberId] = packet.sequenceNumber
@@ -658,6 +549,31 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         )
     }
 
+    // MARK: - Room -> RoomSnapshot publishing
+
+    /// Converts a server `SquadRoom` into the synced `RoomSnapshot` and publishes it via
+    /// `Set()` — the only way any Observer pipeline or room-lifecycle call in this class writes
+    /// into the shared Room store. Members are sorted by id for deterministic `Equatable`
+    /// comparison (RoomSnapshot.members is an ordered array, not a dictionary — see
+    /// CompanionSyncModels.swift). Position/heading/heartRate fields are deliberately not
+    /// carried into Room — Room is the roster/identity domain; live position is Telemetry's
+    /// (`w2p Telemetry`, `GameStateManager.persistentRemoteTelemetry`), a fully independent
+    /// memory element with its own single writer.
+    private func publishRoom(_ room: SquadRoom) {
+        currentRoomId = room.id
+        let members = room.members.values
+            .map { SquadMember(id: $0.id, callsign: $0.callsign, latitude: 0, longitude: 0, role: $0.role) }
+            .sorted { $0.id < $1.id }
+        watchConnectivityManager?.roomSet(RoomSnapshot(
+            members: members,
+            hostId: room.hostId,
+            roomId: room.id,
+            pinHash: room.pinHash,
+            maxCapacity: room.maxCapacity,
+            maxTacticalIndicators: room.maxTacticalIndicators
+        ))
+    }
+
     // MARK: - Room Management
 
     public func createRoom(_ room: SquadRoom, completion: ((Result<SquadRoom, FirebaseSyncError>) -> Void)? = nil) {
@@ -713,7 +629,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                    let existingRoom = try? JSONDecoder().decode(SquadRoom.self, from: data),
                    existingRoom.hostId == room.hostId {
                     DispatchQueue.main.async {
-                        self.activeRoom = existingRoom
+                        self.publishRoom(existingRoom)
                         self.isConnected = true
                         self.memberLatestTimestamps.removeAll()
                         self.memberLatestSequences.removeAll()
@@ -772,7 +688,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                 }
 
                 initGroup.notify(queue: .main) {
-                    self.activeRoom = room
+                    self.publishRoom(room)
                     self.isConnected = true
                     self.memberLatestTimestamps.removeAll()
                     self.memberLatestSequences.removeAll()
@@ -858,7 +774,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             room.members[member.id] = member
 
             DispatchQueue.main.async {
-                self.activeRoom = room
+                self.publishRoom(room)
                 self.isConnected = true
                 self.memberLatestTimestamps.removeAll()
                 self.memberLatestSequences.removeAll()
@@ -869,7 +785,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     }
 
     public func connectToRoom(_ room: SquadRoom) {
-        self.activeRoom = room
+        self.publishRoom(room)
         self.isConnected = true
         self.memberLatestTimestamps.removeAll()
         self.memberLatestSequences.removeAll()
@@ -895,23 +811,23 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         self.isConnected = true
         self.memberLatestTimestamps.removeAll()
         self.memberLatestSequences.removeAll()
-        if self.activeRoom == nil || self.activeRoom?.id != cleanId {
-            self.activeRoom = SquadRoom(id: cleanId, hostId: "")
-        }
+        self.currentRoomId = cleanId
         fetchRoomDetails(roomId: cleanId)
         startTelemetryPolling(roomId: cleanId)
         completion?(true)
     }
 
-    /// Purges all local room tracking state, timestamps, tactical indicator metadata, and remote players.
+    /// Purges all local room tracking state and timestamps. Deliberately does NOT touch
+    /// Room/Tactical — those are owned exclusively by `Set()`/`Get()` on
+    /// `watchConnectivityManager`; the "loginCycle went inactive, purge Room/Tactical/Telemetry"
+    /// box in the architecture diagram is `GameStateManager.purgeLocalSessionAndIcons`'s
+    /// responsibility, not this class's.
     public func resetLocalSessionAndIcons() {
         stopTelemetryPolling()
-        self.activeRoom = nil
+        self.currentRoomId = nil
         self.isConnected = false
         self.memberLatestTimestamps.removeAll()
         self.memberLatestSequences.removeAll()
-        self.unacknowledgedIndicators.removeAll()
-        self.pendingMemberFetches.removeAll()
         self.activeTelemetryKey = nil
         self.incomingDecryptionKey = nil
     }
@@ -1008,40 +924,44 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     }
 
     public func leaveRoom(isHost: Bool = false, memberId: String? = nil) {
-        guard let room = activeRoom else {
-            self.activeRoom = nil
+        guard let roomId = currentRoomId else {
             self.isConnected = false
             stopTelemetryPolling()
             return
         }
 
         if isHost {
-            disbandRoom(roomId: room.id)
+            disbandRoom(roomId: roomId)
         } else {
             let mId = memberId ?? ""
             if !mId.isEmpty {
-                logoutPlayer(roomId: room.id, memberId: mId)
+                logoutPlayer(roomId: roomId, memberId: mId)
             } else {
                 stopTelemetryPolling()
-                self.activeRoom = nil
+                self.currentRoomId = nil
                 self.isConnected = false
             }
         }
     }
 
+    /// Pushes a single member's roster row (`mid`/`csn`/`rol`) to Firebase. Does not touch the
+    /// local Room store — a caller that wants its own edit reflected in Room immediately (for
+    /// instant local display feedback, ahead of the round trip) calls
+    /// `watchConnectivityManager.roomSet(...)` itself alongside this, the same "multiple
+    /// legitimate callers of one Set()" pattern used for local tactical marker placement.
     public func updateMember(_ member: SquadMember) {
-        guard var room = activeRoom else { return }
-        room.members[member.id] = member
-        self.activeRoom = room
-        publishMemberToFirebase(roomId: room.id, member: member)
+        guard let roomId = currentRoomId else { return }
+        publishMemberToFirebase(roomId: roomId, member: member)
     }
 
+    /// Clears local per-member bookkeeping (freshness tracking) for a member id. Does not touch
+    /// the local Room store or issue a server-side delete — see call site
+    /// (`GameStateManager.updateLocalMember`) for why: a `myMemberId` change (derived from a
+    /// callsign edit) needs its OLD id's local tracking cleared, but Room mutation for both the
+    /// removal and the new row is the caller's responsibility.
     public func removeMember(id: String) {
-        guard var room = activeRoom else { return }
-        room.members.removeValue(forKey: id)
         memberLatestTimestamps.removeValue(forKey: id)
         memberLatestSequences.removeValue(forKey: id)
-        self.activeRoom = room
     }
 
     private func publishMemberToFirebase(roomId: String, member: SquadMember) {
@@ -1053,19 +973,16 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         transport.setValue(payload, at: roomMemberPath(roomId: roomId, memberId: member.id), completion: nil)
     }
 
+    /// Places/updates a tactical indicator: pushes to Firebase and — like local marker
+    /// placement in `GameStateManager` — the caller is expected to also call
+    /// `watchConnectivityManager.tacticalSet(...)` for instant local display feedback ahead of
+    /// the round trip (multiple legitimate callers of one `Set()`, same pattern as
+    /// `updateMember` above).
     public func addOrUpdateIndicator(roomId: String, indicator: TacticalIndicator) {
-        guard var room = activeRoom, room.id == roomId else { return }
-        unacknowledgedIndicators[indicator.id] = Date().timeIntervalSince1970
-        room.indicators[indicator.id] = indicator
-        self.activeRoom = room
         publishIndicatorToFirebase(roomId: roomId, indicator: indicator)
     }
 
     public func removeIndicator(roomId: String, indicatorId: String) {
-        unacknowledgedIndicators.removeValue(forKey: indicatorId)
-        guard var room = activeRoom, room.id == roomId else { return }
-        room.indicators.removeValue(forKey: indicatorId)
-        self.activeRoom = room
         deleteIndicatorFromFirebase(roomId: roomId, indicatorId: indicatorId)
     }
 
@@ -1127,80 +1044,50 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         }
     }
 
-    /// Decodes and merges a /t/{roomId} snapshot into activeRoom.indicators. Shared by the
-    /// one-shot fetch path above and the persistent realtime listener, so both stay in lockstep.
+    /// Decodes a /t/{roomId} snapshot and merges it into the shared `Tactical` store via
+    /// `Set()`. Self-echo filter (§ "audit pass — Tactical's self-echo mechanism" in the
+    /// implementation plan, required — this is the one domain where uplink and downlink share a
+    /// store and the content isn't safe to blindly trust): for each incoming indicator, compare
+    /// its `TacticalIndicator.timestamp` against the currently-held indicator's `timestamp`
+    /// (read from `Tactical.Get()` — genuinely bidirectional), keep whichever is newer. No
+    /// separate ACK-buffer bookkeeping (replaces `unacknowledgedIndicators` entirely) — an id
+    /// present only in the current local copy (not in this snapshot) is dropped, same
+    /// snapshot-is-truth trade-off Room's pipeline accepts (a brief cosmetic flicker on the
+    /// round trip, not a correctness issue).
     private func applyTacticalSnapshot(_ json: [String: Any]?, roomId: String) {
-        guard let json = json else {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                if var current = self.activeRoom {
-                    let now = Date().timeIntervalSince1970
-                    let ackTimeout = AppConstants.Subscription.tacticalIndicatorAckTimeoutSeconds
-                    var retainedIndicators: [String: TacticalIndicator] = [:]
-                    self.unacknowledgedIndicators = self.unacknowledgedIndicators.filter { id, placedAt in
-                        let isWithinTimeout = (now - placedAt) < ackTimeout
-                        if isWithinTimeout, let localInd = current.indicators[id] {
-                            retainedIndicators[id] = localInd
-                            return true
-                        }
-                        return false
-                    }
-                    current.indicators = retainedIndicators
-                    self.activeRoom = current
-                }
-            }
-            return
-        }
-
         var decodedIndicators: [String: TacticalIndicator] = [:]
 
-        // Squad orders (t/{roomId}/o) and enemy+environment (t/{roomId}/i) are disjoint branches —
-        // every entry under either is an indicator, no metadata-key filtering needed (§6/§8).
-        let orders = (json["o"] as? [String: Any]) ?? [:]
-        let capped = (json["i"] as? [String: Any]) ?? [:]
-        for (key, val) in orders.merging(capped, uniquingKeysWith: { a, _ in a }) {
-            if let ind = TacticalIndicator.parse(id: key, rawValue: val, key: incomingDecryptionKey), !ind.isExpired {
-                decodedIndicators[ind.id] = ind
+        if let json = json {
+            // Squad orders (t/{roomId}/o) and enemy+environment (t/{roomId}/i) are disjoint
+            // branches — every entry under either is an indicator, no metadata-key filtering
+            // needed (§6/§8).
+            let orders = (json["o"] as? [String: Any]) ?? [:]
+            let capped = (json["i"] as? [String: Any]) ?? [:]
+            for (key, val) in orders.merging(capped, uniquingKeysWith: { a, _ in a }) {
+                if let ind = TacticalIndicator.parse(id: key, rawValue: val, key: incomingDecryptionKey), !ind.isExpired {
+                    decodedIndicators[ind.id] = ind
+                }
             }
         }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            if var current = self.activeRoom {
-                var mergedIndicators = decodedIndicators
-                let now = Date().timeIntervalSince1970
-                let ackTimeout = AppConstants.Subscription.tacticalIndicatorAckTimeoutSeconds
-
-                // 1. Remove all server-confirmed indicators from the pending ACK map (Server ACK)
-                for id in decodedIndicators.keys {
-                    self.unacknowledgedIndicators.removeValue(forKey: id)
-                }
-
-                // 2. Retain unacknowledged local indicators as long as they are within the timeout
-                self.unacknowledgedIndicators = self.unacknowledgedIndicators.filter { id, placedAt in
-                    let isWithinTimeout = (now - placedAt) < ackTimeout
-                    if isWithinTimeout, let localInd = current.indicators[id] {
-                        mergedIndicators[id] = localInd
-                        return true
-                    }
-                    return false
-                }
-
-                // 3. Self-echo filter (§5.B, required): for indicators this device itself placed,
-                // prefer the locally-authoritative copy over the snapshot's (possibly optimistic,
-                // pre-server-confirmation) echo of it. Presence above already counts toward ACK
-                // regardless of authorship, so confirmation still works normally.
-                if let localId = self.localMemberId {
-                    for (id, decoded) in decodedIndicators where decoded.placedByMemberId == localId {
-                        if let localCopy = current.indicators[id] {
-                            mergedIndicators[id] = localCopy
-                        }
-                    }
-                }
-
-                current.indicators = mergedIndicators
-                self.activeRoom = current
+            guard let self = self, let wcm = self.watchConnectivityManager else { return }
+            var currentById: [String: TacticalIndicator] = [:]
+            for ind in wcm.tacticalGet().indicators {
+                currentById[ind.id] = ind
             }
+
+            var merged: [String: TacticalIndicator] = [:]
+            for (id, incoming) in decodedIndicators {
+                if let existing = currentById[id], existing.timestamp > incoming.timestamp {
+                    merged[id] = existing
+                } else {
+                    merged[id] = incoming
+                }
+            }
+
+            let sorted = merged.values.sorted { $0.timestamp < $1.timestamp }
+            wcm.tacticalSet(TacticalSnapshot(indicators: sorted))
         }
     }
 
@@ -1212,41 +1099,15 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         }
     }
 
-    /// Merges a freshly-decoded remote members dict into activeRoom.members, protecting the
-    /// local member's own row from remote echoes (§5.B). Shared by the one-shot full-room fetch,
-    /// the members-subtree realtime listener, and their raw-JSON fallback paths.
-    private func mergeRemoteMembers(_ remoteMembers: [String: SquadMember], into current: inout SquadRoom) {
-        var updatedMembers: [String: SquadMember] = [:]
-        for (id, remoteMember) in remoteMembers {
-            // Self-echo filter (§5.B, required): the local member's own row is already
-            // locally authoritative — never let a remote echo (including the SDK's
-            // optimistic pre-server-confirmation echo) overwrite it here.
-            if let localId = self.localMemberId, id == localId {
-                continue
-            }
-            if var existing = current.members[id] {
-                existing.callsign = remoteMember.callsign
-                existing.role = remoteMember.role
-                updatedMembers[id] = existing
-            } else {
-                updatedMembers[id] = remoteMember
-            }
-        }
-        if let localId = self.localMemberId, let localMember = current.members[localId] {
-            updatedMembers[localId] = localMember
-        }
-        current.members = updatedMembers
-        // Authoritative: this snapshot is the full current roster, so replace rather than union —
-        // a member whose roster row disappears (leave/kick) must drop out of this set too.
-        observedRosterMemberIds = Set(remoteMembers.keys)
-    }
-
-    /// Decodes and merges a /r/{roomId}/m (members-only) snapshot into activeRoom. This is the
-    /// persistent realtime listener's path — scoped to the members subtree specifically so that
-    /// the host's periodic /r/{roomId}/exp TTL heartbeat (see refreshRoomExpiry) never triggers
-    /// it. A `.value` listener on the whole /r/{roomId} node would refire on *any* write anywhere
-    /// under it, including that unrelated heartbeat, forcing every client to redecode the entire
-    /// room (including the full members dict) on every refresh cycle for no reason.
+    /// Decodes a members-only /r/{roomId}/m snapshot and writes it into the shared `Room` store
+    /// via `Set()`. No self-echo filtering — the local member's own row, when present in the
+    /// snapshot, is accepted like any other row (its appearance is the positive "join/host
+    /// succeeded" signal, not something to filter — see the implementation plan's "Room's
+    /// self-echo handling" resolution). Room metadata fields (`hostId`/`pinHash`/`maxCapacity`/
+    /// `maxTacticalIndicators`) aren't present in this members-only payload, so they're carried
+    /// forward unchanged from the current `Room.Get()` — a normal partial-update read, not a
+    /// stub: the values being carried forward are real, just-fetched data from the one-shot full
+    /// room read (`applyRoomSnapshot`) that always runs before this listener's first fire.
     private func applyMembersSnapshot(_ value: Any?, roomId: String) {
         guard let value = value,
               JSONSerialization.isValidJSONObject(value),
@@ -1254,25 +1115,27 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
               let decodedMembers = try? JSONDecoder().decode(SquadMemberRoster.self, from: data) else { return }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            // A listener re-attach (e.g. evaluateListenerGate's cold-launch reconnect via
-            // savedRoomName) can deliver this snapshot before activeRoom has ever been
-            // populated. Construct the room here instead of dropping the snapshot — mirrors
-            // applyRoomSnapshot's nil-handling — otherwise a whole room's worth of members
-            // silently vanishes and is never retried unless every member happens to send
-            // fresh telemetry afterward.
-            var current = self.activeRoom ?? SquadRoom(id: roomId, hostId: "")
-            self.mergeRemoteMembers(decodedMembers.members, into: &current)
-            self.activeRoom = current
+            guard let self = self, let wcm = self.watchConnectivityManager else { return }
+            let current = wcm.roomGet()
+            let members = decodedMembers.members.values.sorted { $0.id < $1.id }
+            wcm.roomSet(RoomSnapshot(
+                members: members,
+                hostId: current.hostId,
+                roomId: current.roomId.isEmpty ? roomId : current.roomId,
+                pinHash: current.pinHash,
+                maxCapacity: current.maxCapacity,
+                maxTacticalIndicators: current.maxTacticalIndicators
+            ))
         }
     }
 
-    /// Decodes and merges a full /r/{roomId} snapshot into activeRoom. Used only by the one-shot
-    /// fetch (fetchRoomDetails, on initial connect) that needs the room's metadata (host, capacity,
-    /// pinHash, expireAt) — the persistent realtime listener uses applyMembersSnapshot instead.
-    /// SquadRoom's decoder (see SquadRoom.swift/SquadMember.swift) is lenient per-field and
-    /// per-member by construction, so this fails only when the node itself is missing or isn't an
-    /// object — never because one member in a populated room had an odd shape.
+    /// Decodes a full /r/{roomId} snapshot (room metadata + members) and writes it into the
+    /// shared `Room` store via `Set()`. Used only by the one-shot fetch (fetchRoomDetails, on
+    /// initial connect) that needs the room's metadata (host, capacity, pinHash, expireAt) — the
+    /// persistent realtime listener uses applyMembersSnapshot instead. SquadRoom's decoder (see
+    /// SquadRoom.swift/SquadMember.swift) is lenient per-field and per-member by construction, so
+    /// this fails only when the node itself is missing or isn't an object — never because one
+    /// member in a populated room had an odd shape.
     private func applyRoomSnapshot(_ value: Any?, roomId: String) {
         guard let value = value,
               JSONSerialization.isValidJSONObject(value),
@@ -1280,58 +1143,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
               let decodedRoom = try? JSONDecoder().decode(SquadRoom.self, from: data) else { return }
 
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            if var current = self.activeRoom {
-                current.hostId = decodedRoom.hostId
-                current.maxCapacity = decodedRoom.maxCapacity
-                current.maxTacticalIndicators = decodedRoom.maxTacticalIndicators
-                current.pinHash = decodedRoom.pinHash
-                current.expireAt = decodedRoom.expireAt
-                self.mergeRemoteMembers(decodedRoom.members, into: &current)
-                self.activeRoom = current
-            } else {
-                self.activeRoom = decodedRoom
-            }
-        }
-    }
-
-    public func fetchMemberDetails(roomId: String, memberId: String) {
-        let cleanRoomId = roomId.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        let cleanMemberId = memberId.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanRoomId.isEmpty, !cleanMemberId.isEmpty else { return }
-
-        let fetchKey = "\(cleanRoomId)/\(cleanMemberId)"
-        guard !pendingMemberFetches.contains(fetchKey) else { return }
-
-        pendingMemberFetches.insert(fetchKey)
-
-        transport.getValue(at: roomMemberPath(roomId: cleanRoomId, memberId: cleanMemberId)) { [weak self] value in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                self.pendingMemberFetches.remove(fetchKey)
-            }
-            // SquadMember's decoder is per-field lenient (see SquadMember.swift), so this only
-            // fails when the node itself is missing or isn't an object at all.
-            guard let value = value,
-                  JSONSerialization.isValidJSONObject(value),
-                  let data = try? JSONSerialization.data(withJSONObject: value),
-                  let remoteMember = try? JSONDecoder().decode(SquadMember.self, from: data) else { return }
-
-            DispatchQueue.main.async {
-                // The node decoded successfully, so the roster row exists server-side —
-                // independent confirmation alongside mergeRemoteMembers' wholesale replace.
-                self.observedRosterMemberIds.insert(cleanMemberId)
-                if var currentRoom = self.activeRoom, currentRoom.id == cleanRoomId {
-                    if var existing = currentRoom.members[cleanMemberId] {
-                        existing.callsign = remoteMember.callsign
-                        existing.role = remoteMember.role
-                        currentRoom.members[cleanMemberId] = existing
-                    } else {
-                        currentRoom.members[cleanMemberId] = remoteMember
-                    }
-                    self.activeRoom = currentRoom
-                }
-            }
+            self?.publishRoom(decodedRoom)
         }
     }
 
@@ -1352,7 +1164,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         // Instant Wake Burst: When wrist is raised, immediately fetch telemetry to eliminate visual lag.
         // Also fires if wrist was already active but listeners aren't currently attached (safety
         // net — mirrors the original `|| telemetryPollingTimer == nil` REST-era fallback).
-        if active && (!wasActive || telemetryChildAddedHandle == nil), let roomId = activeRoom?.id {
+        if active && (!wasActive || telemetryChildAddedHandle == nil), let roomId = currentRoomId {
             fetchRemoteTelemetry(roomId: roomId)
         }
     }
@@ -1384,6 +1196,7 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         detachRealtimeListeners()
         attachRealtimeListeners(roomId: cleanId)
         attachedTelemetryRoomId = cleanId
+        currentRoomId = cleanId
     }
 
     public func stopTelemetryPolling() {
@@ -1392,25 +1205,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
     }
 
     private func attachRealtimeListeners(roomId: String) {
-        observedTelemetryMemberIds.removeAll()
-        initialTelemetryLoadComplete = false
-
-        // One-shot read of the full telemetry set so we know every member that's actually
-        // present before reconcileRemoteMembers is allowed to prune anyone. Without this, the
-        // childAdded replay below (which RTDB fires once per existing child, sequentially)
-        // would otherwise cause reconcile to see a partially-populated set and prune real,
-        // still-present teammates on every listener (re)attach — the "blinking" bug.
-        transport.getValue(at: telemetryPath(roomId: roomId)) { [weak self] value in
-            guard let self = self else { return }
-            if let dict = value as? [String: Any] {
-                for key in dict.keys where !key.hasPrefix("_") && !FirebaseSyncManager.telemetryMetadataKeys.contains(key) {
-                    self.observedTelemetryMemberIds.insert(key)
-                }
-            }
-            self.initialTelemetryLoadComplete = true
-            self.reconcileRemoteMembers(activeServerMemberIds: self.observedTelemetryMemberIds)
-        }
-
         telemetryChildAddedHandle = transport.observe(at: telemetryPath(roomId: roomId), eventType: .childAdded) { [weak self] snapshot in
             self?.handleTelemetryChildUpsert(snapshot, roomId: roomId)
         }
@@ -1452,21 +1246,16 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         roomValueHandle = nil
     }
 
-    /// Self-echo filter (§5.B, required): applied to every incoming childAdded/childChanged
-    /// event, including this device's own optimistic pre-server-confirmation echo — mirrors the
-    /// `memberId == localId` skip the REST implementation already had in fetchRemoteTelemetry.
+    /// Applied to every incoming childAdded/childChanged event, including this device's own
+    /// optimistic pre-server-confirmation echo of its own telemetry — that echo is simply this
+    /// device's own memberId, not a remote player, and is dropped rather than forwarded.
+    /// Everything else decrypts/parses and forwards straight to
+    /// `validateAndProcessPacket`/`onRemoteTelemetryPacketsReceived` — no room/roster lookups or
+    /// writes here (see the class-level doc comment on `validateAndProcessPacket`).
     private func handleTelemetryChildUpsert(_ snapshot: RTDBSnapshot, roomId: String) {
         let memberId = snapshot.key
         guard !memberId.hasPrefix("_"), !FirebaseSyncManager.telemetryMetadataKeys.contains(memberId) else { return }
-
-        observedTelemetryMemberIds.insert(memberId)
-
-        if let localId = localMemberId, memberId == localId {
-            if initialTelemetryLoadComplete {
-                reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
-            }
-            return
-        }
+        guard localMemberId != memberId else { return }
 
         if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: snapshot.value as Any, key: incomingDecryptionKey) {
             validateAndProcessPacket(packet)
@@ -1474,24 +1263,13 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                 self?.onRemoteTelemetryPacketsReceived?([packet])
             }
         }
-
-        let needsFetch = self.activeRoom?.members[memberId] == nil ||
-            (self.activeRoom?.members[memberId]?.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) ||
-            self.activeRoom?.members[memberId]?.callsign == memberId
-        if needsFetch {
-            self.fetchMemberDetails(roomId: roomId, memberId: memberId)
-        }
-
-        if initialTelemetryLoadComplete {
-            reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
-        }
     }
 
     private func handleTelemetryChildRemoved(_ snapshot: RTDBSnapshot) {
-        let memberId = snapshot.key
-        guard !memberId.hasPrefix("_"), !FirebaseSyncManager.telemetryMetadataKeys.contains(memberId) else { return }
-        observedTelemetryMemberIds.remove(memberId)
-        reconcileRemoteMembers(activeServerMemberIds: observedTelemetryMemberIds)
+        _ = snapshot
+        // Telemetry-node departure is purely a display-freshness concern for
+        // `GameStateManager.persistentRemoteTelemetry` (pruned there against current Room
+        // membership on every Room change) — it no longer drives any Room/roster mutation here.
     }
 
     /// Helper to parse a TelemetryPacket from compact array format, JSON dictionary, or (when
@@ -1527,42 +1305,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
         return nil
     }
 
-    /// Reconciles remote members present in activeRoom against the set of member IDs active on the server.
-    /// Remote members missing from the server payload are pruned, while the local player (localMemberId) is protected.
-    public func reconcileRemoteMembers(activeServerMemberIds: Set<String>) {
-        guard Thread.isMainThread else {
-            DispatchQueue.main.async { [weak self] in
-                self?.reconcileRemoteMembers(activeServerMemberIds: activeServerMemberIds)
-            }
-            return
-        }
-
-        guard !activeServerMemberIds.isEmpty else { return }
-
-        guard var currentRoom = activeRoom else { return }
-        var roomChanged = false
-        let currentMemberIds = Array(currentRoom.members.keys)
-
-        for memberId in currentMemberIds {
-            // Protect local player from being pruned
-            if let localId = localMemberId, memberId == localId {
-                continue
-            }
-
-            // If a remote member is missing from the server payload, remove them
-            if !activeServerMemberIds.contains(memberId) {
-                currentRoom.members.removeValue(forKey: memberId)
-                memberLatestTimestamps.removeValue(forKey: memberId)
-                memberLatestSequences.removeValue(forKey: memberId)
-                roomChanged = true
-            }
-        }
-
-        if roomChanged {
-            self.activeRoom = currentRoom
-        }
-    }
-
     /// One-shot read-and-apply of the full /p/{roomId} node. Used for the instant initial
     /// fetch in startTelemetryPolling and for explicit wake-burst refreshes; the persistent
     /// childAdded/childChanged/childRemoved listeners (see attachRealtimeListeners) handle ongoing
@@ -1574,24 +1316,16 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
             let jsonDict = value as? [String: Any]
 
             var batchPackets: [TelemetryPacket] = []
-            var activeServerMemberIds = Set<String>()
             if let dict = jsonDict {
                 for (memberId, rawValue) in dict {
                     if memberId.starts(with: "_") || FirebaseSyncManager.telemetryMetadataKeys.contains(memberId) {
                         continue
                     }
-                    activeServerMemberIds.insert(memberId)
                     if let localId = self.localMemberId, memberId == localId {
                         continue
                     }
                     if let packet = FirebaseSyncManager.parseTelemetryPacket(memberId: memberId, roomId: roomId, rawValue: rawValue, key: self.incomingDecryptionKey) {
                         batchPackets.append(packet)
-                    }
-                    let needsFetch = self.activeRoom?.members[memberId] == nil ||
-                        (self.activeRoom?.members[memberId]?.callsign.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) ||
-                        self.activeRoom?.members[memberId]?.callsign == memberId
-                    if needsFetch {
-                        self.fetchMemberDetails(roomId: roomId, memberId: memberId)
                     }
                 }
             }
@@ -1602,7 +1336,6 @@ public final class FirebaseSyncManager: NSObject, ObservableObject {
                     self.onRemoteTelemetryPacketsReceived?(batchPackets)
                 }
             }
-            self.reconcileRemoteMembers(activeServerMemberIds: activeServerMemberIds)
         }
     }
 

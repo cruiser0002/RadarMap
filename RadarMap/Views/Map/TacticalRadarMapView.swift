@@ -79,20 +79,28 @@ public struct TacticalRadarMapView: View {
 
     public var body: some View {
         ZStack {
-            // Standard Native MapKit View
-            if gameState.selectedPresentation != .radar {
-                StandardMapView(
-                    gameState: gameState,
-                    lastCameraCenterCoordinate: $lastCameraCenterCoordinate,
-                    onRequestCrownFocus: {
-                        #if os(watchOS)
-                        crownFocusTrigger += 1
-                        #endif
-                    }
-                )
-                .edgesIgnoringSafeArea(.all)
-                .zIndex(0)
-            }
+            // Standard Native MapKit View — kept permanently mounted (never added/removed by an
+            // `if`) and toggled via opacity/hit-testing instead. Repeatedly creating and
+            // destroying an MKMapView is a documented VectorKit crash source (CFRelease in
+            // TileGroupNotificationManager's destructor) that reproduces from presentation
+            // toggling alone; see docs/CLOUD_DATA_MANAGEMENT.md. `isVisible` lets the map view
+            // skip its own per-update work (annotation sync, recentering, display link) while
+            // hidden, to keep the always-mounted cost down.
+            let isMapVisible = gameState.selectedPresentation != .radar
+            StandardMapView(
+                gameState: gameState,
+                lastCameraCenterCoordinate: $lastCameraCenterCoordinate,
+                isVisible: isMapVisible,
+                onRequestCrownFocus: {
+                    #if os(watchOS)
+                    crownFocusTrigger += 1
+                    #endif
+                }
+            )
+            .edgesIgnoringSafeArea(.all)
+            .zIndex(0)
+            .opacity(isMapVisible ? 1 : 0)
+            .allowsHitTesting(isMapVisible)
 
             // Concentric Range Ring Radar View
             if gameState.selectedPresentation == .radar {

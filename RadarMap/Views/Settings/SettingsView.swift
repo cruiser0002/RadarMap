@@ -30,13 +30,18 @@ public struct SettingsView: View {
     
     public init() {}
     
+    /// Live display rows — self (via `localPlayerMember`, "local player management") plus other
+    /// confirmed squad members (via `otherSquadMembers`), each already combining Room identity
+    /// with live position/heart rate. Room's own `members` array is identity-only (no live
+    /// telemetry — see `FirebaseSyncManager.publishRoom`), so this reads the already-combined
+    /// display state instead of Room directly.
     private var squadMembers: [SquadMember] {
-        guard let room = gameState.firebaseManager.activeRoom else { return [] }
-        return Array(room.members.values)
+        guard !gameState.watchConnectivityManager.roomGet().roomId.isEmpty else { return [] }
+        return [gameState.localPlayerMember] + gameState.otherSquadMembers
     }
-    
+
     private var isConnected: Bool {
-        gameState.firebaseManager.isConnected && gameState.firebaseManager.activeRoom != nil
+        gameState.firebaseManager.isConnected && !gameState.watchConnectivityManager.roomGet().roomId.isEmpty
     }
     
     private var isHost: Bool {
@@ -88,8 +93,8 @@ public struct SettingsView: View {
                     policyRow
                 }
                 
-                if let room = gameState.firebaseManager.activeRoom {
-                    rosterSection(room: room)
+                if !gameState.watchConnectivityManager.roomGet().roomId.isEmpty {
+                    rosterSection(room: gameState.watchConnectivityManager.roomGet())
                 }
             }
             .navigationTitle("Config")
@@ -177,7 +182,7 @@ public struct SettingsView: View {
                 }
             }
             .onChange(of: gameState.savedRoomName) { _, newRoom in
-                if gameState.firebaseManager.activeRoom == nil && squadName != newRoom {
+                if gameState.watchConnectivityManager.roomGet().roomId.isEmpty && squadName != newRoom {
                     squadName = newRoom
                 }
             }
@@ -291,7 +296,7 @@ public struct SettingsView: View {
             isEnabled: $gameState.isCustomDatabaseURLEnabled,
             isDisabled: isBusy,
             recentURLs: gameState.recentDatabaseURLs,
-            // customDatabaseURL now writes straight into watchConnectivityManager.localLS on
+            // customDatabaseURL now writes straight into watchConnectivityManager.localOther on
             // every change (see .onChange below), so there's nothing left to flush here.
             onEditingFinished: {}
         )
@@ -319,7 +324,7 @@ public struct SettingsView: View {
             // The plain typed room name only — never the derived (salted+padded) Firebase room
             // id. Read from the textbox state, not gameState.savedRoomName: that property gets
             // rewritten on every low-speed convergence sync tick (adoptCompanionSession compares
-            // the derived activeRoom.id against the plain config.roomName, which never match, so
+            // the derived Room.roomId against the plain config.roomName, which never match, so
             // it fires on nearly every sync and stomps savedRoomName), which made the QR flicker
             // on every upload/download. The textbox is the stable source of truth here, and a
             // joiner re-derives the same padding locally from (name, pin) themselves.
@@ -350,7 +355,7 @@ public struct SettingsView: View {
                 gameState.customDatabaseURL = ""
             }
             // Each gameState.* assignment above already wrote straight into
-            // watchConnectivityManager.localLS and published it — nothing left to flush here.
+            // watchConnectivityManager.localOther and published it — nothing left to flush here.
         }
     }
 
@@ -630,8 +635,8 @@ public struct SettingsView: View {
     }
     
     @ViewBuilder
-    private func rosterSection(room: SquadRoom) -> some View {
-        Section(header: Text("Roster (\(room.memberCount))").font(.system(size: 9))) {
+    private func rosterSection(room: RoomSnapshot) -> some View {
+        Section(header: Text("Roster (\(room.members.count))").font(.system(size: 9))) {
             ForEach(squadMembers, id: \.id) { member in
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {

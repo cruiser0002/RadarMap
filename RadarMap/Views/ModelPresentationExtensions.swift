@@ -42,7 +42,7 @@ extension TacticalIndicatorCategory {
         case .squadOrder:
             return "star.fill"
         case .enemyIndicator:
-            return "skull.fill"
+            return "scope"
         case .environment:
             return "leaf.fill"
         }

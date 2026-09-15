@@ -6,30 +6,55 @@ import WatchConnectivity
 
 public final class WatchConnectivityManager: NSObject, ObservableObject {
     public static let shared = WatchConnectivityManager()
-    
+
     @Published public var isSessionSupported: Bool = false
     @Published public var isActivated: Bool = false
     @Published public var isReachable: Bool = false
     @Published public var isPaired: Bool = false
     @Published public var isWatchAppInstalled: Bool = false
-    
+
     public let localRole: DeviceRole
 
-    // Outbound low-speed snapshot owned by this device. This is the single source of truth for
-    // every synced config/player-state/login-cycle field — GameStateManager reads and writes
-    // through it directly (via the mutateLocal* methods below) rather than keeping its own copy.
-    // Always mutated on the main thread (directly for local edits, via a main-thread hop for
-    // incoming merges) so it's safe to observe from SwiftUI.
-    @Published public private(set) var localLS: LowSpeedSnapshot
-    
-    // Last-known counterpart low-speed snapshot received
-    public private(set) var peerLS: LowSpeedSnapshot?
-    
-    // High-speed payloads: single source of truth for activeUntil and live streaming.
-    // There is no other local storage of activeUntil.
+    // MARK: - LS_data: three independent domains (Room, Tactical, Other)
+    //
+    // Each domain is the sole synced structure for its area (see CompanionSyncModels.swift and
+    // the implementation plan §1-2). `Set()`/`Get()` are the only door in — nothing else may
+    // write `localRoom`/`localTactical`/`localOther` directly (Swift's `private(set)` on the
+    // `@Published` storage enforces this at compile time). `Set()` auto-stamps the field's own
+    // per-structure timestamp; callers never pass a timestamp themselves. Each domain keeps its
+    // own rolling-sync timer / own outbound syncTs, so a change to one domain never forces a
+    // republish cycle for the others — the traffic-minimization goal from the plan. The actual
+    // wire publish is still one shared `ApplicationContextEnvelope` (WCSession only exposes one
+    // atomic application context) — see that struct's doc comment.
+
+    @Published public private(set) var localRoom: RoomSnapshot = RoomSnapshot()
+    public private(set) var peerRoom: RoomSnapshot?
+    var isRoomRollingSync = false
+
+    @Published public private(set) var localTactical: TacticalSnapshot = TacticalSnapshot()
+    public private(set) var peerTactical: TacticalSnapshot?
+    var isTacticalRollingSync = false
+
+    @Published public private(set) var localOther: OtherSnapshot
+    public private(set) var peerOther: OtherSnapshot?
+    var isOtherRollingSync = false
+
+    // One shared clock drives all three domains' rolling sync (rather than one independent
+    // Timer per domain) — joining a room sets localRoom/localTactical/localOther for the first
+    // time in the same instant, so with independent timers all three start simultaneously right
+    // at login, tripling redraw/publish churn exactly then. A single tick checking all three
+    // `is*RollingSync` flags keeps each domain's own start/stop semantics (still only publishes
+    // — and stops itself — per its own convergence check) while collapsing three near-simultaneous
+    // main-thread wake-ups into one.
+    private var rollingTimer: AnyCancellable?
+
+    // High-speed payloads (HS_data): single source of truth for activeUntil and live streaming.
+    // Structurally simpler than LS_data — no _ts, no converge, Get() always reads the companion's
+    // value (shadow), Set() always writes this device's own outbound value (data). See
+    // docs/COMPANION_DATA_SYNC_MODEL.md and the implementation plan's HS_data section.
     @Published public var w2pHS: WatchToPhoneHighSpeed = WatchToPhoneHighSpeed()
     @Published public var p2wHS: PhoneToWatchHighSpeed = PhoneToWatchHighSpeed()
-    
+
     // Wire aliases
     public var w2p_hs: WatchToPhoneHighSpeed {
         get { w2pHS }
@@ -39,46 +64,39 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         get { p2wHS }
         set { p2wHS = newValue }
     }
-    
+
     /// Companion's advertised lease expiration timestamp (evaluated directly from inbound HS).
     /// Zero local storage.
     public var companionActiveUntil: TimeInterval {
         localRole == .phone ? w2pHS.activeUntil : p2wHS.activeUntil
     }
-    
+
     public var latestAdvertisedWatchHS: WatchToPhoneHighSpeed? {
         localRole == .watch ? w2pHS : nil
     }
-    
+
     /// True if the companion's active lease is currently valid
     @Published public var isWatchLeaseActive: Bool = false
-    
-    // Convergence tracking
-    public private(set) var isRollingSync: Bool = false
-    private var rollingTimer: AnyCancellable?
+
     private var leaseTimer: AnyCancellable?
 
-    // Debug-only: call-rate instrumentation for diagnosing the transmission-storm hypothesis.
-    // Remove once diagnosed.
-    private var publishApplicationContextCallCount = 0
-    private var lastPublishApplicationContextTime: TimeInterval = 0
-    private var handleIncomingApplicationContextCallCount = 0
-    private var lastHandleIncomingApplicationContextTime: TimeInterval = 0
-    
     // Serialization queue for WCSession context updates to prevent concurrent partially-merged publishes
     private let contextQueue = DispatchQueue(label: "com.radarmap.watchconnectivity.queue")
-    
+
     // High-level callbacks to GameStateManager
-    public var onLowSpeedConvergenceStateChanged: ((LowSpeedSnapshot) -> Void)?
+    public var onRoomConvergenceStateChanged: ((RoomSnapshot) -> Void)?
+    public var onTacticalConvergenceStateChanged: ((TacticalSnapshot) -> Void)?
+    public var onOtherConvergenceStateChanged: ((OtherSnapshot) -> Void)?
     public var onHighSpeedTelemetryReceived: ((_ telemetryJson: String) -> Void)?
     public var onHighSpeedHeartRateReceived: ((_ hr: Double) -> Void)?
     public var onReachabilityChanged: ((Bool) -> Void)?
     public var onWatchLeaseStatusChanged: ((Bool) -> Void)?
-    
-    // Persistence keys
-    private let localLSPersistenceKey = "wc_local_ls_snapshot"
-    private let peerLSPersistenceKey = "wc_peer_ls_snapshot"
-    
+
+    // Persistence keys — only "other" (config/player-state, minus loginCycle) survives an app
+    // restart; room membership and tactical markers are session-ephemeral by design.
+    private let localOtherPersistenceKey = "wc_local_other_snapshot"
+    private let peerOtherPersistenceKey = "wc_peer_other_snapshot"
+
     public init(role: DeviceRole? = nil) {
         #if os(watchOS)
         let defaultRole: DeviceRole = .watch
@@ -86,20 +104,25 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         let defaultRole: DeviceRole = .phone
         #endif
         self.localRole = role ?? defaultRole
-        
-        // Load persisted snapshots if available
-        if let data = UserDefaults.standard.data(forKey: localLSPersistenceKey),
-           var saved = try? JSONDecoder().decode(LowSpeedSnapshot.self, from: data) {
-            // Login lifecycle state is session-ephemeral and must not be saved across sessions.
-            // It always starts as .inactive (with timestamp 0) by default upon launch.
+
+        // Room membership and tactical markers are session-ephemeral, like `loginCycle` below —
+        // never persisted to disk or restored across an app launch. `localRoom`/`peerRoom` and
+        // `localTactical`/`peerTactical` simply start empty each launch; only `localOther`/
+        // `peerOther` (config/player-state, minus loginCycle) survive a restart.
+
+        // Other: only `config` is actually meant to survive a restart. `loginCycle` and
+        // `playerState` (isDead) are both session-ephemeral and always reset here, the same way,
+        // regardless of what was on disk. First launch since this format was introduced seeds
+        // config from the legacy per-field UserDefaults keys so existing users don't lose their
+        // saved callsign/room/pin/theme/upload preferences.
+        if let data = UserDefaults.standard.data(forKey: localOtherPersistenceKey),
+           var saved = try? JSONDecoder().decode(OtherSnapshot.self, from: data) {
             saved.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
-            self.localLS = saved
+            saved.playerState = PlayerStateSnapshot()
+            self.localOther = saved
         } else {
-            // First launch on this device since localLS was introduced: seed config from the
-            // legacy per-field UserDefaults keys so existing users don't lose their saved
-            // callsign/room/pin/theme/upload preferences.
             let defaults = UserDefaults.standard
-            var seeded = LowSpeedSnapshot()
+            var seeded = OtherSnapshot()
             seeded.config = ConfigSnapshot(
                 callsign: defaults.string(forKey: AppConstants.Storage.userCallsignKey) ?? "",
                 roomName: defaults.string(forKey: AppConstants.Storage.savedRoomNameKey) ?? "",
@@ -114,17 +137,18 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 configTs: 0
             )
             seeded.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
-            self.localLS = seeded
+            self.localOther = seeded
         }
-        
-        if let data = UserDefaults.standard.data(forKey: peerLSPersistenceKey),
-           var savedPeer = try? JSONDecoder().decode(LowSpeedSnapshot.self, from: data) {
+
+        if let data = UserDefaults.standard.data(forKey: peerOtherPersistenceKey),
+           var savedPeer = try? JSONDecoder().decode(OtherSnapshot.self, from: data) {
             savedPeer.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
-            self.peerLS = savedPeer
+            savedPeer.playerState = PlayerStateSnapshot()
+            self.peerOther = savedPeer
         }
-        
+
         super.init()
-        
+
         #if canImport(WatchConnectivity)
         if WCSession.isSupported() {
             self.isSessionSupported = true
@@ -135,20 +159,22 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
             session.activate()
         }
         #endif
-        
+
         startLeaseMonitoring()
     }
-    
-    /// Test-only: seeds `localLS` directly with an arbitrary snapshot, including caller-chosen
-    /// timestamps — simulating state already persisted from a previous session, as opposed to a
-    /// live local edit (which the `mutateLocal*` methods always stamp with the current time).
-    /// Does not persist or publish; production code should never call this.
-    public func testSeedLocalLS(_ snapshot: LowSpeedSnapshot) {
-        localLS = snapshot
+
+    /// Test-only: seeds the three domains directly with arbitrary snapshots, including
+    /// caller-chosen timestamps — simulating state already persisted from a previous session, as
+    /// opposed to a live local edit (which `Set()` always stamps with the current time). Does not
+    /// persist or publish; production code should never call this.
+    public func testSeedLocal(room: RoomSnapshot? = nil, tactical: TacticalSnapshot? = nil, other: OtherSnapshot? = nil) {
+        if let room = room { localRoom = room }
+        if let tactical = tactical { localTactical = tactical }
+        if let other = other { localOther = other }
     }
-    
+
     // MARK: - Lease Monitoring & Standby Gating
-    
+
     private func startLeaseMonitoring() {
         leaseTimer?.cancel()
         leaseTimer = Timer.publish(every: 1.0, on: .main, in: .common)
@@ -157,7 +183,7 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 self?.evaluateLeaseStatus()
             }
     }
-    
+
     public func evaluateLeaseStatus() {
         let now = Date().timeIntervalSince1970
         let active = (companionActiveUntil > now)
@@ -168,96 +194,332 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
     }
 
     /// Corrects `isWatchLeaseActive` if it's stuck `true` past the companion's actual advertised
-    /// deadline. `isWatchLeaseActive` is otherwise only refreshed by the 1Hz `leaseTimer` (or a
-    /// fresh HS payload arriving) — a one-off decision point like `evaluateListenerGate` or
-    /// `hasNetworkOwnership` that runs between timer ticks (or while the timer is suspended, e.g.
-    /// backgrounded on watchOS) can see a lease that expired moments ago but is still reported
-    /// active, which can leave listener/ownership handoff stuck. Deliberately never flips the flag
-    /// the other direction (false -> true): with no real advertised deadline yet
-    /// (`companionActiveUntil == 0`), an externally-set `true` (e.g. direct test injection) is left
-    /// alone rather than treated as expired.
+    /// deadline. See prior doc comment history — unchanged behavior from before this refactor.
     public func correctStaleLeaseExpiry() {
         guard isWatchLeaseActive, companionActiveUntil > 0, companionActiveUntil <= Date().timeIntervalSince1970 else { return }
         isWatchLeaseActive = false
         onWatchLeaseStatusChanged?(false)
     }
-    
-    // MARK: - State Mutation & Low-Speed Updates
 
-    /// Updates the membership/tactical domain structures (serialized views of Firebase room state
-    /// / local tactical indicators, not user-editable leaf fields) and evaluates whether
-    /// convergence retransmission is needed. Must be called on the main thread, same as the
-    /// mutateLocal* methods below. The caller (`GameStateManager.syncTacticalToWatchConnectivity`/
-    /// `syncMembershipToWatchConnectivity`) owns the "did my view actually change" equality check
-    /// and constructs the stamped snapshot itself — this setter trusts what it's given, same as
-    /// `MergeEngine.merge`'s direct `localLS = mergedLocal` assignment does for convergence
-    /// adoption (see `handleIncomingApplicationContext`).
-    public func updateLocalStructures(
-        membership: MembershipSnapshot? = nil,
-        tactical: TacticalSnapshot? = nil
-    ) {
-        if let membership = membership {
-            localLS.membership = membership
-        }
-        if let tactical = tactical {
-            localLS.tactical = tactical
-        }
-        persistAndPublishLocalState()
+    // MARK: - Room: Set() / Get()
+
+    public func roomGet() -> RoomSnapshot { localRoom }
+
+    /// The only way to write `localRoom`. Auto-stamps `roomTs`; the caller (a Firebase Observer
+    /// pipeline's canonicalize step, or Room life cycle management) supplies the finished content
+    /// only. No-ops (no timestamp bump, no publish) if the content is unchanged.
+    public func roomSet(_ newValue: RoomSnapshot) {
+        guard newValue.members != localRoom.members ||
+              newValue.hostId != localRoom.hostId ||
+              newValue.roomId != localRoom.roomId ||
+              newValue.pinHash != localRoom.pinHash ||
+              newValue.maxCapacity != localRoom.maxCapacity ||
+              newValue.maxTacticalIndicators != localRoom.maxTacticalIndicators else { return }
+        var stamped = newValue
+        stamped.roomTs = Date().timeIntervalSince1970
+        stamped.syncTs = localRoom.syncTs
+        localRoom = stamped
+        persistAndPublishRoom()
     }
 
-    /// Mutates `localLS.config` in place — the single source of truth for callsign/roomName/pin/
-    /// databaseURL/theme/isPro/upload-toggle fields. Call sites read `localLS.config.<field>`
-    /// directly rather than keeping a separate copy; this is the only way to write to it.
+    // MARK: - Tactical: Set() / Get()
+
+    public func tacticalGet() -> TacticalSnapshot { localTactical }
+
+    public func tacticalSet(_ newValue: TacticalSnapshot) {
+        guard newValue.indicators != localTactical.indicators else { return }
+        var stamped = newValue
+        stamped.tacticalTs = Date().timeIntervalSince1970
+        stamped.syncTs = localTactical.syncTs
+        localTactical = stamped
+        persistAndPublishTactical()
+    }
+
+    // MARK: - Other: mutate helpers (config/loginCycle/playerState each stamp their own sub-ts)
+
+    /// Mutates `localOther.config` in place — the single source of truth for callsign/roomName/
+    /// pin/databaseURL/theme/isPro/upload-toggle fields.
     public func mutateLocalConfig(_ mutate: (inout ConfigSnapshot) -> Void) {
-        var updated = localLS.config
+        var updated = localOther.config
         mutate(&updated)
-        guard !updated.isEquivalent(to: localLS.config) else { return }
+        guard !updated.isEquivalent(to: localOther.config) else { return }
         updated.configTs = Date().timeIntervalSince1970
-        localLS.config = updated
-        persistAndPublishLocalState()
+        localOther.config = updated
+        persistAndPublishOther()
     }
 
-    /// Mutates `localLS.playerState` in place — the single source of truth for `isDead`.
+    /// Mutates `localOther.playerState` in place — the single source of truth for `isDead`.
     public func mutateLocalPlayerState(_ mutate: (inout PlayerStateSnapshot) -> Void) {
-        var updated = localLS.playerState
+        var updated = localOther.playerState
         mutate(&updated)
-        guard !updated.isEquivalent(to: localLS.playerState) else { return }
+        guard !updated.isEquivalent(to: localOther.playerState) else { return }
         updated.isDeadTs = Date().timeIntervalSince1970
-        localLS.playerState = updated
-        persistAndPublishLocalState()
+        localOther.playerState = updated
+        persistAndPublishOther()
     }
 
-    /// Mutates `localLS.loginCycle` in place — the single source of truth for the coarse
+    /// Mutates `localOther.loginCycle` in place — the single source of truth for the coarse
     /// inactive/hostActive/joinActive room-lifecycle state.
     public func mutateLocalLoginCycle(_ mutate: (inout LoginCycleSnapshot) -> Void) {
-        var updated = localLS.loginCycle
+        var updated = localOther.loginCycle
         mutate(&updated)
-        guard !updated.isEquivalent(to: localLS.loginCycle) else { return }
+        guard !updated.isEquivalent(to: localOther.loginCycle) else { return }
         updated.loginCycleTs = Date().timeIntervalSince1970
-        localLS.loginCycle = updated
-        persistAndPublishLocalState()
+        localOther.loginCycle = updated
+        persistAndPublishOther()
     }
 
-    /// Debug-only: renders a `LowSpeedSnapshot` as JSON for the content-on-change logging below.
-    private func debugDescribe(_ snapshot: LowSpeedSnapshot) -> String {
+    // MARK: - Debug logging
+
+    private func debugDescribe<T: Encodable>(_ snapshot: T) -> String {
         guard let data = try? JSONEncoder().encode(snapshot),
               let json = String(data: data, encoding: .utf8) else { return "<unencodable>" }
         return json
     }
 
-    /// Local mutations above always originate on the main thread (UI-driven) and assign into
-    /// `localLS` synchronously for instant UI feedback. `checkAndTriggerConvergence` also runs
-    /// here on main (it reads `peerLS`, which — like `localLS` — is only ever touched on main);
-    /// only the actual I/O (UserDefaults write, WCSession publish) is handed to `contextQueue`,
-    /// operating on a captured copy so it never touches `localLS`/`peerLS` directly.
-    private func persistAndPublishLocalState() {
-        checkAndTriggerConvergence(local: localLS)
-        let snapshot = localLS
-        print("[WCSession \(localRole)] localLS changed: \(debugDescribe(snapshot))")
-        saveLocalState(snapshot)
-        publishApplicationContext(local: snapshot)
+    // MARK: - Per-domain persist + convergence-check + publish
+    //
+    // All local mutations above always originate on the main thread (UI-driven or a Firebase
+    // Observer callback already hopped to main) and assign synchronously for instant UI feedback.
+    // `checkAndTriggerConvergence*` also runs here on main (it reads the domain's `peer*`, which —
+    // like `local*` — is only ever touched on main); only the actual I/O (UserDefaults write,
+    // WCSession publish) is handed to `contextQueue`, operating on a captured copy so it never
+    // touches `local*`/`peer*` directly.
+
+    private func persistAndPublishRoom() {
+        checkAndTriggerRoomConvergence()
+        let snapshot = localRoom
+        print("[WCSession \(localRole)] localRoom changed: \(debugDescribe(snapshot))")
+        publishApplicationContext()
     }
-    
+
+    private func persistAndPublishTactical() {
+        checkAndTriggerTacticalConvergence()
+        let snapshot = localTactical
+        print("[WCSession \(localRole)] localTactical changed: \(debugDescribe(snapshot))")
+        publishApplicationContext()
+    }
+
+    private func persistAndPublishOther() {
+        checkAndTriggerOtherConvergence()
+        let snapshot = localOther
+        print("[WCSession \(localRole)] localOther changed: \(debugDescribe(snapshot))")
+        saveLocalOther(snapshot)
+        publishApplicationContext()
+    }
+
+    // MARK: - Convergence & Rolling sync_ts (per domain)
+
+    private func checkAndTriggerRoomConvergence() {
+        guard let peer = peerRoom else {
+            localRoom.syncTs = Date().timeIntervalSince1970
+            startRoomRollingSync()
+            return
+        }
+        if localRoom.isEquivalent(to: peer) {
+            stopRoomRollingSync()
+        } else {
+            let (_, localWins) = MergeEngine.mergeRoom(local: localRoom, peer: peer, localDevice: localRole)
+            if localWins {
+                localRoom.syncTs = Date().timeIntervalSince1970
+                startRoomRollingSync()
+            } else {
+                stopRoomRollingSync()
+            }
+        }
+    }
+
+    private func checkAndTriggerTacticalConvergence() {
+        guard let peer = peerTactical else {
+            localTactical.syncTs = Date().timeIntervalSince1970
+            startTacticalRollingSync()
+            return
+        }
+        if localTactical.isEquivalent(to: peer) {
+            stopTacticalRollingSync()
+        } else {
+            let (_, localWins) = MergeEngine.mergeTactical(local: localTactical, peer: peer, localDevice: localRole)
+            if localWins {
+                localTactical.syncTs = Date().timeIntervalSince1970
+                startTacticalRollingSync()
+            } else {
+                stopTacticalRollingSync()
+            }
+        }
+    }
+
+    private func checkAndTriggerOtherConvergence() {
+        guard let peer = peerOther else {
+            localOther.syncTs = Date().timeIntervalSince1970
+            startOtherRollingSync()
+            return
+        }
+        if localOther.isDomainEquivalent(to: peer) {
+            stopOtherRollingSync()
+        } else {
+            let (_, localWins) = MergeEngine.mergeOther(local: localOther, peer: peer, localDevice: localRole)
+            if localWins {
+                localOther.syncTs = Date().timeIntervalSince1970
+                startOtherRollingSync()
+            } else {
+                stopOtherRollingSync()
+            }
+        }
+    }
+
+    private func canStartRollingSync() -> Bool {
+        #if canImport(WatchConnectivity)
+        guard WCSession.isSupported() else { return false }
+        #if os(iOS)
+        guard WCSession.default.isPaired && WCSession.default.isWatchAppInstalled else { return false }
+        #endif
+        #endif
+        return true
+    }
+
+    /// Starts the shared clock if it isn't already running. Safe to call redundantly — each
+    /// domain calls this whenever it needs the clock, and the clock itself only stops once no
+    /// domain needs it anymore (see `stopSharedRollingTimerIfIdle`).
+    private func startSharedRollingTimer() {
+        guard rollingTimer == nil else { return }
+        rollingTimer = Timer.publish(every: AppConstants.WatchConnectivity.defaultHighSpeedCadenceSeconds, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self = self else { return }
+                if self.isRoomRollingSync { self.rollRoomSyncTimestampAndPublish() }
+                if self.isTacticalRollingSync { self.rollTacticalSyncTimestampAndPublish() }
+                if self.isOtherRollingSync { self.rollOtherSyncTimestampAndPublish() }
+            }
+    }
+
+    private func stopSharedRollingTimerIfIdle() {
+        guard !isRoomRollingSync, !isTacticalRollingSync, !isOtherRollingSync else { return }
+        rollingTimer?.cancel()
+        rollingTimer = nil
+    }
+
+    private func startRoomRollingSync() {
+        guard !isRoomRollingSync, canStartRollingSync() else { return }
+        isRoomRollingSync = true
+        DispatchQueue.main.async { [weak self] in
+            self?.startSharedRollingTimer()
+        }
+    }
+
+    public func stopRoomRollingSync() {
+        isRoomRollingSync = false
+        DispatchQueue.main.async { [weak self] in
+            self?.stopSharedRollingTimerIfIdle()
+        }
+    }
+
+    private func startTacticalRollingSync() {
+        guard !isTacticalRollingSync, canStartRollingSync() else { return }
+        isTacticalRollingSync = true
+        DispatchQueue.main.async { [weak self] in
+            self?.startSharedRollingTimer()
+        }
+    }
+
+    public func stopTacticalRollingSync() {
+        isTacticalRollingSync = false
+        DispatchQueue.main.async { [weak self] in
+            self?.stopSharedRollingTimerIfIdle()
+        }
+    }
+
+    private func startOtherRollingSync() {
+        guard !isOtherRollingSync, canStartRollingSync() else { return }
+        isOtherRollingSync = true
+        DispatchQueue.main.async { [weak self] in
+            self?.startSharedRollingTimer()
+        }
+    }
+
+    public func stopOtherRollingSync() {
+        isOtherRollingSync = false
+        DispatchQueue.main.async { [weak self] in
+            self?.stopSharedRollingTimerIfIdle()
+        }
+    }
+
+    /// Re-checks convergence against peer on every tick before republishing, rather than blindly
+    /// republishing forever — same reasoning as the original single-domain implementation this
+    /// replaced (see git history / docs/COMPANION_DATA_SYNC_MODEL.md).
+    private func rollRoomSyncTimestampAndPublish() {
+        if let peer = peerRoom, localRoom.isEquivalent(to: peer) {
+            stopRoomRollingSync()
+            return
+        }
+        // Deliberately NOT gated on isReachable — see publishApplicationContext's doc comment.
+        localRoom.syncTs = Date().timeIntervalSince1970
+        publishApplicationContext()
+    }
+
+    private func rollTacticalSyncTimestampAndPublish() {
+        if let peer = peerTactical, localTactical.isEquivalent(to: peer) {
+            stopTacticalRollingSync()
+            return
+        }
+        localTactical.syncTs = Date().timeIntervalSince1970
+        publishApplicationContext()
+    }
+
+    private func rollOtherSyncTimestampAndPublish() {
+        if let peer = peerOther, localOther.isDomainEquivalent(to: peer) {
+            stopOtherRollingSync()
+            return
+        }
+        localOther.syncTs = Date().timeIntervalSince1970
+        saveLocalOther(localOther)
+        publishApplicationContext()
+    }
+
+    // MARK: - Publishing to WCSession
+    //
+    // One shared envelope, independently triggered per domain (see ApplicationContextEnvelope's
+    // doc comment): whichever domain's Set()/rolling-timer fires this, the payload always carries
+    // the CURRENT state of all three domains — `updateApplicationContext` only exposes one atomic
+    // context, so there is no way to publish "just Room" without the others.
+    private func publishApplicationContext() {
+        let room = localRoom
+        let tactical = localTactical
+        let other = localOther
+        let role = localRole
+
+        contextQueue.async { [weak self] in
+            guard let self = self else { return }
+            #if canImport(WatchConnectivity)
+            guard WCSession.isSupported() else { return }
+            let session = WCSession.default
+            guard session.activationState == .activated else { return }
+            #if os(iOS)
+            guard session.isPaired && session.isWatchAppInstalled else { return }
+            #endif
+
+            var envelope = ApplicationContextEnvelope()
+            if role == .phone {
+                envelope.p2wRoom = room
+                envelope.p2wTactical = tactical
+                envelope.p2wOther = other
+            } else {
+                envelope.w2pRoom = room
+                envelope.w2pTactical = tactical
+                envelope.w2pOther = other
+            }
+
+            guard let data = try? JSONEncoder().encode(envelope),
+                  let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+
+            do {
+                try session.updateApplicationContext(dict)
+            } catch {
+                // Silently handle context update error to avoid crashing
+            }
+            #endif
+        }
+    }
+
     // MARK: - High-Speed Outgoing Stream (Asymmetrical Routing)
 
     /// Advertises Phone-owned high-speed payload (p2w_hs) strictly via sendMessage. No fallback
@@ -277,20 +539,12 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         #if canImport(WatchConnectivity)
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
-        guard session.activationState == .activated, session.isReachable else {
-            print("[WCSession phone] advertisePhoneHighSpeed: NOT REACHABLE, skipping tick. remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
-            return
-        }
+        guard session.activationState == .activated, session.isReachable else { return }
         var envelope = ApplicationContextEnvelope()
         envelope.p2wHS = hs
         if let data = try? JSONEncoder().encode(envelope),
            let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            print("[WCSession phone] advertisePhoneHighSpeed sendMessage: bytes=\(data.count) remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
-            session.sendMessage(dict, replyHandler: nil, errorHandler: { error in
-                print("[WCSession phone] advertisePhoneHighSpeed sendMessage FAILED (payload bytes=\(data.count)): \(error)")
-            })
-        } else {
-            print("[WCSession phone] advertisePhoneHighSpeed: FAILED TO ENCODE envelope, remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count)")
+            session.sendMessage(dict, replyHandler: nil, errorHandler: nil)
         }
         #endif
     }
@@ -314,165 +568,22 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         #if canImport(WatchConnectivity)
         guard WCSession.isSupported() else { return }
         let session = WCSession.default
-        guard session.activationState == .activated, session.isReachable else {
-            print("[WCSession watch] advertiseWatchHighSpeed: NOT REACHABLE, skipping tick. remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
-            return
-        }
+        guard session.activationState == .activated, session.isReachable else { return }
         var envelope = ApplicationContextEnvelope()
         envelope.w2pHS = hs
         if let data = try? JSONEncoder().encode(envelope),
            let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
-            print("[WCSession watch] advertiseWatchHighSpeed sendMessage: bytes=\(data.count) remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count) content=\(remotePlayerTelemetryJson)")
-            session.sendMessage(dict, replyHandler: nil, errorHandler: { error in
-                print("[WCSession watch] advertiseWatchHighSpeed sendMessage FAILED (payload bytes=\(data.count)): \(error)")
-            })
-        } else {
-            print("[WCSession watch] advertiseWatchHighSpeed: FAILED TO ENCODE envelope, remotePlayerTelemetryJson bytes=\(remotePlayerTelemetryJson.utf8.count)")
+            session.sendMessage(dict, replyHandler: nil, errorHandler: nil)
         }
         #endif
-    }
-
-    // MARK: - Convergence & Rolling sync_ts
-
-    /// Must be called on the main thread — reads `peerLS`, which (like `localLS`) is only ever
-    /// touched on main.
-    private func checkAndTriggerConvergence(local: LowSpeedSnapshot) {
-        guard let peer = peerLS else {
-            // No peer snapshot seen yet: roll sync_ts immediately and start rolling pump to announce local state
-            localLS.syncTs = Date().timeIntervalSince1970
-            startRollingSync()
-            return
-        }
-
-        if local.isDomainEquivalent(to: peer) {
-            // Fully converged: discrepancy resolved
-            stopRollingSync()
-        } else {
-            // Discrepancy exists: evaluate whether local device owns any winning structure
-            let (_, localWins) = MergeEngine.merge(local: local, peer: peer, localDevice: localRole)
-            if localWins {
-                // Roll sync_ts immediately whenever a change causes a discrepancy where local wins
-                localLS.syncTs = Date().timeIntervalSince1970
-                // Continue rolling until discrepancy is resolved
-                startRollingSync()
-            } else {
-                stopRollingSync()
-            }
-        }
-    }
-    
-    private func startRollingSync() {
-        guard !isRollingSync else { return }
-        #if canImport(WatchConnectivity)
-        guard WCSession.isSupported() else { return }
-        #if os(iOS)
-        guard WCSession.default.isPaired && WCSession.default.isWatchAppInstalled else { return }
-        #endif
-        #endif
-        isRollingSync = true
-        
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.rollingTimer?.cancel()
-            self.rollingTimer = Timer.publish(every: AppConstants.WatchConnectivity.defaultHighSpeedCadenceSeconds, on: .main, in: .common)
-                .autoconnect()
-                .sink { [weak self] _ in
-                    self?.rollSyncTimestampAndPublish()
-                }
-        }
-    }
-    
-    public func stopRollingSync() {
-        isRollingSync = false
-        DispatchQueue.main.async { [weak self] in
-            self?.rollingTimer?.cancel()
-            self?.rollingTimer = nil
-        }
-    }
-    
-    /// Must be called on the main thread (`localLS` is only ever touched there). Its callers —
-    /// the rolling `Timer` (scheduled `on: .main`) and `sessionReachabilityDidChange` below — are
-    /// responsible for that.
-    ///
-    /// Re-checks convergence against `peerLS` on every tick before republishing, rather than
-    /// blindly republishing forever. `stopRollingSync()` was previously only ever called reactively
-    /// from `handleIncomingApplicationContext` (i.e. only when a peer's push happened to arrive) —
-    /// once both sides genuinely converged, the peer correctly stops echoing back (nothing new to
-    /// adopt), which meant this device never received another incoming message to react to and so
-    /// never got the chance to notice convergence and stop. The pump then ran at 1Hz forever,
-    /// republishing identical already-converged state with no path back to `stopRollingSync()`.
-    private func rollSyncTimestampAndPublish() {
-        if let peer = peerLS, localLS.isDomainEquivalent(to: peer) {
-            stopRollingSync()
-            return
-        }
-
-        // Deliberately NOT gated on isReachable: that reflects live two-way messaging
-        // availability (foreground/high-priority-background), which is known to unreliably read
-        // false even while a companion is genuinely alive and running in the background (e.g. a
-        // watch mid-workout with the screen off). updateApplicationContext is explicitly designed
-        // to keep working via the system WatchConnectivity daemon regardless of reachability, so
-        // gating this retry on it would risk suppressing real convergence to a
-        // backgrounded-but-active companion.
-        localLS.syncTs = Date().timeIntervalSince1970
-        let snapshot = localLS
-        saveLocalState(snapshot)
-        publishApplicationContext(local: snapshot)
-    }
-    
-    // MARK: - Publishing to WCSession
-    
-    /// `local` must be captured by the caller from `localLS` on the main thread beforehand — this
-    /// function itself only touches `contextQueue`-owned state (the WCSession call) and never reads
-    /// `localLS`/`peerLS` directly, so it's safe to dispatch onto `contextQueue` regardless of which thread calls it.
-    private func publishApplicationContext(local: LowSpeedSnapshot) {
-        publishApplicationContextCallCount += 1
-        let now = Date().timeIntervalSince1970
-        let deltaMs = lastPublishApplicationContextTime == 0 ? 0 : (now - lastPublishApplicationContextTime) * 1000
-        lastPublishApplicationContextTime = now
-        print("[WCSession \(localRole)] publishApplicationContext call #\(publishApplicationContextCallCount), \(String(format: "%.1f", deltaMs))ms since last call")
-        contextQueue.async { [weak self] in
-            guard let self = self else { return }
-            #if canImport(WatchConnectivity)
-            guard WCSession.isSupported() else { return }
-            let session = WCSession.default
-            guard session.activationState == .activated else { return }
-            #if os(iOS)
-            guard session.isPaired && session.isWatchAppInstalled else { return }
-            #endif
-
-            var envelope = ApplicationContextEnvelope()
-            if self.localRole == .phone {
-                envelope.p2wLS = local
-            } else {
-                envelope.w2pLS = local
-            }
-
-            guard let data = try? JSONEncoder().encode(envelope),
-                  let dict = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
-
-            do {
-                try session.updateApplicationContext(dict)
-            } catch {
-                // Silently handle context update error to avoid crashing
-            }
-            #endif
-        }
     }
 
     // MARK: - Processing Incoming Envelopes
 
     /// Runs entirely on the main thread — `WCSessionDelegate` callbacks that feed this can land on
-    /// an arbitrary background queue, but `localLS`/`peerLS` are only ever touched on main, so the
-    /// whole merge is dispatched there rather than to `contextQueue` (which is reserved for
-    /// snapshot-parameterized I/O that doesn't need to read either property directly).
+    /// an arbitrary background queue, but `local*`/`peer*` are only ever touched on main, so the
+    /// whole merge is dispatched there rather than to `contextQueue`.
     public func handleIncomingApplicationContext(_ dict: [String: Any], isReplayedContext: Bool = false) {
-        handleIncomingApplicationContextCallCount += 1
-        let callNow = Date().timeIntervalSince1970
-        let callDeltaMs = lastHandleIncomingApplicationContextTime == 0 ? 0 : (callNow - lastHandleIncomingApplicationContextTime) * 1000
-        lastHandleIncomingApplicationContextTime = callNow
-        print("[WCSession \(localRole)] handleIncomingApplicationContext call #\(handleIncomingApplicationContextCallCount), \(String(format: "%.1f", callDeltaMs))ms since last call, replayed=\(isReplayedContext)")
-
         guard let data = try? JSONSerialization.data(withJSONObject: dict),
               var envelope = try? JSONDecoder().decode(ApplicationContextEnvelope.self, from: data) else { return }
 
@@ -482,8 +593,8 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
         // were a live handshake. Live pushes (didReceiveApplicationContext/didReceiveMessage) are
         // never replayed this way, so only the activation-time replay needs sanitizing.
         if isReplayedContext {
-            envelope.p2wLS?.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
-            envelope.w2pLS?.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
+            envelope.p2wOther?.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
+            envelope.w2pOther?.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
         }
 
         DispatchQueue.main.async { [weak self] in
@@ -516,71 +627,113 @@ public final class WatchConnectivityManager: NSObject, ObservableObject {
                 self.onHighSpeedHeartRateReceived?(w2pHS.heartRate)
             }
 
-            // 2. Process Low-Speed Payloads (Bidirectional Merge)
-            let peerSnapshot = (self.localRole == .phone) ? envelope.w2pLS : envelope.p2wLS
-            if let peer = peerSnapshot {
-                print("[WCSession \(self.localRole)] peerLS received (replayed=\(isReplayedContext)): \(self.debugDescribe(peer))")
-                self.peerLS = peer
-                self.savePeerState(peer)
-
-                // Merge peer snapshot into local snapshot — this assignment IS the value
-                // changing; there is nothing else to copy the result into.
-                let (mergedLocal, localWins) = MergeEngine.merge(local: self.localLS, peer: peer, localDevice: self.localRole)
-                let localChanged = !self.localLS.isDomainEquivalent(to: mergedLocal)
-                self.localLS = mergedLocal
-                if localChanged {
-                    print("[WCSession \(self.localRole)] localLS merged (localWins=\(localWins)): \(self.debugDescribe(mergedLocal))")
-                }
-
-                // Roll sync_ts whenever there's a reason for the peer to still be watching this
-                // device: either this device holds data the peer hasn't caught up to (localWins),
-                // or this device's own advertised copy just changed via the copy-in above
-                // (localChanged) — the peer's cached view of *this device's* structure is still
-                // the pre-copy value until a fresh push lands, even though the copied-in content
-                // originated from the peer itself. Only stop once neither holds (true
-                // convergence: nothing of ours to give, nothing just adopted to announce).
-                if localWins || localChanged {
-                    self.localLS.syncTs = Date().timeIntervalSince1970
-                    self.startRollingSync()
-                } else {
-                    self.stopRollingSync()
-                }
-
-                self.saveLocalState(self.localLS)
-
-                // If local state adopted winning peer structures or changed, publish updated local
-                // snapshot immediately (zero-delay initial push — see rollSyncTimestampAndPublish's
-                // rolling retries for the ongoing retry path).
-                if localChanged {
-                    self.publishApplicationContext(local: self.localLS)
-                }
-
-                self.onLowSpeedConvergenceStateChanged?(self.localLS)
+            // 2. Process Low-Speed Payloads (Bidirectional Merge) — one per domain
+            let peerRoomSnapshot = (self.localRole == .phone) ? envelope.w2pRoom : envelope.p2wRoom
+            if let peer = peerRoomSnapshot {
+                self.mergeIncomingRoom(peer)
+            }
+            let peerTacticalSnapshot = (self.localRole == .phone) ? envelope.w2pTactical : envelope.p2wTactical
+            if let peer = peerTacticalSnapshot {
+                self.mergeIncomingTactical(peer)
+            }
+            let peerOtherSnapshot = (self.localRole == .phone) ? envelope.w2pOther : envelope.p2wOther
+            if let peer = peerOtherSnapshot {
+                self.mergeIncomingOther(peer)
             }
         }
+    }
+
+    /// Must be called on the main thread. Adopts an incoming peer Room snapshot: records it as
+    /// `peerRoom` (the WCSession-facing `shadow`), merges it into `localRoom` (`data`) via
+    /// `MergeEngine.mergeRoom`, and re-triggers this domain's own rolling-sync cycle exactly like
+    /// a local `Set()` change would.
+    private func mergeIncomingRoom(_ peer: RoomSnapshot) {
+        print("[WCSession \(localRole)] peerRoom received: \(debugDescribe(peer))")
+        self.peerRoom = peer
+
+        let (mergedLocal, localWins) = MergeEngine.mergeRoom(local: localRoom, peer: peer, localDevice: localRole)
+        let localChanged = !localRoom.isEquivalent(to: mergedLocal)
+        self.localRoom = mergedLocal
+        if localChanged {
+            print("[WCSession \(localRole)] localRoom merged (localWins=\(localWins)): \(debugDescribe(mergedLocal))")
+        }
+
+        if localWins || localChanged {
+            self.localRoom.syncTs = Date().timeIntervalSince1970
+            startRoomRollingSync()
+        } else {
+            stopRoomRollingSync()
+        }
+
+        if localChanged {
+            publishApplicationContext()
+        }
+        onRoomConvergenceStateChanged?(localRoom)
+    }
+
+    private func mergeIncomingTactical(_ peer: TacticalSnapshot) {
+        print("[WCSession \(localRole)] peerTactical received: \(debugDescribe(peer))")
+        self.peerTactical = peer
+
+        let (mergedLocal, localWins) = MergeEngine.mergeTactical(local: localTactical, peer: peer, localDevice: localRole)
+        let localChanged = !localTactical.isEquivalent(to: mergedLocal)
+        self.localTactical = mergedLocal
+        if localChanged {
+            print("[WCSession \(localRole)] localTactical merged (localWins=\(localWins)): \(debugDescribe(mergedLocal))")
+        }
+
+        if localWins || localChanged {
+            self.localTactical.syncTs = Date().timeIntervalSince1970
+            startTacticalRollingSync()
+        } else {
+            stopTacticalRollingSync()
+        }
+
+        if localChanged {
+            publishApplicationContext()
+        }
+        onTacticalConvergenceStateChanged?(localTactical)
+    }
+
+    private func mergeIncomingOther(_ peer: OtherSnapshot) {
+        print("[WCSession \(localRole)] peerOther received: \(debugDescribe(peer))")
+        self.peerOther = peer
+        saveOther(peer, key: peerOtherPersistenceKey)
+
+        let (mergedLocal, localWins) = MergeEngine.mergeOther(local: localOther, peer: peer, localDevice: localRole)
+        let localChanged = !localOther.isDomainEquivalent(to: mergedLocal)
+        self.localOther = mergedLocal
+        if localChanged {
+            print("[WCSession \(localRole)] localOther merged (localWins=\(localWins)): \(debugDescribe(mergedLocal))")
+        }
+
+        if localWins || localChanged {
+            self.localOther.syncTs = Date().timeIntervalSince1970
+            startOtherRollingSync()
+        } else {
+            stopOtherRollingSync()
+        }
+
+        saveLocalOther(localOther)
+        if localChanged {
+            publishApplicationContext()
+        }
+        onOtherConvergenceStateChanged?(localOther)
     }
 
     // MARK: - Local Persistence
 
-    private func saveLocalState(_ snapshot: LowSpeedSnapshot) {
+    private func saveOther(_ snapshot: OtherSnapshot, key: String) {
         var toSave = snapshot
         toSave.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
+        toSave.playerState = PlayerStateSnapshot()
         contextQueue.async {
             if let data = try? JSONEncoder().encode(toSave) {
-                UserDefaults.standard.set(data, forKey: self.localLSPersistenceKey)
+                UserDefaults.standard.set(data, forKey: key)
             }
         }
     }
-
-    private func savePeerState(_ snapshot: LowSpeedSnapshot) {
-        var toSave = snapshot
-        toSave.loginCycle = LoginCycleSnapshot(loginCycle: .inactive, loginCycleTs: 0)
-        contextQueue.async {
-            if let data = try? JSONEncoder().encode(toSave) {
-                UserDefaults.standard.set(data, forKey: self.peerLSPersistenceKey)
-            }
-        }
-    }
+    private func saveLocalOther(_ snapshot: OtherSnapshot) { saveOther(snapshot, key: localOtherPersistenceKey) }
 }
 
 #if canImport(WatchConnectivity)
@@ -595,15 +748,14 @@ extension WatchConnectivityManager: WCSessionDelegate {
             self.isWatchAppInstalled = session.isWatchAppInstalled
             #endif
         }
-        
+
         if activationState == .activated {
             let receivedContext = session.receivedApplicationContext
             if !receivedContext.isEmpty {
                 handleIncomingApplicationContext(receivedContext, isReplayedContext: true)
             } else {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self else { return }
-                    self.publishApplicationContext(local: self.localLS)
+                    self?.publishApplicationContext()
                 }
             }
         }
@@ -615,27 +767,30 @@ extension WatchConnectivityManager: WCSessionDelegate {
             self.isReachable = session.isReachable
             self.onReachabilityChanged?(session.isReachable)
         }
-        if session.isReachable, isRollingSync {
+        if session.isReachable {
             DispatchQueue.main.async { [weak self] in
-                self?.rollSyncTimestampAndPublish()
+                guard let self = self else { return }
+                if self.isRoomRollingSync { self.rollRoomSyncTimestampAndPublish() }
+                if self.isTacticalRollingSync { self.rollTacticalSyncTimestampAndPublish() }
+                if self.isOtherRollingSync { self.rollOtherSyncTimestampAndPublish() }
             }
         }
     }
-    
+
     #if os(iOS)
     public func sessionDidBecomeInactive(_ session: WCSession) {
         DispatchQueue.main.async {
             self.isActivated = (session.activationState == .activated)
         }
     }
-    
+
     public func sessionDidDeactivate(_ session: WCSession) {
         DispatchQueue.main.async {
             self.isActivated = false
         }
         WCSession.default.activate()
     }
-    
+
     public func sessionWatchStateDidChange(_ session: WCSession) {
         DispatchQueue.main.async {
             self.isPaired = session.isPaired
@@ -643,11 +798,11 @@ extension WatchConnectivityManager: WCSessionDelegate {
         }
     }
     #endif
-    
+
     public func session(_ session: WCSession, didReceiveApplicationContext applicationContext: [String : Any]) {
         handleIncomingApplicationContext(applicationContext)
     }
-    
+
     public func session(_ session: WCSession, didReceiveMessage message: [String : Any]) {
         handleIncomingApplicationContext(message)
     }
@@ -684,4 +839,3 @@ extension WatchConnectivityManager {
     }
 }
 #endif
-

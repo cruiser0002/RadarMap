@@ -79,12 +79,23 @@ final class TacticalPhoneCameraState: ObservableObject {
 public struct TacticalMKMapView: UIViewRepresentable {
     @ObservedObject var gameState: GameStateManager
     let onMapTapped: ((CLLocationCoordinate2D) -> Void)?
-    
+    // Whether this map view is the one currently on screen (vs. kept mounted but hidden behind
+    // the radar presentation). Kept mounted rather than added/removed by SwiftUI's `if` because
+    // repeatedly creating/destroying an MKMapView is a documented VectorKit crash source
+    // (CFRelease in TileGroupNotificationManager::~TileGroupNotificationManager, reproduces from
+    // toggling alone with no login/annotations/pan required). While not visible, `updateUIView`
+    // skips annotation sync and recentering, and the display link pauses, to keep the background
+    // cost down — MapKit's own tile/camera engine still runs, since there's no public API to
+    // fully suspend it, but our own per-frame/per-update work stops.
+    let isVisible: Bool
+
     public init(
         gameState: GameStateManager,
+        isVisible: Bool = true,
         onMapTapped: ((CLLocationCoordinate2D) -> Void)? = nil
     ) {
         self.gameState = gameState
+        self.isVisible = isVisible
         self.onMapTapped = onMapTapped
     }
     
@@ -166,6 +177,15 @@ public struct TacticalMKMapView: UIViewRepresentable {
     
     public func updateUIView(_ uiView: MKMapView, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.setVisible(isVisible, mapView: uiView)
+
+        // While hidden behind the radar presentation, skip recentering and annotation sync —
+        // there's nothing to show, and it's our main lever for keeping the always-mounted map's
+        // background cost down (see `isVisible`'s doc comment). `lastObservedCenterTrigger`/
+        // `lastObservedLockState` intentionally go stale while hidden, so becoming visible again
+        // re-detects any change that happened while hidden and recenters once, same as if the
+        // button had just been pressed.
+        guard isVisible else { return }
 
         // 1. Center-map button: event-driven re-tracking, not polled on a schedule.
         var needsRecenter = false
@@ -248,6 +268,7 @@ public struct TacticalMKMapView: UIViewRepresentable {
         private weak var activeMapView: MKMapView?
         var lastObservedCenterTrigger: Int
         var lastObservedLockState: Bool
+        private var lastAppliedVisibility = true
 
         // Guards against re-issuing setUserTrackingMode(.follow) while a previous recenter
         // animation is still in flight. Without this, rapid button taps restart the camera
@@ -509,11 +530,33 @@ public struct TacticalMKMapView: UIViewRepresentable {
             link.add(to: .main, forMode: .common)
             self.displayLink = link
         }
-        
+
+        /// Called every `updateUIView` with the map's current on-screen visibility. Pauses the
+        /// per-frame ruler display link and disables user interaction while hidden behind the
+        /// radar presentation — the cheap part of keeping this view's own background cost down
+        /// now that it stays mounted instead of being destroyed/recreated on every toggle.
+        func setVisible(_ visible: Bool, mapView: MKMapView) {
+            guard visible != lastAppliedVisibility else { return }
+            lastAppliedVisibility = visible
+            displayLink?.isPaused = !visible
+            mapView.isUserInteractionEnabled = visible
+        }
+
+
         func tearDown() {
             isTornDown = true
             displayLink?.invalidate()
             displayLink = nil
+            // Cancel any in-flight animated tracking-mode transition (e.g. from recenterOnUser)
+            // and detach the delegate synchronously, so MapKit's own async animation/callback
+            // machinery can't touch this view after it's removed from the hierarchy and starts
+            // deallocating — leaving an animation running across dismantle is a known MapKit
+            // crash source.
+            if let mapView = activeMapView {
+                mapView.setUserTrackingMode(.none, animated: false)
+                mapView.delegate = nil
+            }
+            activeMapView = nil
         }
         
         @objc private func readLiveRulerGeometry() {
@@ -545,11 +588,21 @@ public struct TacticalMKMapView: UIViewRepresentable {
         func recenterOnUser(in mapView: MKMapView) {
             guard !isRecentering else { return }
             isRecentering = true
-            // Optimistically unconfirmed until mapView(_:didChange:) reports .follow — if the
-            // transition silently never lands (e.g. no fresh location yet), the HUD button stays
-            // truthful ("unlocked") instead of assuming the request succeeded.
-            parent.gameState.isMapFollowConfirmed = false
-            mapView.setUserTrackingMode(.follow, animated: true)
+            // Deferred to the next run loop turn: `recenterOnUser` is called synchronously from
+            // `updateUIView`, which is itself inside a SwiftUI view-update pass. Mutating
+            // `gameState.isMapFollowConfirmed` (a `@Published` property) or calling
+            // `setUserTrackingMode` (which can synchronously invoke the `didChange mode:`
+            // delegate callback, itself mutating `@Published` state) from within that pass is
+            // exactly SwiftUI's "Publishing changes from within view updates" case — undefined
+            // behavior, not just a benign warning.
+            DispatchQueue.main.async { [weak self, weak mapView] in
+                guard let self = self, let mapView = mapView, !self.isTornDown else { return }
+                // Optimistically unconfirmed until mapView(_:didChange:) reports .follow — if the
+                // transition silently never lands (e.g. no fresh location yet), the HUD button stays
+                // truthful ("unlocked") instead of assuming the request succeeded.
+                self.parent.gameState.isMapFollowConfirmed = false
+                mapView.setUserTrackingMode(.follow, animated: true)
+            }
             // Self-healing fallback in case .follow never gets confirmed (e.g. no user
             // location yet) — don't let a missed confirmation permanently wedge the guard.
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in

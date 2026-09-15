@@ -21,8 +21,9 @@ final class MockRTDBTransport: RTDBTransport {
     /// plain Swift `Dictionary` and crashes intermittently (observed as `EXC_BAD_ACCESS` inside
     /// `Dictionary.Iterator.next()` while `notifyObservers` iterated `observers` mid-mutation).
     /// Recursive because `notifyObservers` invokes observer handlers synchronously, and some of
-    /// those handlers (e.g. `FirebaseSyncManager.fetchMemberDetails`) call back into this same
-    /// mock (`getValue`) from within that same call stack, on the same thread.
+    /// those handlers (e.g. `FirebaseSyncManager.applyMembersSnapshot`/`applyTacticalSnapshot`,
+    /// which read the current `Room`/`Tactical` `Get()` value) call back into this same mock
+    /// (`getValue`) from within that same call stack, on the same thread.
     private let lock = NSRecursiveLock()
 
     private var root: [String: Any] = [:]
